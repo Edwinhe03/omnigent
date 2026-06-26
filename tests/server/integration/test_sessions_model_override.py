@@ -44,7 +44,7 @@ async def test_patch_model_override_round_trips_through_snapshot(
 ) -> None:
     """PATCH writes the column and ``GET`` returns the same value.
 
-    This is the contract the ap-web picker and the REPL's ``/model``
+    This is the contract the web picker and the REPL's ``/model``
     command depend on for cross-surface sync: writing through one
     surface must be visible to the other on the very next snapshot.
     """
@@ -75,7 +75,7 @@ async def test_patch_model_override_clear_alias_resets(
     """``model_override: "default"`` is the explicit clear alias.
 
     Mirrors the REPL's ``/model default | off | reset`` semantics so
-    that ap-web's "clear" path and the REPL converge on the same wire
+    that web's "clear" path and the REPL converge on the same wire
     representation.
     """
     agent = await create_test_agent(client)
@@ -481,7 +481,7 @@ async def test_silent_patch_skips_claude_native_forward(
 ) -> None:
     """``silent: true`` persists but doesn't inject ``/model`` into tmux.
 
-    Without this, the ap-web sticky-pref handoff on a fresh session
+    Without this, the web sticky-pref handoff on a fresh session
     would render a leading "Command model X" slash-command item
     before the user has sent anything — the bug a user reported.
 

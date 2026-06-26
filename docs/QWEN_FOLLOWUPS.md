@@ -129,7 +129,7 @@ comments; this is the *what*, not the *how*.)
 - [ ] **Composer status line: real model + context ring (Web UI).** For
   native-qwen the composer's model/effort chip is currently **hidden** (web UI
   flag `nativeVendorOwnsModel` in `chatStore.sessionBindingPatch` →
-  `ComposerStatusLine` in `ap-web/src/pages/ChatPage.tsx`). It was showing the
+  `ComposerStatusLine` in `web/src/pages/ChatPage.tsx`). It was showing the
   bound spec's *default* model (`claude-sonnet-4-6`) because the qwen-native-ui
   spec sets no model and qwen picks its model inside the vendor TUI (OpenAI-compat
   env / qwen's own `/model`), so Omnigent's `llmModel` was a misleading default.
@@ -191,7 +191,7 @@ comments; this is the *what*, not the *how*.)
   token counts don't reflect the shrink. Omnigent already has the web-facing
   primitives — `response.compaction.in_progress` / `.completed` / `.failed`
   (`omnigent/runtime/compaction.py`, `omnigent/server/schemas.py:3158+`,
-  rendered by `ap-web` as the "Compacting…" spinner / compaction divider) — so
+  rendered by `web` as the "Compacting…" spinner / compaction divider) — so
   this is a *forwarder* change, not new UI.
   - **Verify the wire shape first (live E2E):** confirm whether qwen emits a
     structured compression marker on the `--json-file` dual-output stream (a

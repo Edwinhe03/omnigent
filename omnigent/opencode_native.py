@@ -56,7 +56,7 @@ from omnigent.native_terminal import bind_session_runner as _bind_session_runner
 from omnigent.native_terminal import url_component
 
 # Built-in native-UI agent name (matches the descriptor's
-# ``wrapper_agent_name`` and the ap-web native registry).
+# ``wrapper_agent_name`` and the web native registry).
 _AGENT_NAME = "opencode-native-ui"
 
 

@@ -1,7 +1,7 @@
 """E2E: starting a new session from the home composer ("/").
 
 The landing composer (``NewChatLandingScreen`` in
-``ap-web/src/shell/NewChatDialog.tsx``) owns session creation end to end:
+``web/src/shell/NewChatDialog.tsx``) owns session creation end to end:
 the textarea is the new session's first message and the footer chips —
 host, working directory, git worktree — plus the agent picker and its
 Advanced settings menu supply every create parameter. Hitting Send POSTs
