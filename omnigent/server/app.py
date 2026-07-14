@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import tarfile
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -39,12 +40,14 @@ from omnigent.harness_plugins import (
 from omnigent.resources import examples as _examples_resources
 from omnigent.runtime import (
     get_terminal_registry,
+    pending_elicitations,
     set_harness_process_manager,
     set_runner_router,
     set_runner_ws_factory,
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
+from omnigent.server import session_live_state
 from omnigent.server.auth import AuthProvider, SharingMode
 from omnigent.server.managed_hosts import ManagedSandboxConfig
 from omnigent.server.mcp_pool import ServerMcpPool
@@ -80,7 +83,7 @@ from omnigent.stores import (
     FileStore,
 )
 from omnigent.stores.comment_store import CommentStore
-from omnigent.stores.conversation_store import SessionConnectivity
+from omnigent.stores.conversation_store import SessionConnectivity, runner_seen_is_fresh
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
@@ -1353,6 +1356,11 @@ def create_app(
                 otel_publisher=server_metrics_otel,
             )
         )
+        # Runner ``runner_last_seen`` is refreshed per-tunnel from each
+        # runner tunnel's ping loop (``runner_tunnel._ping_loop``), inside
+        # that handler's ``workspace_scope`` — not from a lifespan sweep,
+        # which would run context-free (default workspace) over a
+        # workspace-blind registry and never stamp a multi-tenant row.
         try:
             yield
         finally:
@@ -1480,6 +1488,11 @@ def create_app(
     # request/route closure) the runner router so it can reach the bound
     # runner.
     set_server_runner_router(runner_router)
+    # Mirror per-session live state (turn status, pending-approval count,
+    # runner liveness) onto the conversations row so replicas that don't
+    # hold a session's runner tunnel serve the same sidebar fields.
+    session_live_state.configure(conversation_store)
+    pending_elicitations.set_count_persist_hook(session_live_state.persist_pending_count)
 
     @app.middleware("http")
     async def _record_server_metrics(
@@ -1699,8 +1712,10 @@ def create_app(
         for the single-id wrapper.
 
         ``runner_online`` is **strict**: ``True`` iff a runner tunnel
-        is currently registered for the session
-        (:func:`_runner_up`). It deliberately does **not** fold in
+        is currently registered for the session — on THIS replica's
+        registry, or (when another replica holds the tunnel) per the
+        fresh ``runner_last_seen`` stamp that replica persists on the
+        row (:func:`_runner_up`). It deliberately does **not** fold in
         host-relaunch optimism — a dead runner on a live host reads
         ``runner_online=False`` here, paired with ``host_online=True``
         so the open-session view can offer "send a message to wake
@@ -1724,10 +1739,20 @@ def create_app(
             missing row as reachable).
         """
         connectivity = conversation_store.get_session_connectivity(ids)
+        # One consistent clock for the whole batch's freshness checks.
+        liveness_now = int(time.time())
 
         def _runner_up(conn: SessionConnectivity) -> bool:
-            """A bound runner whose tunnel is currently registered."""
-            return conn.runner_id is not None and tunnel_registry.get(conn.runner_id) is not None
+            """A bound runner whose tunnel is registered here or fresh on the row."""
+            if conn.runner_id is None:
+                return False
+            if tunnel_registry.get(conn.runner_id) is not None:
+                return True
+            # Another replica may hold the tunnel: it stamps
+            # ``runner_last_seen`` on connect + a periodic sweep, and
+            # clears it on graceful disconnect; an ungraceful death goes
+            # stale and self-corrects after the TTL.
+            return runner_seen_is_fresh(conn.runner_last_seen, now=liveness_now)
 
         # Resolve host liveness for every bound host in one query, so
         # ``host_online`` can be reported even when the runner tunnel is
@@ -2159,6 +2184,9 @@ def create_app(
                 runner_id,
             )
             return
+        # Graceful disconnect: clear the persisted liveness stamp so other
+        # replicas flip offline immediately rather than after the TTL.
+        session_live_state.clear_runner_liveness(runner_id)
 
         # Direct by-runner lookup: read-after-write consistent (the
         # listing path may be served from an eventually-consistent
@@ -2236,6 +2264,10 @@ def create_app(
             _publish_runner_recovered_status,
         )
 
+        # Stamp liveness immediately so other replicas see the runner
+        # online before the first periodic sweep.
+        session_live_state.touch_runner_liveness([runner_id])
+
         # Direct by-runner lookup instead of list-everything-and-filter:
         # the listing path may be backed by an eventually-consistent
         # search index in alternate store backends, which cannot see a
@@ -2298,6 +2330,14 @@ def create_app(
                 runner_id,
                 routed.client,
                 conversation_store,
+            )
+            # Reconcile the persisted pending-elicitation count with this
+            # pod's live index. A runner that crashed with prompts parked
+            # leaves a stale row (no decrement is ever written on a crash),
+            # which the fresh index corrects to 0 here; a tunnel flap on the
+            # same pod resyncs the still-parked truth unchanged.
+            session_live_state.persist_pending_count(
+                conv.id, pending_elicitations.count_for(conv.id)
             )
             # A reconnect can land the runner back on an idle session with
             # no new turn (a transient WS blip; the runner process
