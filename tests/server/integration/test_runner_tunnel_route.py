@@ -1202,10 +1202,12 @@ async def test_ping_loop_restamps_runner_liveness(
     try:
         await _send_hello(communicator, route_app.registry)
         # The loop should re-stamp within a couple of shortened intervals.
+        # A recorded touch means the executor already applied the write
+        # (the recording store appends inside the store call), so the poll
+        # loop breaking is itself the completion signal — no drain needed.
         deadline = asyncio.get_event_loop().time() + 2.0
         while not touches and asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(0.02)
-        session_live_state.drain_for_tests()
         assert touches, "ping loop never re-stamped runner liveness"
         assert all(ids == [_RUNNER_ID] for ids in touches)
     finally:

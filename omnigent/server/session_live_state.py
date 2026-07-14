@@ -197,9 +197,3 @@ def clear_runner_liveness(runner_id: str) -> None:
     if _store is None:
         return
     _submit("runner_liveness_clear", _store.clear_runner_liveness, runner_id)
-
-
-def drain_for_tests() -> None:
-    """Block until every enqueued write has applied (test helper)."""
-    if _executor is not None:
-        _executor.submit(lambda: None).result()

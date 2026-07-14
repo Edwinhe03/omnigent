@@ -6,14 +6,41 @@ persisted count through its hook. These writes are what let a replica
 that does NOT hold a session's runner tunnel serve the sidebar's live
 fields, so the contract under test is "every real transition reaches the
 store exactly once".
+
+Writes land on a background single-worker executor, so each test waits
+on the observable effect (the recording store's captured writes) with a
+short polling deadline — the same shape as the host-tunnel route tests'
+``_wait_*`` helpers — rather than reaching into the module's executor.
 """
 
 from __future__ import annotations
+
+import time
 
 import pytest
 
 from omnigent.runtime import pending_elicitations
 from omnigent.server import session_live_state
+
+
+def _wait_until(predicate, *, timeout_s: float = 2.0) -> None:
+    """Poll until *predicate* holds or the deadline elapses.
+
+    The live-state writes are applied on a background executor thread, so
+    a test asserting on their effect must wait for that thread rather than
+    read synchronously. Returning on timeout (instead of raising) lets the
+    caller's own assertion produce the informative failure — including the
+    "should NOT have happened" cases where the predicate never becomes
+    true by design.
+
+    :param predicate: Zero-arg callable returning truthy when done.
+    :param timeout_s: Max seconds to poll before giving up.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.005)
 
 
 class _RecordingStore:
@@ -60,7 +87,7 @@ def test_persist_live_status_dedupes_transitions(recording_store: _RecordingStor
     session_live_state.persist_live_status("conv_1", "running")
     session_live_state.persist_live_status("conv_1", "idle")
     session_live_state.persist_live_status("conv_2", "idle")
-    session_live_state.drain_for_tests()
+    _wait_until(lambda: len(recording_store.status_writes) >= 3)
     assert recording_store.status_writes == [
         ("conv_1", "running"),
         ("conv_1", "idle"),
@@ -88,7 +115,7 @@ def test_pending_count_hook_persists_publish_and_resolve(
     pending_elicitations.resolve("conv_1", "elicit_1")
     pending_elicitations.resolve("conv_1", "elicit_1")  # idempotent re-resolve
     pending_elicitations.resolve("conv_1", "elicit_2")
-    session_live_state.drain_for_tests()
+    _wait_until(lambda: len(recording_store.pending_writes) >= 4)
     assert recording_store.pending_writes == [
         ("conv_1", 1),
         ("conv_1", 2),
@@ -104,19 +131,21 @@ def test_runner_liveness_touch_and_clear_pass_through(
     session_live_state.touch_runner_liveness(["runner_a", "runner_b"])
     session_live_state.touch_runner_liveness([])
     session_live_state.clear_runner_liveness("runner_a")
-    session_live_state.drain_for_tests()
+    _wait_until(lambda: recording_store.touches and recording_store.clears)
     assert recording_store.touches == [["runner_a", "runner_b"]]
     assert recording_store.clears == ["runner_a"]
 
 
 def test_unconfigured_module_is_a_no_op() -> None:
-    """Without a wired store (runner process, most tests) nothing runs."""
+    """Without a wired store (runner process, most tests) nothing runs.
+
+    No store means no executor work is enqueued; the calls simply return.
+    """
     session_live_state.configure(None)
     session_live_state.persist_live_status("conv_1", "running")
     session_live_state.persist_pending_count("conv_1", 1)
     session_live_state.touch_runner_liveness(["runner_a"])
     session_live_state.clear_runner_liveness("runner_a")
-    session_live_state.drain_for_tests()
 
 
 def test_write_runs_in_callers_workspace_scope(recording_store: _RecordingStore) -> None:
@@ -144,10 +173,11 @@ def test_write_runs_in_callers_workspace_scope(recording_store: _RecordingStore)
 
     with workspace_scope(4242):
         session_live_state.persist_live_status("conv_1", "running")
-    # Leave the scope BEFORE the worker runs, to prove the value was
+    # The scope is left BEFORE the worker runs (the ``with`` block is
+    # already closed here), so a passing assertion proves the value was
     # captured at submit time rather than read live off the worker thread
     # (which is always at the default workspace).
-    session_live_state.drain_for_tests()
+    _wait_until(lambda: bool(seen))
 
     assert seen == [4242], "write thread did not observe the caller's bound workspace"
 
@@ -174,10 +204,18 @@ def test_dropped_write_evicts_dedupe_entry_for_retry() -> None:
     session_live_state.configure(store)  # type: ignore[arg-type]
     try:
         session_live_state.persist_live_status("conv_1", "running")
-        session_live_state.drain_for_tests()  # first attempt raises, entry evicted
-        # Same value again: without eviction this would be deduped to a no-op.
+        # Wait for the EVICTION, not just the first call: the worker
+        # appends to ``calls`` and only then runs the failure callback that
+        # drops the dedupe entry. Gating the retry on "conv_1" leaving the
+        # dedupe map (the exact contract under test) removes the race where
+        # the second publish races the eviction and gets deduped away.
+        _wait_until(lambda: "conv_1" not in session_live_state._last_status)
+        assert "conv_1" not in session_live_state._last_status, "dropped write did not evict"
+
+        # Same value again: without the eviction above this would dedupe to
+        # a no-op; because the entry was cleared, the retry re-attempts.
         session_live_state.persist_live_status("conv_1", "running")
-        session_live_state.drain_for_tests()
+        _wait_until(lambda: bool(store.status_writes))
     finally:
         session_live_state.configure(None)
 

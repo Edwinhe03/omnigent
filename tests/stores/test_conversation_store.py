@@ -4779,6 +4779,8 @@ def test_live_state_writes_via_chokepoint_land_in_scoped_workspace(
     under the same scope. On the pre-fix code the reads return ``None`` /
     unchanged; with context propagation they observe the writes.
     """
+    import time
+
     from omnigent.db.db_models import workspace_scope
     from omnigent.server import session_live_state
 
@@ -4792,12 +4794,22 @@ def test_live_state_writes_via_chokepoint_land_in_scoped_workspace(
             session_live_state.touch_runner_liveness(["runner_scoped"])
             session_live_state.persist_live_status(conv.id, "running")
             session_live_state.persist_pending_count(conv.id, 3)
-            # Block until the executor has applied every enqueued write.
-            session_live_state.drain_for_tests()
 
-            # Reads under the SAME scope must observe the writes. On the
-            # buggy path the writes landed at workspace 0, so these would
-            # be None / unchanged here at workspace ``ws``.
+            # The writes land on the chokepoint's background executor, so
+            # poll the row (under the SAME scope) until they apply. On the
+            # buggy path they land at workspace 0, so this stays None at
+            # workspace ``ws`` and the wait times out into the assertion.
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if (
+                    conversation_store.get_session_connectivity([conv.id])[
+                        conv.id
+                    ].runner_last_seen
+                    is not None
+                ):
+                    break
+                time.sleep(0.01)
+
             connectivity = conversation_store.get_session_connectivity([conv.id])
             assert connectivity[conv.id].runner_last_seen is not None, (
                 "runner_last_seen not persisted under non-zero workspace — "
