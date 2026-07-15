@@ -23,7 +23,7 @@ from omnigent.runtime import pending_elicitations
 from omnigent.server import session_live_state
 
 
-def _wait_until(predicate, *, timeout_s: float = 2.0) -> None:
+def _wait_until(predicate, *, timeout_s: float = 10.0) -> None:
     """Poll until *predicate* holds or the deadline elapses.
 
     The live-state writes are applied on a background executor thread, so
@@ -32,6 +32,10 @@ def _wait_until(predicate, *, timeout_s: float = 2.0) -> None:
     caller's own assertion produce the informative failure — including the
     "should NOT have happened" cases where the predicate never becomes
     true by design.
+
+    A passing predicate returns immediately, so the ceiling is only hit on
+    a genuine failure; it's set generously (not ~2s) so a loaded CI runner
+    doesn't spuriously time out before the background worker drains.
 
     :param predicate: Zero-arg callable returning truthy when done.
     :param timeout_s: Max seconds to poll before giving up.

@@ -4795,20 +4795,28 @@ def test_live_state_writes_via_chokepoint_land_in_scoped_workspace(
             session_live_state.persist_live_status(conv.id, "running")
             session_live_state.persist_pending_count(conv.id, 3)
 
-            # The writes land on the chokepoint's background executor, so
-            # poll the row (under the SAME scope) until they apply. On the
-            # buggy path they land at workspace 0, so this stays None at
-            # workspace ``ws`` and the wait times out into the assertion.
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                if (
-                    conversation_store.get_session_connectivity([conv.id])[
-                        conv.id
-                    ].runner_last_seen
-                    is not None
-                ):
-                    break
-                time.sleep(0.01)
+            # All three writes land on the chokepoint's ordered single-worker
+            # executor, so poll the row (under the SAME scope) until ALL of
+            # them are observed — not just the first. Waiting only on
+            # ``runner_last_seen`` (the first enqueued) races the later two:
+            # on a loaded runner the read can beat the ``live_status`` /
+            # ``pending`` writes still queued behind it. On the buggy path the
+            # writes land at workspace 0, so these stay None at workspace
+            # ``ws`` and the wait times out into the assertions below.
+            def _all_persisted() -> bool:
+                conn = conversation_store.get_session_connectivity([conv.id]).get(conv.id)
+                row = conversation_store.get_conversation(conv.id)
+                return (
+                    conn is not None
+                    and conn.runner_last_seen is not None
+                    and row is not None
+                    and row.live_status == "running"
+                    and row.pending_elicitation_count == 3
+                )
+
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not _all_persisted():
+                time.sleep(0.02)
 
             connectivity = conversation_store.get_session_connectivity([conv.id])
             assert connectivity[conv.id].runner_last_seen is not None, (
