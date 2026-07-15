@@ -2050,6 +2050,53 @@ async def test_list_sessions_exposes_pending_elicitations_count(
     pending_elicitations.reset_for_tests()
 
 
+async def test_list_sessions_pending_count_falls_back_to_row_for_bound_session(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """A runner-bound session surfaces its persisted pending count when the
+    local in-memory index is empty (the cross-replica fallback).
+
+    The tunnel-holding replica writes ``pending_elicitation_count`` to the
+    row; a replica that does NOT hold the tunnel has an empty
+    ``pending_elicitations`` index for that session and must fall back to
+    the row so a parked approval isn't hidden. ``_build_session_list_item``
+    only consults the row when the session is runner-bound — this pins that
+    fallback fires for a bound session, complementing
+    ``test_list_sessions_exposes_pending_elicitations_count`` (which covers
+    the index-authoritative, unbound path).
+
+    :param client: Test HTTP client backed by the real app.
+    :param db_uri: The app's DB, opened directly to seed the row the way a
+        different replica's live-state write would have.
+    """
+    from omnigent.runtime import pending_elicitations
+    from omnigent.stores.conversation_store.sqlalchemy_store import (
+        SqlAlchemyConversationStore,
+    )
+
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    session_id = session["id"]
+
+    # Bind a runner and seed the persisted count directly — simulating the
+    # tunnel-holding replica's row write. THIS replica's index stays empty
+    # (no record_publish here), so a correct read falls back to the row.
+    pending_elicitations.reset_for_tests()
+    store = SqlAlchemyConversationStore(db_uri)
+    assert store.set_runner_id(session_id, "runner_other_replica")
+    store.set_pending_elicitation_count(session_id, 2)
+
+    resp = await client.get("/v1/sessions")
+    assert resp.status_code == 200
+    row = next((r for r in resp.json()["data"] if r["id"] == session_id), None)
+    assert row is not None
+    # Index empty + row=2 + runner-bound → fallback surfaces the row's count.
+    assert row["pending_elicitations_count"] == 2
+
+    store.set_pending_elicitation_count(session_id, 0)
+
+
 async def test_get_session_includes_runner_online(
     client: httpx.AsyncClient,
 ) -> None:
