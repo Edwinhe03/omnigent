@@ -43,17 +43,29 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
+from omnigent.db.enum_codecs import SESSION_LIVE_STATUS
+
 if TYPE_CHECKING:
     from omnigent.stores import ConversationStore
 
 _logger = logging.getLogger(__name__)
 
+# Statuses the live-status codec can encode. Derived from the codec's own
+# map so the two never drift. ``SessionStatusEvent.status`` additionally
+# permits ``"launching"`` (runner-local sub-agent bookkeeping that never
+# rides as an external ``session.status`` today), which the codec can't
+# encode — see ``persist_live_status``.
+_KNOWN_LIVE_STATUSES: frozenset[str] = frozenset(SESSION_LIVE_STATUS)
+
 _store: ConversationStore | None = None
 # Single worker => writes apply in submission order (see module docstring).
 _executor: ThreadPoolExecutor | None = None
-# Last value persisted per session, for dedupe. Unbounded like the
+# Last status seen per session, for dedupe — the value whose write was
+# enqueued, or (for an unencodable status) the value whose warning was
+# already logged, so repeats of either are suppressed. Unbounded like the
 # in-memory caches these writes mirror; entries live for the process.
 _last_status: dict[str, str] = {}
+# Last count persisted per session, for dedupe.
 _last_pending: dict[str, int] = {}
 
 
@@ -119,7 +131,24 @@ def persist_live_status(session_id: str, status: str) -> None:
     :param session_id: Session/conversation identifier.
     :param status: One of ``idle`` / ``running`` / ``waiting`` / ``failed``.
     """
-    if _store is None or _last_status.get(session_id) == status:
+    if _store is None:
+        return
+    if status not in _KNOWN_LIVE_STATUSES:
+        # ``SessionStatusEvent.status`` permits values the live-status codec
+        # can't encode (``"launching"``), and the relay forwards raw event
+        # statuses. Drop unknown values here rather than at the store: the
+        # encode would raise, and the best-effort ``_evict`` on that failure
+        # would clear the dedupe entry, so every republish would re-attempt
+        # and re-log. Warn once (this transition is deduped away) and skip.
+        if _last_status.get(session_id) != status:
+            _logger.warning(
+                "session live-state: skipping unencodable status %r for %s",
+                status,
+                session_id,
+            )
+        _last_status[session_id] = status
+        return
+    if _last_status.get(session_id) == status:
         return
     _last_status[session_id] = status
 

@@ -223,6 +223,28 @@ def test_dropped_write_evicts_dedupe_entry_for_retry() -> None:
     assert store.status_writes == [("conv_1", "running")], "retry never landed"
 
 
+def test_unencodable_status_is_dropped_before_enqueue(
+    recording_store: _RecordingStore,
+) -> None:
+    """A status the codec can't encode never reaches the store.
+
+    ``SessionStatusEvent.status`` permits ``"launching"``, which the
+    live-status codec (``SESSION_LIVE_STATUS``) can't encode, and the SSE
+    relay forwards raw event statuses. Enqueueing it would make the store
+    write raise, whose best-effort failure hook clears the dedupe entry, so
+    every republish would re-attempt and re-warn. ``persist_live_status``
+    instead drops an unknown status before the enqueue: no store write, and
+    a later *known* status for the same session still persists normally.
+    """
+    session_live_state.persist_live_status("conv_1", "launching")  # unknown
+    session_live_state.persist_live_status("conv_1", "launching")  # repeat, deduped
+    session_live_state.persist_live_status("conv_1", "running")  # known → persists
+    _wait_until(lambda: bool(recording_store.status_writes))
+
+    # Only the encodable status was ever enqueued; "launching" never was.
+    assert recording_store.status_writes == [("conv_1", "running")]
+
+
 @pytest.mark.asyncio
 async def test_liveness_pass_zeroes_pending_count_for_offline_runner() -> None:
     """A stale persisted pending count can't light a phantom inbox badge.
