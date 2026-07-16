@@ -157,6 +157,11 @@ class HostConnection:
     :param pending_stops: Per-``request_id`` futures for
         in-flight ``host.stop_runner`` requests. Resolved when
         the host sends ``host.stop_runner_result``.
+    :param pending_runner_status: Per-``request_id`` futures for
+        in-flight ``host.runner_status`` queries. Resolved when the
+        host sends ``host.runner_status_result``. Values carry the
+        single ``status`` field (``"alive"`` / ``"dead"`` /
+        ``"unknown"``).
     :param pending_stats: Per-``request_id`` futures for in-flight
         ``host.stat`` requests. Resolved when the host sends
         ``host.stat_result``. The dict values carry the full
@@ -185,6 +190,12 @@ class HostConnection:
         host sends ``host.create_dir_result``. Values carry the
         result fields (``status``, ``path``, ``error``). Same
         ``Any`` typing rationale as ``pending_stats``.
+    :param pending_fs_requests: Per-``request_id`` futures for
+        in-flight ``host.fs_request`` reads (the workspace file
+        panel served from the host while the runner is offline).
+        Resolved when the host sends ``host.fs_result``. Values
+        carry ``status``, ``payload``, ``error_status``,
+        ``error_code``, and ``error``.
     """
 
     host_id: str
@@ -198,6 +209,9 @@ class HostConnection:
         default_factory=dict,
     )
     pending_stops: dict[str, asyncio.Future[dict[str, str | None]]] = field(
+        default_factory=dict,
+    )
+    pending_runner_status: dict[str, asyncio.Future[dict[str, str | None]]] = field(
         default_factory=dict,
     )
     pending_stats: dict[str, asyncio.Future[dict[str, Any]]] = field(
@@ -216,6 +230,9 @@ class HostConnection:
         default_factory=dict,
     )
     pending_create_dirs: dict[str, asyncio.Future[dict[str, Any]]] = field(
+        default_factory=dict,
+    )
+    pending_fs_requests: dict[str, asyncio.Future[dict[str, Any]]] = field(
         default_factory=dict,
     )
 
@@ -315,6 +332,18 @@ class HostRegistry:
         if conn is None:
             return False
         return conn.hello.telemetry_opt_out
+
+    def get_host_installation_id(self, host_id: str) -> str | None:
+        """Return the installation ID the host advertised in its hello frame.
+
+        :param host_id: Host identifier, e.g. ``"host_a1b2c3d4..."``.
+        :returns: The host's installation ID, or ``None`` when offline or
+            not set.
+        """
+        conn = self.get(host_id)
+        if conn is None:
+            return None
+        return conn.hello.installation_id
 
     def send_text(self, conn: HostConnection, data: str) -> None:
         """Enqueue a text frame for sending to the host.

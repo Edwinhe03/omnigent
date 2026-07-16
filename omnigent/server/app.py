@@ -16,6 +16,7 @@ from typing import Any, Protocol
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import StatementError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import Response
@@ -23,6 +24,7 @@ from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from omnigent._platform import resolve_repo_symlink
+from omnigent.db.db_models import InvalidUuidError
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_plugins import (
     ANTIGRAVITY_NATIVE_CODING_AGENT,
@@ -64,17 +66,20 @@ from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
 from omnigent.server.routes.default_policies import create_default_policies_router
 from omnigent.server.routes.harnesses import create_harnesses_router
+from omnigent.server.routes.imports import create_imports_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
 from omnigent.server.routes.session_policies import create_session_policies_router
 from omnigent.server.routes.sessions import (
     SessionLiveness,
+    announce_hosts_changed,
     create_sessions_router,
     set_server_runner_router,
 )
 from omnigent.server.routes.sharing import create_sharing_router
 from omnigent.server.routes.terminal_attach import create_terminal_attach_router
+from omnigent.server.scheduled import ScheduledTaskScheduler
 from omnigent.server.ws_origin import WebSocketOriginMiddleware
 from omnigent.stores import (
     AgentStore,
@@ -87,6 +92,7 @@ from omnigent.stores.conversation_store import SessionConnectivity, runner_seen_
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
+from omnigent.stores.scheduled_task_store import ScheduledTaskStore
 
 _logger = logging.getLogger(__name__)
 
@@ -388,7 +394,9 @@ def _ensure_builtin_agent(
     existing = agent_store.get_by_name(name)
     if existing is not None:
         new_loc = f"{existing.id}/{bundle_hash}"
-        if existing.bundle_location == new_loc:
+        # Sha-segment compare: legacy rows keep an ``ag_``-prefixed left
+        # segment (physical artifact key); only the sha encodes content.
+        if existing.bundle_location.rsplit("/", 1)[-1] == bundle_hash:
             # Row current; evict so a lagging replica's stale cache reloads the bundle.
             agent_cache.evict(existing.id)
             return
@@ -1063,6 +1071,18 @@ def _ensure_default_polly_agent(
     )
 
 
+async def _placeholder_on_fire(scheduled_task_id: str) -> None:
+    """Default scheduler fire callback (no-op placeholder that logs).
+
+    Exercises the ``on_fire`` seam without side effects: the real fire path
+    (creating an agent session for the task) supplies its own callback.
+    """
+    _logger.info(
+        "scheduler: task %s is due (no fire path wired yet — skipping)",
+        scheduled_task_id,
+    )
+
+
 def create_app(
     agent_store: AgentStore,
     file_store: FileStore,
@@ -1073,6 +1093,7 @@ def create_app(
     comment_store: CommentStore | None = None,
     policy_store: PolicyStore | None = None,
     permission_store: PermissionStore | None = None,
+    scheduled_task_store: ScheduledTaskStore | None = None,
     auth_provider: AuthProvider | None = None,
     host_store: HostStore | None = None,
     account_store: Any | None = None,  # SqlAlchemyAccountStore — accounts mode only
@@ -1112,6 +1133,11 @@ def create_app(
         CRUD endpoints.
     :param permission_store: Store for session-level access grants.
         ``None`` disables permission checks (all access allowed).
+    :param scheduled_task_store: Store backing the recurring-task
+        scheduler. When provided, the FastAPI lifespan
+        starts an :class:`ScheduledTaskScheduler` that arms a timer per
+        active task and fires the injected ``on_fire`` callback on
+        schedule. ``None`` disables the scheduler entirely.
     :param auth_provider: Pre-constructed auth provider for
         identity resolution. ``None`` disables auth (anonymous
         access). **Required** when ``permission_store`` is
@@ -1361,9 +1387,35 @@ def create_app(
         # that handler's ``workspace_scope`` — not from a lifespan sweep,
         # which would run context-free (default workspace) over a
         # workspace-blind registry and never stamp a multi-tenant row.
+
+        # Recurring-task scheduler: arm a timer per active
+        # scheduled task and fire the injected ``on_fire`` callback on
+        # schedule. The default callback is a no-op that logs; a real fire
+        # path (creating a session) can be injected in its place.
+        scheduled_task_scheduler: ScheduledTaskScheduler | None = None
+        if scheduled_task_store is not None:
+            scheduled_task_scheduler = ScheduledTaskScheduler(
+                store=scheduled_task_store,
+                on_fire=_placeholder_on_fire,
+            )
+            app_inst.state.scheduled_task_scheduler = scheduled_task_scheduler
+            # Scheduled tasks are a non-critical subsystem: a failure loading the
+            # schedule (e.g. a DB error in list_active()) must not take down
+            # server boot. Log and continue with the scheduler unstarted.
+            try:
+                await scheduled_task_scheduler.start()
+            except Exception as exc:
+                _logger.exception(
+                    "scheduled task scheduler failed to start; continuing "
+                    "without recurring tasks (%s)",
+                    exc,
+                )
+
         try:
             yield
         finally:
+            if scheduled_task_scheduler is not None:
+                scheduled_task_scheduler.stop()
             metrics_publish_task.cancel()
             with suppress(asyncio.CancelledError):
                 await metrics_publish_task
@@ -1574,6 +1626,45 @@ def create_app(
         return JSONResponse(
             status_code=exc.http_status,
             content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
+    @app.exception_handler(StatementError)
+    async def _handle_statement_error(
+        request: Request,  # noqa: ARG001 — FastAPI exception-handler signature requires (request, exc); we only use exc
+        exc: StatementError,
+    ) -> JSONResponse:
+        """
+        Map a malformed-id bind failure to 404; everything else stays a 500.
+
+        A ``Uuid16`` column rejects an id that is not a 32-char hex uuid (after
+        stripping any legacy prefix), raising :class:`InvalidUuidError` wrapped
+        in ``StatementError``. Such an id cannot address any row, so — like the
+        pre-binary varchar behaviour, where it simply didn't match — treat it as
+        not-found instead of an internal error. Any other statement error (real
+        DB failure) falls through to the standard 500 shape.
+
+        :param request: The incoming request (unused — FastAPI signature requirement).
+        :param exc: The SQLAlchemy statement error.
+        :returns: 404 for a malformed id, otherwise a 500 JSON response.
+        """
+        if isinstance(exc.orig, InvalidUuidError):
+            # Keep a trace: a malformed id is usually a client bug, but this
+            # branch would otherwise mask a server-side id-generation defect
+            # as a routine 404.
+            _logger.debug("Malformed id mapped to 404: %s", exc.orig)
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"code": ErrorCode.NOT_FOUND, "message": "Not found."}},
+            )
+        _logger.error("Database error: %s", exc, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "code": ErrorCode.INTERNAL_ERROR,
+                    "message": "An internal error occurred.",
+                },
+            },
         )
 
     @app.exception_handler(Exception)
@@ -2056,9 +2147,23 @@ def create_app(
             # (host.runner_exited) as last_task_error so a reload still
             # renders the error banner after the live push is gone.
             runner_exit_reports=runner_exit_reports,
+            # Lets the filesystem endpoints fall back to reading the
+            # workspace over the host tunnel when the runner is offline
+            # (the file panel stays live without waking the agent).
+            host_registry=host_registry,
         ),
         prefix="/v1",
         tags=["sessions"],
+    )
+    app.include_router(
+        create_imports_router(
+            conversation_store,
+            agent_store,
+            auth_provider=auth_provider,
+            permission_store=permission_store,
+        ),
+        prefix="/v1",
+        tags=["imports"],
     )
     # Read-only built-in agent discovery (designs/BUILTIN_AGENTS.md).
     # Successor to the removed GET /api/agents list; lists only
@@ -2398,6 +2503,12 @@ def create_app(
         from omnigent.server.routes.host_tunnel import create_host_tunnel_router
         from omnigent.server.routes.hosts import create_hosts_router
 
+        async def _on_host_connect(_host_id: str, owner: str | None) -> None:
+            announce_hosts_changed(owner)
+
+        async def _on_host_disconnect(_host_id: str, owner: str | None) -> None:
+            announce_hosts_changed(owner)
+
         app.include_router(
             create_host_tunnel_router(
                 host_registry,
@@ -2405,6 +2516,8 @@ def create_app(
                 auth_provider=auth_provider,
                 runner_exit_reports=runner_exit_reports,
                 on_runner_exited=_on_runner_exited,
+                on_host_connect=_on_host_connect,
+                on_host_disconnect=_on_host_disconnect,
             ),
             prefix="/v1",
             tags=["hosts"],

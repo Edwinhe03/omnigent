@@ -1,7 +1,7 @@
 """add live-state columns to omnigent_conversation_metadata
 
 Revision ID: d7f1a2b3c4e5
-Revises: 9d820f91deef
+Revises: a7b3c4d5e6f7
 Create Date: 2026-07-14 00:00:00.000000
 
 Adds three per-session live-state columns so any server replica can
@@ -33,7 +33,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "d7f1a2b3c4e5"
-down_revision: str | None = "9d820f91deef"
+down_revision: str | None = "a7b3c4d5e6f7"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

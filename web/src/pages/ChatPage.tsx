@@ -599,8 +599,8 @@ export function ChatPage() {
     isLoading: agentsLoading,
     error: agentsError,
     refetch: refetchAgents,
-  } = useAgents();
-  const { data: conversationsData } = useConversations();
+  } = useAgents({ enabled: !urlConvId });
+  const { data: conversationsData } = useConversations("", true);
   const conversations = useMemo(
     () => conversationsData?.pages.flatMap((p) => p.data),
     [conversationsData],
@@ -739,10 +739,9 @@ export function ChatPage() {
   // for legacy conversations without an agent binding — leave the
   // picker alone in those cases.
   //
-  // If the bound agent isn't in the cached list (e.g. a new agent was
-  // registered by a fresh `omnigent run` after the page loaded),
-  // refetch so the list stays current. staleTime: Infinity means the
-  // query won't self-update, so we do it manually on demand.
+  // On the landing page, if the bound agent isn't in the cached list
+  // (e.g. a new agent registered by a fresh `omnigent run` after load),
+  // refetch on demand — useAgents is only enabled there.
   useEffect(() => {
     if (boundAgentId === null) return;
     setSelectedAgentId(boundAgentId);
@@ -4367,13 +4366,15 @@ export function Composer({
       // the user choose there. "/model <name>" takes the builtin route below to
       // setModel — the same write the picker makes.
       //
-      // opencode is excluded: it surfaces showModels (the pill mirrors its live
-      // TUI model) but ships no web model options, so intercepting bare "/model"
-      // would pop an empty dropdown and swallow the command. Fall through to the
-      // builtin "/model" handler below, which surfaces the current model as a
-      // read-only hint. ("/model <name>" still routes to setModel there —
-      // opencode reads model_override on the next web-injected turn.)
-      if (cmd === "/model" && !arg && showModels && modelPickerKind !== "opencode") {
+      // opencode-native now surfaces server-backed model options too, so bare
+      // "/model" opens the picker when options are loaded. When the options are
+      // still empty (e.g. the runner catalog hasn't arrived yet), fall through
+      // to the builtin "/model" handler, which surfaces the current model as a
+      // read-only hint instead of popping an empty dropdown. ("/model <name>"
+      // still routes to setModel there — opencode reads model_override on the
+      // next web-injected turn.)
+      const canOpenModelPicker = modelPickerKind !== "opencode" || codexModelOptions.length > 0;
+      if (cmd === "/model" && !arg && showModels && canOpenModelPicker) {
         dirtyRef.current = true;
         setValue("");
         setCommandError(null);
@@ -5006,8 +5007,12 @@ export function computeIsWorking(sessionStatus: SessionStatus): boolean {
  * @param options.hasPendingElicitation - ``true`` when an elicitation prompt
  *   owns the in-progress slot and should suppress the shimmer/pinned pill.
  * @param options.runnerOnline - Runner liveness: ``true`` online, ``false``
- *   known offline, ``undefined`` before the health poll resolves. Only known
- *   offline suppresses the indicator.
+ *   known offline, ``undefined`` before the health poll resolves. A known-offline
+ *   runner suppresses the indicator ONLY when the session is otherwise idle: a
+ *   session actively reporting ``running``/``waiting`` cannot have an offline
+ *   runner, so its live status wins over the ``/health`` poll — which polls at a
+ *   10s cadence and reads stale-offline during the runner's connect window on a
+ *   fresh session's first turn (it would otherwise hide "Working…" for seconds).
  * @param options.backgroundTaskCount - Background shells still running after
  *   the turn ended. A claude-native turn settles to ``idle`` (the PTY-activity
  *   watcher's edge) even while shells run, so the bare status alone would hide
@@ -5023,9 +5028,14 @@ export function computeShowsWorking(
     backgroundTaskCount?: number;
   },
 ): boolean {
-  if (options.runnerOnline === false) return false;
   if (options.hasPendingElicitation) return false;
-  return computeIsWorking(sessionStatus) || (options.backgroundTaskCount ?? 0) > 0;
+  const isWorking = computeIsWorking(sessionStatus);
+  // A running/waiting session is proof the runner is up, so a stale
+  // poll-derived ``runnerOnline === false`` must not suppress it. Only gate on
+  // known-offline for the not-actively-working case (e.g. a background-shell
+  // tally on an idle session).
+  if (options.runnerOnline === false && !isWorking) return false;
+  return isWorking || (options.backgroundTaskCount ?? 0) > 0;
 }
 
 /**
@@ -5361,14 +5371,15 @@ function AgentPicker({
   const sessionModelOverride = useChatStore((s) => s.sessionModelOverride);
   const llmModel = useChatStore((s) => s.llmModel);
 
-  // Codex, cursor, kiro, and pi all populate the picker from the
+  // Codex, cursor, kiro, pi, and opencode all populate the picker from the
   // server-provided ``codexModelOptions`` channel (the snapshot's
   // ``model_options`` field); claude uses the static local catalog.
   const usesServerModelOptions =
     modelPickerKind === "codex" ||
     modelPickerKind === "cursor" ||
     modelPickerKind === "kiro" ||
-    modelPickerKind === "pi";
+    modelPickerKind === "pi" ||
+    modelPickerKind === "opencode";
   const modelOptions: ReadonlyArray<{ id: string; label?: string; displayName?: string }> =
     modelPickerKind === "claude"
       ? CLAUDE_NATIVE_MODELS
