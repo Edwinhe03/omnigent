@@ -43,6 +43,17 @@ describe("basenamedRouting Link rebasing", () => {
     // Same invariant for the object form's pathname.
     expect(renderRebasedLink("/mount", { pathname: "/mount/c/abc" })).toBe("/mount/c/abc");
   });
+
+  it("does not double-prefix a based path that carries a query or hash", () => {
+    // The Settings "Back to Omnigent" link records its return target as
+    // `pathname + search` from an absolute `useLocation()`. On the home page
+    // that pathname IS the basename, so with a workspace `?o=` param it reads as
+    // `/mount?o=123` — which the guard must still recognize as already-based
+    // rather than double-prefix to `/mount/mount?o=123` (the broken back arrow).
+    expect(renderRebasedLink("/mount", "/mount?o=123")).toBe("/mount?o=123");
+    expect(renderRebasedLink("/mount", "/mount#section")).toBe("/mount#section");
+    expect(renderRebasedLink("/mount", "/mount/c/abc?o=123")).toBe("/mount/c/abc?o=123");
+  });
 });
 
 describe("rebasePath primitive", () => {
@@ -60,5 +71,15 @@ describe("rebasePath primitive", () => {
 
   it("does not double-prefix a path already under the basename", () => {
     expect(basenamedRouting("/mount").rebasePath("/mount/c/abc")).toBe("/mount/c/abc");
+  });
+
+  it("guards on the pathname alone, ignoring a trailing query or hash", () => {
+    // A based path whose pathname equals the basename plus a `?query`/`#hash`
+    // must pass through — the guard splits the query off first so it can't slip
+    // past `=== basename` and double-prefix.
+    expect(basenamedRouting("/mount").rebasePath("/mount?o=123")).toBe("/mount?o=123");
+    expect(basenamedRouting("/mount").rebasePath("/mount#top")).toBe("/mount#top");
+    // An un-based path still rebases and keeps its query intact.
+    expect(basenamedRouting("/mount").rebasePath("/c/abc?o=123")).toBe("/mount/c/abc?o=123");
   });
 });

@@ -77,9 +77,16 @@ export const reactRouterRouting: RoutingApi = {
  */
 function rebasePath(path: string, basename: string): string {
   if (!path.startsWith("/")) return path;
+  // Guard on the pathname alone (split off any ?query / #hash): a home-page
+  // return target like `/omnigent?o=123` — pathname equals the basename plus a
+  // query — must NOT read as un-based and double-prefix to
+  // `/omnigent/omnigent?o=123`.
+  const sep = path.search(/[?#]/);
+  const pathname = sep === -1 ? path : path.slice(0, sep);
+  const rest = sep === -1 ? "" : path.slice(sep);
   // Avoid double-prefixing if already under the basename.
-  if (path === basename || path.startsWith(`${basename}/`)) return path;
-  return `${basename}${path}`;
+  if (pathname === basename || pathname.startsWith(`${basename}/`)) return path;
+  return `${basename}${pathname}${rest}`;
 }
 
 /**
