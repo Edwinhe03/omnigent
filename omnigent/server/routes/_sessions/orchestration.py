@@ -2375,6 +2375,7 @@ async def _run_managed_launch(
     host_registry: HostRegistry | None,
     tunnel_registry: TunnelRegistry | None,
     relaunch_host: Host | None = None,
+    provider: str | None = None,
 ) -> None:
     """
     Provision a managed sandbox for a session in the background.
@@ -2423,6 +2424,8 @@ async def _run_managed_launch(
     :param relaunch_host: Existing managed host row to relaunch a new
         sandbox generation for, or ``None`` for a first launch (a
         fresh host identity is minted).
+    :param provider: Sandbox provider the create chose, or ``None`` for
+        the default. Ignored on a relaunch.
     """
     managed = await _provision_managed_sandbox(
         session_id=session_id,
@@ -2432,6 +2435,7 @@ async def _run_managed_launch(
         tracker=tracker,
         host_store=host_store,
         relaunch_host=relaunch_host,
+        provider=provider,
     )
     if managed is None:
         return

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime
+import re
+import uuid
 from pathlib import Path
 from typing import ClassVar
 
@@ -2549,3 +2551,340 @@ def test_parse_modal_secrets_malformed_fails_loud(secrets: object) -> None:
                 "modal": {"secrets": secrets},
             }
         )
+
+
+# ── multi-provider sandbox config ──────────────────────────────────────
+
+
+def test_parse_multi_provider_offers_every_provider() -> None:
+    """
+    A ``providers:`` list configures several providers side by side, with
+    the scalar fields still describing the first.
+    """
+    config = parse_sandbox_config(
+        {
+            "server_url": "https://s.example.com",
+            "providers": [{"provider": "modal"}, {"provider": "daytona"}],
+        }
+    )
+    assert config is not None
+    assert config.provider == "modal"
+    assert config.token_ttl_s == MODAL_MANAGED_TOKEN_TTL_S
+    assert config.managed_launch_supported is True
+    assert config.launchable_providers() == ("modal", "daytona")
+    # Each entry carries its own provider name and TTL, not the first's.
+    assert [entry.provider for entry in config.offered()] == ["modal", "daytona"]
+    assert config.offered()[1].token_ttl_s == DAYTONA_MANAGED_TOKEN_TTL_S
+
+
+def test_parse_single_provider_still_offers_itself() -> None:
+    """
+    The scalar shape reads through the plural accessors as a
+    one-provider deployment.
+    """
+    config = parse_sandbox_config({"provider": "modal", "server_url": "https://s.example.com"})
+    assert config is not None
+    assert config.providers == ()
+    assert config.offered() == (config,)
+    assert config.launchable_providers() == ("modal",)
+    assert config.for_provider(None) is config
+    assert config.for_provider("modal") is config
+    assert config.for_provider("daytona") is None
+
+
+def test_parse_multi_provider_shares_top_level_keys() -> None:
+    """
+    ``server_url`` / ``host_config`` are written once and ride into
+    every entry.
+    """
+    host_config: dict[str, object] = {"telemetry": {"enabled": False}}
+    config = parse_sandbox_config(
+        {
+            "server_url": "https://s.example.com",
+            "host_config": host_config,
+            "providers": [{"provider": "modal"}, {"provider": "e2b"}],
+        }
+    )
+    assert config is not None
+    for entry in config.offered():
+        assert entry.server_url == "https://s.example.com"
+        assert entry.host_config == host_config
+
+
+def test_parse_multi_provider_validates_provider_blocks() -> None:
+    """
+    A per-provider block inside an entry validates as it does in the
+    scalar shape: a malformed value fails startup, not a launch.
+    """
+    with pytest.raises(ValueError, match=re.escape("sandbox.modal.image")):
+        parse_sandbox_config(
+            {
+                "server_url": "https://s.example.com",
+                "providers": [{"provider": "modal", "modal": {"image": 17}}],
+            }
+        )
+
+
+def test_parse_multi_provider_excludes_staged_providers_from_choices() -> None:
+    """
+    A staged provider (lakebox parses, then rejects at launch) stays
+    configurable but is never offered as a choice.
+    """
+    config = parse_sandbox_config(
+        {
+            "server_url": "https://s.example.com",
+            "providers": [{"provider": "modal"}, {"provider": "lakebox"}],
+        }
+    )
+    assert config is not None
+    assert config.launchable_providers() == ("modal",)
+    # Still resolvable by name, so a host launched on it can be torn down.
+    assert config.for_provider("lakebox") is not None
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (
+            {
+                "server_url": "https://s.example.com",
+                "provider": "modal",
+                "providers": [{"provider": "e2b"}],
+            },
+            "not both",
+        ),
+        ({"server_url": "https://s.example.com", "providers": []}, "non-empty list"),
+        ({"server_url": "https://s.example.com", "providers": "modal"}, "non-empty list"),
+        ({"server_url": "https://s.example.com", "providers": ["modal"]}, "must be a mapping"),
+        (
+            {
+                "server_url": "https://s.example.com",
+                "providers": [{"provider": "modal"}, {"provider": "modal"}],
+            },
+            "more than once",
+        ),
+        (
+            {
+                "server_url": "https://s.example.com",
+                "providers": [{"provider": "nope"}],
+            },
+            "must be one of",
+        ),
+    ],
+)
+def test_parse_multi_provider_invalid_fails_loud(raw: dict[str, object], message: str) -> None:
+    """Malformed multi-provider config stops startup with the reason named."""
+    with pytest.raises(ValueError, match=message):
+        parse_sandbox_config(raw)
+
+
+async def test_launch_uses_requested_provider(db_uri: str) -> None:
+    """
+    A create naming a provider launches on that provider, and the choice
+    lands on the host row so teardown dispatches back to it.
+    """
+    host_store = HostStore(db_uri)
+
+    class _AlphaLauncher(FakeSandboxLauncher):
+        provider: ClassVar[str] = "alpha"
+
+    class _BetaLauncher(FakeSandboxLauncher):
+        provider: ClassVar[str] = "beta"
+
+    def _register(invocation: HostStartInvocation) -> None:
+        """Simulate the sandbox host connecting over the tunnel."""
+        host_store.upsert_on_connect(
+            host_id=invocation.host_id,
+            name=invocation.host_name,
+            user_id=_OWNER,
+        )
+
+    alpha = _AlphaLauncher(on_host_start=_register)
+    beta = _BetaLauncher(on_host_start=_register)
+    config = ManagedSandboxConfig(
+        server_url="https://srv.example.com",
+        launcher_factory=lambda: alpha,
+        token_ttl_s=3600,
+        provider="alpha",
+        providers=(
+            ManagedSandboxConfig(
+                server_url="https://srv.example.com",
+                launcher_factory=lambda: alpha,
+                token_ttl_s=3600,
+                provider="alpha",
+            ),
+            ManagedSandboxConfig(
+                server_url="https://srv.example.com",
+                launcher_factory=lambda: beta,
+                token_ttl_s=7200,
+                provider="beta",
+            ),
+        ),
+    )
+
+    result = await launch_managed_host(
+        config=config, owner=_OWNER, host_store=host_store, provider="beta"
+    )
+
+    # Only the requested provider ran.
+    assert beta.provisioned_names == ["managed-" + result.host_id[:8]]
+    assert alpha.provisioned_names == []
+    host = host_store.get_host(result.host_id)
+    assert host is not None
+    assert host.sandbox_provider == "beta"
+    # Resolved by the row, so the same provider's terminate runs.
+    await terminate_managed_host(host, host_store, config)
+    assert beta.terminated == ["sb-fake-1"]
+    assert alpha.terminated == []
+
+
+async def test_launch_defaults_to_first_provider(db_uri: str) -> None:
+    """
+    A create naming no provider takes the first configured one.
+    """
+    host_store = HostStore(db_uri)
+
+    class _AlphaLauncher(FakeSandboxLauncher):
+        provider: ClassVar[str] = "alpha"
+
+    def _register(invocation: HostStartInvocation) -> None:
+        """Simulate the sandbox host connecting over the tunnel."""
+        host_store.upsert_on_connect(
+            host_id=invocation.host_id,
+            name=invocation.host_name,
+            user_id=_OWNER,
+        )
+
+    alpha = _AlphaLauncher(on_host_start=_register)
+    entry = ManagedSandboxConfig(
+        server_url="https://srv.example.com",
+        launcher_factory=lambda: alpha,
+        token_ttl_s=3600,
+        provider="alpha",
+    )
+    config = ManagedSandboxConfig(
+        server_url="https://srv.example.com",
+        launcher_factory=lambda: alpha,
+        token_ttl_s=3600,
+        provider="alpha",
+        providers=(entry,),
+    )
+
+    result = await launch_managed_host(config=config, owner=_OWNER, host_store=host_store)
+    host = host_store.get_host(result.host_id)
+    assert host is not None
+    assert host.sandbox_provider == "alpha"
+
+
+async def test_launch_unknown_provider_rejects_before_provisioning(db_uri: str) -> None:
+    """
+    An unoffered provider is a 400 naming the available ones, with
+    nothing provisioned.
+    """
+    host_store = HostStore(db_uri)
+    config = parse_sandbox_config(
+        {
+            "server_url": "https://s.example.com",
+            "providers": [{"provider": "modal"}, {"provider": "daytona"}],
+        }
+    )
+    assert config is not None
+    with pytest.raises(HTTPException) as exc:
+        await launch_managed_host(
+            config=config, owner=_OWNER, host_store=host_store, provider="nope"
+        )
+    assert exc.value.status_code == 400
+    assert "nope" in exc.value.detail
+    assert "modal, daytona" in exc.value.detail
+    assert host_store.list_hosts(_OWNER) == []
+
+
+async def test_teardown_never_crosses_providers(db_uri: str) -> None:
+    """
+    A host is never torn down by another provider's launcher, even when
+    both are configured.
+    """
+    host_store = HostStore(db_uri)
+
+    class _AlphaLauncher(FakeSandboxLauncher):
+        provider: ClassVar[str] = "alpha"
+
+    class _BetaLauncher(FakeSandboxLauncher):
+        provider: ClassVar[str] = "beta"
+
+    alpha = _AlphaLauncher()
+    beta = _BetaLauncher()
+    config = ManagedSandboxConfig(
+        server_url="https://srv.example.com",
+        launcher_factory=lambda: alpha,
+        token_ttl_s=3600,
+        provider="alpha",
+        providers=(
+            ManagedSandboxConfig(
+                server_url="https://srv.example.com",
+                launcher_factory=lambda: alpha,
+                token_ttl_s=3600,
+                provider="alpha",
+            ),
+            ManagedSandboxConfig(
+                server_url="https://srv.example.com",
+                launcher_factory=lambda: beta,
+                token_ttl_s=3600,
+                provider="beta",
+            ),
+        ),
+    )
+    # A row recorded against the SECOND provider.
+    beta_host_id = uuid.uuid4().hex
+    host_store.register_managed_host(
+        host_id=beta_host_id,
+        name="managed-beta",
+        user_id=_OWNER,
+        token="tok",
+        provider="beta",
+        sandbox_id="sb-beta",
+        token_expires_at=now_epoch() + 3600,
+    )
+    host = host_store.get_host(beta_host_id)
+    assert host is not None
+
+    await terminate_managed_host(host, host_store, config)
+    assert beta.terminated == ["sb-beta"]
+    assert alpha.terminated == []
+
+
+async def test_info_lists_every_offered_provider(db_uri: str, tmp_path: Path) -> None:
+    """
+    ``GET /v1/info`` reports every launch-capable provider, while
+    ``sandbox_provider`` keeps naming the first for older bundles.
+    """
+    config = parse_sandbox_config(
+        {
+            "server_url": "https://s.example.com",
+            "providers": [{"provider": "modal"}, {"provider": "e2b"}, {"provider": "lakebox"}],
+        }
+    )
+    app = _capability_probe_app(db_uri, tmp_path, config)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/v1/info")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["managed_sandboxes_enabled"] is True
+    assert body["sandbox_provider"] == "modal"
+    # Staged lakebox is configurable but never offered as a choice.
+    assert body["sandbox_providers"] == ["modal", "e2b"]
+
+
+async def test_info_lists_single_provider(db_uri: str, tmp_path: Path) -> None:
+    """
+    A single-provider server reports its one provider in the list too, so
+    the picker can render from the list alone.
+    """
+    config = parse_sandbox_config({"provider": "modal", "server_url": "https://s.example.com"})
+    app = _capability_probe_app(db_uri, tmp_path, config)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/v1/info")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sandbox_provider"] == "modal"
+    assert body["sandbox_providers"] == ["modal"]
