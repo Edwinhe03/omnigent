@@ -325,6 +325,15 @@ _WEB_FETCH_TOOLS = frozenset({"web_fetch"})
 # web_search known-failure.
 _WEB_SEARCH_TOOLS = frozenset({"web_search"})
 
+# nimble_research — Nimble Agent API v2 research runs (start → poll → result).
+# Runner-local so a non-OpenAI model's nimble_research call resolves to
+# NimbleResearchTool.invoke, the same posture as web_search.
+_NIMBLE_RESEARCH_TOOLS = frozenset({"nimble_research"})
+
+# nimble_extract — Nimble Extract Templates (template run → structured JSON).
+# Runner-local for the same reason.
+_NIMBLE_EXTRACT_TOOLS = frozenset({"nimble_extract"})
+
 # Hindsight long-term memory builtins. Runner-local (like web_search) so that a
 # wrapped harness's (claude-sdk / codex / cursor / pi) tool call resolves to the
 # spec-configured Hindsight tool via its ``invoke``. Without this entry the call
@@ -614,6 +623,8 @@ _ALL_LOCAL_TOOLS = (
     | _SESSION_SELF_WRITE_TOOLS
     | _WEB_FETCH_TOOLS
     | _WEB_SEARCH_TOOLS
+    | _NIMBLE_RESEARCH_TOOLS
+    | _NIMBLE_EXTRACT_TOOLS
     | _HINDSIGHT_TOOLS
     | _TIMER_TOOLS
     | _TASK_LIFECYCLE_TOOLS
@@ -2818,6 +2829,124 @@ async def _execute_web_search_tool(
     return await asyncio.to_thread(tool.invoke, json.dumps(args), ctx)
 
 
+def _nimble_research_config_from_spec(agent_spec: AgentSpec | None) -> dict[str, str]:
+    """
+    Return the ``nimble_research`` builtin's config dict from the parent spec.
+
+    Mirrors :func:`_web_search_config_from_spec`: scans ``spec.tools.builtins``
+    for the entry named ``"nimble_research"`` and returns its ``config``
+    (credentials + agent instance id + polling knobs). Empty dict when the
+    builtin is a bare string or absent.
+
+    :param agent_spec: Parent agent's spec, or ``None``.
+    :returns: The nimble_research config dict, e.g.
+        ``{"api_key": "...", "agent_id": "wsa_..."}``.
+    """
+    if agent_spec is None:
+        return {}
+    tools = getattr(agent_spec, "tools", None)
+    builtins = getattr(tools, "builtins", None) or []
+    for entry in builtins:
+        if getattr(entry, "name", None) == "nimble_research":
+            return getattr(entry, "config", None) or {}
+    return {}
+
+
+async def _execute_nimble_research_tool(
+    args: _JsonObject,
+    *,
+    agent_spec: AgentSpec | None,
+    conversation_id: str | None = None,
+    task_id: str | None = None,
+    agent_id: str | None = None,
+) -> str:
+    """
+    Dispatch a ``nimble_research`` tool call to Nimble's Agent API v2.
+
+    Builds ``NimbleResearchTool`` from the spec's ``nimble_research`` builtin config
+    and runs its synchronous ``invoke`` off the event loop (the backend blocks
+    on the start → poll → result lifecycle), mirroring
+    :func:`_execute_web_search_tool`.
+
+    :param args: Parsed LLM arguments — ``task`` (required), ``effort`` (optional).
+    :param agent_spec: Parent agent's spec; carries the nimble_research config.
+    :param conversation_id: Parent session id, threaded into the context.
+    :param task_id: Calling task id, threaded into the context.
+    :param agent_id: Calling agent id, threaded into the context.
+    :returns: The JSON envelope, or an error string.
+    """
+    from omnigent.tools.base import ToolContext
+    from omnigent.tools.builtins.nimble_research import NimbleResearchTool
+
+    config = _nimble_research_config_from_spec(agent_spec)
+    tool = NimbleResearchTool(config=config)
+    ctx = ToolContext(
+        task_id=task_id or "nimble_research",
+        agent_id=agent_id or "nimble_research",
+        conversation_id=conversation_id,
+    )
+    return await asyncio.to_thread(tool.invoke, json.dumps(args), ctx)
+
+
+def _nimble_extract_config_from_spec(agent_spec: AgentSpec | None) -> dict[str, str]:
+    """
+    Return the ``nimble_extract`` builtin's config dict from the parent spec.
+
+    Mirrors :func:`_nimble_research_config_from_spec`: scans
+    ``spec.tools.builtins`` for the entry named ``"nimble_extract"`` and
+    returns its ``config`` (credentials + optional template/timeout). Empty
+    dict when the builtin is a bare string or absent.
+
+    :param agent_spec: Parent agent's spec, or ``None``.
+    :returns: The nimble_extract config dict, e.g.
+        ``{"api_key": "...", "template": "google_search"}``.
+    """
+    if agent_spec is None:
+        return {}
+    tools = getattr(agent_spec, "tools", None)
+    builtins = getattr(tools, "builtins", None) or []
+    for entry in builtins:
+        if getattr(entry, "name", None) == "nimble_extract":
+            return getattr(entry, "config", None) or {}
+    return {}
+
+
+async def _execute_nimble_extract_tool(
+    args: _JsonObject,
+    *,
+    agent_spec: AgentSpec | None,
+    conversation_id: str | None = None,
+    task_id: str | None = None,
+    agent_id: str | None = None,
+) -> str:
+    """
+    Dispatch a ``nimble_extract`` tool call to Nimble's Extract Templates run
+    endpoint.
+
+    Builds ``NimbleExtractTool`` from the spec's ``nimble_extract`` builtin
+    config and runs its synchronous ``invoke`` off the event loop (the backend
+    makes a blocking HTTP call), mirroring :func:`_execute_web_search_tool`.
+
+    :param args: Parsed LLM arguments — ``params`` (required object).
+    :param agent_spec: Parent agent's spec; carries the nimble_extract config.
+    :param conversation_id: Parent session id, threaded into the context.
+    :param task_id: Calling task id, threaded into the context.
+    :param agent_id: Calling agent id, threaded into the context.
+    :returns: The structured JSON, or an error string.
+    """
+    from omnigent.tools.base import ToolContext
+    from omnigent.tools.builtins.nimble_extract import NimbleExtractTool
+
+    config = _nimble_extract_config_from_spec(agent_spec)
+    tool = NimbleExtractTool(config=config)
+    ctx = ToolContext(
+        task_id=task_id or "nimble_extract",
+        agent_id=agent_id or "nimble_extract",
+        conversation_id=conversation_id,
+    )
+    return await asyncio.to_thread(tool.invoke, json.dumps(args), ctx)
+
+
 def _hindsight_config_from_spec(agent_spec: AgentSpec | None, tool_name: str) -> dict[str, str]:
     """
     Return a Hindsight builtin's config dict from the parent spec.
@@ -3622,8 +3751,9 @@ async def _session_get_info_via_rest(
     caller's own ``conversation_id`` when omitted), fetches the session
     snapshot, and projects the metadata fields — status, title, agent
     binding, runner binding, host, reasoning effort, effective model,
-    parent linkage, workspace / git branch, and the outstanding approval
-    prompts (the prompts themselves plus a count). Runner connectivity
+    parent linkage, workspace / git branch, persisted last-activity time,
+    and the outstanding approval prompts (the prompts themselves plus a
+    count). Runner connectivity
     is resolved best-effort via
     ``GET /v1/runners/{id}/status`` (``runner_online`` is ``None`` when
     the lookup fails or no runner is bound). The full transcript is
@@ -3645,7 +3775,11 @@ async def _session_get_info_via_rest(
             {"error": "sys_session_get_info requires a non-empty 'session_id' string"}
         )
     try:
-        resp = await server_client.get(f"/v1/sessions/{raw_target}", timeout=30.0)
+        resp = await server_client.get(
+            f"/v1/sessions/{raw_target}",
+            params={"include_items": "false", "include_liveness": "false"},
+            timeout=30.0,
+        )
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_session_get_info failed: {exc}"})
     if resp.status_code == 404:
@@ -3663,6 +3797,10 @@ async def _session_get_info_via_rest(
         {
             "session_id": snap.get("id"),
             "status": snap.get("status"),
+            # Persisted conversation activity is distinct from lifecycle
+            # status: repeated polls with an unchanged value let an
+            # orchestrator detect a running session that is not advancing.
+            "last_activity_at": snap.get("updated_at"),
             "title": snap.get("title"),
             "agent_id": snap.get("agent_id"),
             # Present the public agent name: a native-UI wrapper session
@@ -4121,6 +4259,123 @@ def _scan_local_agent_configs(configs_dir: Path) -> list[_JsonObject]:
     return entries
 
 
+#: Budget for the confinement lookup. Short on purpose: a slow or wedged
+#: server must not hold an agent listing open, and an unanswered lookup
+#: fails open to the unfiltered list.
+_SPAWN_FAMILY_TIMEOUT_S = 5.0
+
+#: Resolved confinement per session. Routing state is stamped at create and
+#: never changes, so one lookup serves every later ``sys_agent_list``. Only
+#: sessions with routing armed locally reach it, and only answered lookups
+#: are stored, so a fail-open miss is retried next call.
+_spawn_family_cache: dict[str, str | None] = {}
+
+
+async def _spawn_family(
+    server_client: httpx.AsyncClient,
+    conversation_id: str | None,
+) -> str | None:
+    """Return the model family a session's spawns are confined to.
+
+    Only a session running Smart Routing on a PINNED harness confines
+    them: its spawns are routed inside its own family, so an agent from
+    another family has no candidate model it could be routed onto and
+    must never be offered as spawnable in the first place. An
+    auto-harness session hands the family choice to the router, and a
+    plain session is not routed at all — both see the whole surface, byte
+    for byte as before.
+
+    The runner-local routing class answers for those two cases without
+    touching the server, so a plain session — the overwhelming majority —
+    pays nothing for a feature it does not use. Only a locally pinned
+    routed session spends the one cached lookup that reads the
+    subagent-routing switch.
+
+    Best-effort: an unreadable or slow session read fails open to "no
+    confinement", because a discovery listing must not block on the
+    routing lookup. The child-create gate is the enforcement.
+
+    :param server_client: HTTP client pointed at the Omnigent server.
+    :param conversation_id: The calling session's id, or ``None``.
+    :returns: ``"claude"`` / ``"gpt"`` / ``"pi"`` when the caller's spawns
+        are confined to that family, else ``None``.
+    """
+    from types import SimpleNamespace
+
+    from omnigent.runner.subagent_routing import (
+        auto_harness_session,
+        harness_family,
+        session_routing_class,
+        subagent_routing_enabled,
+    )
+
+    if conversation_id is None:
+        return None
+    local = session_routing_class(conversation_id)
+    if not local.routing_enabled or local.auto_harness:
+        return None
+    if conversation_id in _spawn_family_cache:
+        return _spawn_family_cache[conversation_id]
+    try:
+        resp = await server_client.get(
+            f"/v1/sessions/{conversation_id}",
+            # Only the routing fields are read, so skip the history and
+            # runner-liveness work the full snapshot would do.
+            params={"include_items": "false", "include_liveness": "false"},
+            timeout=_SPAWN_FAMILY_TIMEOUT_S,
+        )
+    except Exception:  # noqa: BLE001 — discovery must not fail on this read
+        return None
+    if resp.status_code != 200:
+        return None
+    snapshot = _string_object_dict(resp.json())
+    if snapshot is None:
+        return None
+    family: str | None = None
+    if subagent_routing_enabled(_optional_string(snapshot.get("subagent_routing_override"))):
+        harness = _optional_string(snapshot.get("harness"))
+        labels = _string_object_dict(snapshot.get("labels")) or {}
+        # The shared predicate reads the same two fields off a conversation row.
+        row = SimpleNamespace(
+            labels={key: value for key, value in labels.items() if isinstance(value, str)},
+            harness_override=harness,
+        )
+        if not auto_harness_session(row):
+            family = harness_family(harness)
+    _spawn_family_cache[conversation_id] = family
+    return family
+
+
+def forget_spawn_family(conversation_id: str) -> None:
+    """Drop the cached spawn confinement for a finished session.
+
+    :param conversation_id: Session/conversation identifier.
+    """
+    _spawn_family_cache.pop(conversation_id, None)
+
+
+def _in_spawn_family(builtins: list[_JsonObject], family: str | None) -> list[_JsonObject]:
+    """Drop built-in agents *family* cannot serve.
+
+    :param builtins: Projected ``builtins`` rows, each carrying ``harness``.
+    :param family: The caller's confined family, or ``None`` to keep all.
+    :returns: The rows a session confined to *family* may spawn. An agent
+        whose harness has no family (unknown, or multi-family like pi) is
+        kept: nothing proves it is out of family.
+    """
+    if family is None:
+        return builtins
+    from omnigent.runner.subagent_routing import harness_family
+
+    kept: list[_JsonObject] = []
+    for row in builtins:
+        harness = row.get("harness")
+        row_family = harness_family(harness) if isinstance(harness, str) else None
+        if row_family is None or row_family == family:
+            kept.append(row)
+    return kept
+
+
 async def _agent_list_via_rest(
     server_client: httpx.AsyncClient,
     *,
@@ -4145,6 +4400,12 @@ async def _agent_list_via_rest(
       (YAMLs authored with ``sys_os_write`` per the agent-authoring
       skill), projected to ``{name, path, description}``.
 
+    On a pinned Smart Routing session the ``builtins`` section is confined
+    to the caller's own model family (:func:`_spawn_family`) — an agent it
+    could never route a spawn onto is not a launchable agent for it. The
+    other two sections carry no harness to filter on; the child-create gate
+    refuses those.
+
     :param server_client: HTTP client pointed at the Omnigent server.
     :param agent_spec: The running agent's spec, for os_env cwd
         resolution of the local-config scan.
@@ -4158,7 +4419,11 @@ async def _agent_list_via_rest(
     assert spec.cwd is not None
     configs_dir = Path(spec.cwd) / _AGENT_CONFIG_SUBDIR
     local_configs = await asyncio.to_thread(_scan_local_agent_configs, configs_dir)
-    return json.dumps(_project_agent_list(builtins_raw, sessions_raw, local_configs))
+    listing = _project_agent_list(builtins_raw, sessions_raw, local_configs)
+    listing["builtins"] = _in_spawn_family(
+        listing["builtins"], await _spawn_family(server_client, conversation_id)
+    )
+    return json.dumps(listing)
 
 
 def _project_agent_list(
@@ -4908,6 +5173,22 @@ async def execute_tool(
             )
         elif tool_name in _WEB_SEARCH_TOOLS:
             output = await _execute_web_search_tool(
+                args,
+                agent_spec=agent_spec,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                agent_id=agent_id,
+            )
+        elif tool_name in _NIMBLE_RESEARCH_TOOLS:
+            output = await _execute_nimble_research_tool(
+                args,
+                agent_spec=agent_spec,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                agent_id=agent_id,
+            )
+        elif tool_name in _NIMBLE_EXTRACT_TOOLS:
+            output = await _execute_nimble_extract_tool(
                 args,
                 agent_spec=agent_spec,
                 conversation_id=conversation_id,
