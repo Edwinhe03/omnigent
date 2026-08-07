@@ -2778,6 +2778,16 @@ def test_parse_single_provider_still_offers_itself() -> None:
     assert config.for_provider("daytona") is None
 
 
+def test_deployment_rejects_empty_configs() -> None:
+    """
+    The 'never empty' invariant the accessors rely on is enforced at
+    construction, so a direct constructor can't slip past the parser's
+    non-empty check and later IndexError inside ``default``.
+    """
+    with pytest.raises(ValueError, match="at least one provider config"):
+        ManagedSandboxDeployment(configs=())
+
+
 def test_parse_multi_provider_shares_top_level_keys() -> None:
     """
     ``server_url`` / ``host_config`` are written once and ride into

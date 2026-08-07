@@ -512,6 +512,14 @@ class ManagedSandboxDeployment:
 
     configs: tuple[ManagedSandboxConfig, ...]
 
+    def __post_init__(self) -> None:
+        # Enforce the "never empty" invariant the accessors rely on
+        # (:attr:`default` indexes ``configs[0]``): the parser already
+        # rejects an empty ``providers`` list, so a breach means a
+        # direct constructor passed ``configs=()``.
+        if not self.configs:
+            raise ValueError("ManagedSandboxDeployment requires at least one provider config")
+
     @classmethod
     def single(cls, config: ManagedSandboxConfig) -> ManagedSandboxDeployment:
         """
