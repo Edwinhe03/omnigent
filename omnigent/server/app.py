@@ -47,7 +47,7 @@ from omnigent.server.background_session_titles import (
     BackgroundSessionTitleCoordinator,
     RunnerBackgroundTitleGenerator,
 )
-from omnigent.server.managed_hosts import ManagedSandboxConfig
+from omnigent.server.managed_hosts import ManagedSandboxDeployment
 from omnigent.server.mcp_pool import ServerMcpPool
 from omnigent.server.performance_metrics import (
     ServerMetricsOtelPublisher,
@@ -752,7 +752,7 @@ def create_app(
     debug_router_modules: list[str] | None = None,
     admins: list[str] | None = None,
     allowed_domains: list[str] | None = None,
-    sandbox_config: ManagedSandboxConfig | None = None,
+    sandbox_config: ManagedSandboxDeployment | None = None,
     sharing_mode: SharingMode | Callable[[], SharingMode] | None = None,
     public_sharing: bool | Callable[[], bool] | None = None,
     server_config: dict[str, Any] | None = None,
@@ -1768,7 +1768,7 @@ def create_app(
         sandbox_providers: list[str] = []
         if sandbox_config is not None and sandbox_config.managed_launch_supported:
             managed_sandboxes_enabled = True
-            sandbox_provider = sandbox_config.provider
+            sandbox_provider = sandbox_config.default.provider
             sandbox_providers = list(sandbox_config.launchable_providers())
         # sharing_mode is the server's session-sharing policy
         # (on/read_only/off), surfaced so the web app can hide the Share

@@ -26,6 +26,7 @@ from omnigent.server.managed_hosts import (
     MODAL_MANAGED_TOKEN_TTL_S,
     OPENSHELL_MANAGED_TOKEN_TTL_S,
     ManagedSandboxConfig,
+    ManagedSandboxDeployment,
     RepoWorkspace,
     host_resume_supported,
     launch_managed_host,
@@ -63,22 +64,25 @@ def _injected_config(
     server_url: str = "https://srv.example.com",
     token_ttl_s: int = 3600,
     host_config: dict[str, object] | None = None,
-) -> ManagedSandboxConfig:
+) -> ManagedSandboxDeployment:
     """
-    Build a config that injects *fake* through the launcher-factory seam
-    — the same way an embedding deployment injects a custom launcher.
+    Build a one-provider deployment that injects *fake* through the
+    launcher-factory seam — the same way an embedding deployment injects
+    a custom launcher.
 
     :param fake: The launcher every launch should use.
     :param server_url: Server URL the sandbox host dials back to.
     :param token_ttl_s: Launch-token lifetime in seconds.
     :param host_config: In-sandbox config.yaml content to forward, or ``None``.
-    :returns: A ready :class:`ManagedSandboxConfig`.
+    :returns: A ready one-provider :class:`ManagedSandboxDeployment`.
     """
-    return ManagedSandboxConfig(
-        server_url=server_url,
-        launcher_factory=lambda: fake,
-        token_ttl_s=token_ttl_s,
-        host_config=host_config,
+    return ManagedSandboxDeployment.single(
+        ManagedSandboxConfig(
+            server_url=server_url,
+            launcher_factory=lambda: fake,
+            token_ttl_s=token_ttl_s,
+            host_config=host_config,
+        )
     )
 
 
@@ -108,6 +112,7 @@ def test_parse_valid_modal_config_builds_image_parameterized_factory(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     assert cfg.server_url == "https://srv.example.com"
     assert cfg.token_ttl_s == MODAL_MANAGED_TOKEN_TTL_S
     # modal is in PROVIDERS_WITH_MANAGED_LAUNCH, so the parsed config
@@ -138,6 +143,7 @@ def test_parse_modal_without_image_defaults_to_official(
     """
     cfg = parse_sandbox_config({"provider": "modal", "server_url": "https://s.example.com"})
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_modal_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -154,6 +160,7 @@ def test_parse_non_modal_provider_yields_rejecting_factory() -> None:
     """
     cfg = parse_sandbox_config({"provider": "lakebox", "server_url": "https://s.example.com"})
     assert cfg is not None
+    cfg = cfg.default
     # A staged provider must not advertise managed launch on /v1/info —
     # the web UI would offer a sandbox option every create rejects.
     assert cfg.managed_launch_supported is False
@@ -186,6 +193,7 @@ def test_parse_valid_daytona_config_builds_parameterized_factory(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     assert cfg.server_url == "https://srv.example.com"
     assert cfg.token_ttl_s == DAYTONA_MANAGED_TOKEN_TTL_S
     assert cfg.managed_launch_supported is True
@@ -206,6 +214,7 @@ def test_parse_daytona_without_section_defaults(
     """
     cfg = parse_sandbox_config({"provider": "daytona", "server_url": "https://s.example.com"})
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_daytona_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -234,6 +243,7 @@ def test_parse_valid_boxlite_cloud_config_builds_parameterized_factory(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     assert cfg.server_url == "https://srv.example.com"
     assert cfg.token_ttl_s == BOXLITE_MANAGED_TOKEN_TTL_S
     assert cfg.managed_launch_supported is True
@@ -256,6 +266,7 @@ def test_parse_boxlite_without_section_defaults_local(
     """
     cfg = parse_sandbox_config({"provider": "boxlite", "server_url": "https://s.example.com"})
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_boxlite_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -288,6 +299,7 @@ def test_parse_boxlite_local_customization_reaches_launcher(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_boxlite_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -326,6 +338,7 @@ def test_parse_valid_islo_config_builds_parameterized_factory(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     assert cfg.server_url == "https://srv.example.com"
     assert cfg.token_ttl_s == ISLO_MANAGED_TOKEN_TTL_S
     assert cfg.managed_launch_supported is True
@@ -355,6 +368,7 @@ def test_parse_islo_without_section_defaults(
     """
     cfg = parse_sandbox_config({"provider": "islo", "server_url": "https://s.example.com"})
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_islo_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -382,6 +396,7 @@ def test_parse_islo_config_idle_pause_null_disables_lifecycle(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_islo_launcher(monkeypatch, fake)
 
@@ -409,6 +424,7 @@ def test_parse_valid_e2b_config_builds_parameterized_factory(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     assert cfg.server_url == "https://srv.example.com"
     assert cfg.token_ttl_s == e2b_managed_token_ttl_s()
     assert cfg.managed_launch_supported is True
@@ -430,6 +446,7 @@ def test_parse_e2b_without_section_defaults(
     """
     cfg = parse_sandbox_config({"provider": "e2b", "server_url": "https://s.example.com"})
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_e2b_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -470,6 +487,7 @@ def test_parse_valid_openshell_config_builds_parameterized_factory(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     assert cfg.server_url == "https://srv.example.com"
     assert cfg.token_ttl_s == OPENSHELL_MANAGED_TOKEN_TTL_S
     assert cfg.managed_launch_supported is True
@@ -493,6 +511,7 @@ def test_parse_openshell_without_section_defaults(
     """
     cfg = parse_sandbox_config({"provider": "openshell", "server_url": "https://s.example.com"})
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_openshell_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -527,6 +546,7 @@ def test_parse_valid_kubernetes_config_builds_parameterized_factory(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     assert cfg.server_url == "http://omnigent.omnigent.svc.cluster.local"
     assert cfg.token_ttl_s == KUBERNETES_MANAGED_TOKEN_TTL_S
     assert cfg.managed_launch_supported is True
@@ -553,6 +573,7 @@ def test_parse_kubernetes_without_section_defaults(monkeypatch: pytest.MonkeyPat
         {"provider": "kubernetes", "server_url": "http://s.svc.cluster.local"}
     )
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_kubernetes_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -593,6 +614,7 @@ def test_parse_host_config_threads_verbatim_without_resolving_secrets(
     )
 
     assert cfg is not None
+    cfg = cfg.default
     assert cfg.host_config == host_config
 
 
@@ -600,6 +622,7 @@ def test_parse_absent_host_config_is_none() -> None:
     """No host_config key → nothing forwarded, existing configs unchanged."""
     cfg = parse_sandbox_config({"provider": "modal", "server_url": "https://s.example.com"})
     assert cfg is not None
+    cfg = cfg.default
     assert cfg.host_config is None
 
 
@@ -727,6 +750,7 @@ def test_parse_kubernetes_pvc_mounts_normalizes_and_reaches_launcher(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_kubernetes_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -746,6 +770,7 @@ def test_parse_kubernetes_without_pvc_mounts_is_none(monkeypatch: pytest.MonkeyP
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_kubernetes_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -843,6 +868,7 @@ def test_parse_kubernetes_pvc_mounts_reserved_check_is_segment_aware(mount_path:
         }
     )
     assert cfg is not None
+    cfg = cfg.default
 
 
 def test_parse_kubernetes_pvc_mounts_sibling_prefix_is_not_nested() -> None:
@@ -860,6 +886,7 @@ def test_parse_kubernetes_pvc_mounts_sibling_prefix_is_not_nested() -> None:
         }
     )
     assert cfg is not None
+    cfg = cfg.default
 
 
 def test_parse_kubernetes_pvc_mounts_nesting_is_rejected_regardless_of_order() -> None:
@@ -918,6 +945,7 @@ def test_parse_kubernetes_pvc_mounts_allows_same_claim_at_two_paths() -> None:
         }
     )
     assert cfg is not None
+    cfg = cfg.default
 
 
 def test_parse_kubernetes_secret_mounts_normalizes_and_reaches_launcher(
@@ -937,6 +965,7 @@ def test_parse_kubernetes_secret_mounts_normalizes_and_reaches_launcher(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_kubernetes_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -956,6 +985,7 @@ def test_parse_kubernetes_without_secret_mounts_is_none(monkeypatch: pytest.Monk
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_kubernetes_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -1030,6 +1060,7 @@ def test_parse_kubernetes_secret_mounts_reserved_check_is_segment_aware(mount_pa
         }
     )
     assert cfg is not None
+    cfg = cfg.default
 
 
 @pytest.mark.parametrize(
@@ -1068,6 +1099,7 @@ def test_parse_kubernetes_pvc_and_secret_mounts_coexist_at_distinct_paths(
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_kubernetes_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -1092,6 +1124,7 @@ def test_parse_kubernetes_secret_mounts_sibling_prefix_is_not_nested() -> None:
         }
     )
     assert cfg is not None
+    cfg = cfg.default
 
 
 def test_parse_kubernetes_secret_mounts_nesting_is_rejected_regardless_of_order() -> None:
@@ -1127,6 +1160,7 @@ def test_parse_kubernetes_secret_mounts_allows_same_secret_at_two_paths() -> Non
         }
     )
     assert cfg is not None
+    cfg = cfg.default
 
 
 @pytest.mark.parametrize(
@@ -1452,7 +1486,7 @@ def test_parse_repo_workspace_rejects_malformed(workspace: str, expected_fragmen
 def _capability_probe_app(
     db_uri: str,
     tmp_path: Path,
-    sandbox_config: ManagedSandboxConfig | None,
+    sandbox_config: ManagedSandboxDeployment | None,
 ) -> FastAPI:
     """
     Build a real app wired with *sandbox_config* to probe ``GET /v1/info``.
@@ -1532,10 +1566,12 @@ async def test_info_reports_enabled_for_injected_custom_launcher(
     falls back to the generic "New Sandbox" label (``sandbox_provider``
     is None).
     """
-    config = ManagedSandboxConfig(
-        server_url="https://s.example.com",
-        launcher_factory=lambda: FakeSandboxLauncher(),
-        token_ttl_s=3600,
+    config = ManagedSandboxDeployment.single(
+        ManagedSandboxConfig(
+            server_url="https://s.example.com",
+            launcher_factory=lambda: FakeSandboxLauncher(),
+            token_ttl_s=3600,
+        )
     )
     app = _capability_probe_app(db_uri, tmp_path, config)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -2525,6 +2561,7 @@ def test_parse_modal_secrets_thread_to_launcher(monkeypatch: pytest.MonkeyPatch)
         }
     )
     assert cfg is not None
+    cfg = cfg.default
     fake = FakeSandboxLauncher()
     install_fake_modal_launcher(monkeypatch, fake)
     assert cfg.launcher_factory() is fake
@@ -2558,8 +2595,8 @@ def test_parse_modal_secrets_malformed_fails_loud(secrets: object) -> None:
 
 def test_parse_multi_provider_offers_every_provider() -> None:
     """
-    A ``providers:`` list configures several providers side by side, with
-    the scalar fields still describing the first.
+    A ``providers:`` list configures several providers side by side, each
+    carrying its own provider name and TTL.
     """
     config = parse_sandbox_config(
         {
@@ -2568,8 +2605,8 @@ def test_parse_multi_provider_offers_every_provider() -> None:
         }
     )
     assert config is not None
-    assert config.provider == "modal"
-    assert config.token_ttl_s == MODAL_MANAGED_TOKEN_TTL_S
+    assert config.default.provider == "modal"
+    assert config.default.token_ttl_s == MODAL_MANAGED_TOKEN_TTL_S
     assert config.managed_launch_supported is True
     assert config.launchable_providers() == ("modal", "daytona")
     # Each entry carries its own provider name and TTL, not the first's.
@@ -2579,16 +2616,16 @@ def test_parse_multi_provider_offers_every_provider() -> None:
 
 def test_parse_single_provider_still_offers_itself() -> None:
     """
-    The scalar shape reads through the plural accessors as a
-    one-provider deployment.
+    The scalar shape wraps into a one-provider deployment that reads
+    through the plural accessors.
     """
     config = parse_sandbox_config({"provider": "modal", "server_url": "https://s.example.com"})
     assert config is not None
-    assert config.providers == ()
-    assert config.offered() == (config,)
+    entry = config.default
+    assert config.offered() == (entry,)
     assert config.launchable_providers() == ("modal",)
-    assert config.for_provider(None) is config
-    assert config.for_provider("modal") is config
+    assert config.for_provider(None) is entry
+    assert config.for_provider("modal") is entry
     assert config.for_provider("daytona") is None
 
 
@@ -2640,6 +2677,43 @@ def test_parse_multi_provider_excludes_staged_providers_from_choices() -> None:
     assert config.launchable_providers() == ("modal",)
     # Still resolvable by name, so a host launched on it can be torn down.
     assert config.for_provider("lakebox") is not None
+
+
+def test_parse_multi_provider_default_skips_leading_staged_provider() -> None:
+    """
+    A staged provider (parse-but-reject) listed first is never the
+    default: the default is the first launch-capable entry, so the
+    default launcher and ``managed_launch_supported`` agree.
+    """
+    config = parse_sandbox_config(
+        {
+            "server_url": "https://s.example.com",
+            "providers": [{"provider": "lakebox"}, {"provider": "modal"}],
+        }
+    )
+    assert config is not None
+    assert config.managed_launch_supported is True
+    # lakebox is first in configured order but cannot launch, so modal
+    # backs a provider-less request.
+    assert config.default.provider == "modal"
+    assert config.for_provider(None) is config.default
+
+
+def test_parse_multi_provider_default_falls_back_when_none_launchable() -> None:
+    """
+    A deployment of only staged providers still resolves a default (the
+    first entry), rather than raising — teardown of a host launched
+    before support was pulled must still find a config.
+    """
+    config = parse_sandbox_config(
+        {
+            "server_url": "https://s.example.com",
+            "providers": [{"provider": "lakebox"}],
+        }
+    )
+    assert config is not None
+    assert config.managed_launch_supported is False
+    assert config.default.provider == "lakebox"
 
 
 @pytest.mark.parametrize(
@@ -2701,12 +2775,8 @@ async def test_launch_uses_requested_provider(db_uri: str) -> None:
 
     alpha = _AlphaLauncher(on_host_start=_register)
     beta = _BetaLauncher(on_host_start=_register)
-    config = ManagedSandboxConfig(
-        server_url="https://srv.example.com",
-        launcher_factory=lambda: alpha,
-        token_ttl_s=3600,
-        provider="alpha",
-        providers=(
+    config = ManagedSandboxDeployment(
+        configs=(
             ManagedSandboxConfig(
                 server_url="https://srv.example.com",
                 launcher_factory=lambda: alpha,
@@ -2756,18 +2826,15 @@ async def test_launch_defaults_to_first_provider(db_uri: str) -> None:
         )
 
     alpha = _AlphaLauncher(on_host_start=_register)
-    entry = ManagedSandboxConfig(
-        server_url="https://srv.example.com",
-        launcher_factory=lambda: alpha,
-        token_ttl_s=3600,
-        provider="alpha",
-    )
-    config = ManagedSandboxConfig(
-        server_url="https://srv.example.com",
-        launcher_factory=lambda: alpha,
-        token_ttl_s=3600,
-        provider="alpha",
-        providers=(entry,),
+    config = ManagedSandboxDeployment(
+        configs=(
+            ManagedSandboxConfig(
+                server_url="https://srv.example.com",
+                launcher_factory=lambda: alpha,
+                token_ttl_s=3600,
+                provider="alpha",
+            ),
+        ),
     )
 
     result = await launch_managed_host(config=config, owner=_OWNER, host_store=host_store)
@@ -2814,12 +2881,8 @@ async def test_teardown_never_crosses_providers(db_uri: str) -> None:
 
     alpha = _AlphaLauncher()
     beta = _BetaLauncher()
-    config = ManagedSandboxConfig(
-        server_url="https://srv.example.com",
-        launcher_factory=lambda: alpha,
-        token_ttl_s=3600,
-        provider="alpha",
-        providers=(
+    config = ManagedSandboxDeployment(
+        configs=(
             ManagedSandboxConfig(
                 server_url="https://srv.example.com",
                 launcher_factory=lambda: alpha,

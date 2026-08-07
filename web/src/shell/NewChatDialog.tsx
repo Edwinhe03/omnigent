@@ -105,6 +105,8 @@ import { readLastAgentId, writeLastAgentId } from "@/lib/agentPreferences";
 import {
   readLastHostChoice,
   writeLastHostChoice,
+  readLastSandboxProvider,
+  writeLastSandboxProvider,
   SANDBOX_HOST_CHOICE,
 } from "@/lib/hostPreferences";
 import { readLastHarness, writeLastHarness } from "@/lib/harnessPreferences";
@@ -1664,6 +1666,7 @@ interface LandingDraft {
   pickedAgentId: string | null;
   selectedHostId: string | null;
   sandboxSelected: boolean;
+  sandboxProvider: string | null;
   sandboxRepoUrl: string;
   sandboxRepoBranch: string;
   workspace: string;
@@ -1803,6 +1806,16 @@ export function NewChatLandingScreen() {
     () => (info !== "loading" ? sandboxProviderOptions(info) : []),
     [info],
   );
+  // The provider a sandbox pick defaults to: the sticky last pick when the
+  // server still offers it, else the first offered row. Mirrors the sticky
+  // host choice — the composer reopens on the provider used last. Null until
+  // the rows load (info still resolving) so callers hold off seeding.
+  const defaultSandboxProvider = useCallback((): string | null => {
+    if (sandboxProviderRows.length === 0) return null;
+    const stored = readLastSandboxProvider();
+    if (stored !== null && sandboxProviderRows.includes(stored)) return stored;
+    return sandboxProviderRows[0];
+  }, [sandboxProviderRows]);
   // Embed-only docs seam: when the host passes additional docs and managed
   // sandboxes are unavailable, keep the sandbox row visible but disabled and
   // attach a help tooltip with a clickable link.
@@ -1836,8 +1849,12 @@ export function NewChatLandingScreen() {
   const [sandboxSelected, setSandboxSelected] = useState(
     () => landingDraft?.sandboxSelected ?? false,
   );
-  // Provider the sandbox pick launches on; null takes the server default.
-  const [sandboxProvider, setSandboxProvider] = useState<string | null>(null);
+  // Provider the sandbox pick launches on. Seeded to the sticky last pick (or
+  // the first offered row) once the picker rows load; null both before that
+  // seed and for a single-provider server that names no provider.
+  const [sandboxProvider, setSandboxProvider] = useState<string | null>(
+    () => landingDraft?.sandboxProvider ?? null,
+  );
   const { data: hostClaudeModelOptions, isLoading: hostClaudeModelsLoading } = useHostModelOptions(
     selectedHostId,
     "claude-native",
@@ -2001,6 +2018,7 @@ export function NewChatLandingScreen() {
     pickedAgentId,
     selectedHostId,
     sandboxSelected,
+    sandboxProvider,
     sandboxRepoUrl,
     sandboxRepoBranch,
     workspace,
@@ -2151,6 +2169,7 @@ export function NewChatLandingScreen() {
       if (info === "loading") return;
       if (managedSandboxesEnabled) {
         setSandboxSelected(true);
+        setSandboxProvider(defaultSandboxProvider());
         return;
       }
       // Sandbox no longer offered (e.g. an OSS server) — fall through.
@@ -2170,6 +2189,7 @@ export function NewChatLandingScreen() {
 
     if (managedSandboxesEnabled) {
       setSandboxSelected(true);
+      setSandboxProvider(defaultSandboxProvider());
       return;
     }
     const firstOnline = (hosts ?? []).find((h) => h.status === "online");
@@ -2182,6 +2202,7 @@ export function NewChatLandingScreen() {
     managedSandboxesEnabled,
     info,
     prefillSettled,
+    defaultSandboxProvider,
   ]);
 
   // Fall back to the host's home directory when it has no recorded recents, so
@@ -2566,7 +2587,10 @@ export function NewChatLandingScreen() {
     });
     if (step === null) return;
     const { writes } = step;
-    if (writes.selectSandbox) setSandboxSelected(true);
+    if (writes.selectSandbox) {
+      setSandboxSelected(true);
+      setSandboxProvider(defaultSandboxProvider());
+    }
     if (writes.hostId !== undefined) setSelectedHostId((cur) => cur ?? writes.hostId!);
     if (writes.agentId !== undefined) {
       setPickedAgentId((cur) => cur ?? writes.agentId!);
@@ -2587,6 +2611,7 @@ export function NewChatLandingScreen() {
     selectedHostId,
     pickedAgentId,
     prefillConfig,
+    defaultSandboxProvider,
   ]);
 
   // Opt-in worktree from the project's stored config. The inference machine
@@ -2870,8 +2895,9 @@ export function NewChatLandingScreen() {
   function selectSandbox(provider: string | null = null) {
     // Persist the explicit sandbox pick (as the reserved sentinel) even when
     // it's already selected, mirroring selectHost — so the sandbox becomes the
-    // sticky default for the next visit.
+    // sticky default for the next visit, on the provider just picked.
     writeLastHostChoice(SANDBOX_HOST_CHOICE);
+    writeLastSandboxProvider(provider);
     // Recorded even when already selected, so re-picking a different
     // provider still switches which one launches.
     setSandboxProvider(provider);

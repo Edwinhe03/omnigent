@@ -402,12 +402,6 @@ class ManagedSandboxConfig:
         Non-secret by design: credentials stay behind
         ``api_key_ref: env:VAR`` indirection, resolved inside the
         sandbox against its own environment.
-    :param providers: One single-provider config per offered provider
-        (server YAML ``sandbox.providers``), each with its own
-        ``launcher_factory`` / ``provider`` / ``token_ttl_s``. Empty for a
-        single-provider deployment; the scalar fields above always
-        describe the first entry. Read it through :meth:`offered` /
-        :meth:`for_provider` rather than directly.
     """
 
     server_url: str
@@ -416,53 +410,102 @@ class ManagedSandboxConfig:
     managed_launch_supported: bool = True
     provider: str | None = None
     host_config: dict[str, object] | None = None
-    providers: tuple[ManagedSandboxConfig, ...] = ()
+
+
+@dataclass
+class ManagedSandboxDeployment:
+    """
+    The set of sandbox providers a server offers, as a single unit.
+
+    Wraps one :class:`ManagedSandboxConfig` per provider. A
+    single-provider deployment holds exactly one; a ``sandbox.providers``
+    list holds several. Callers thread this — not a bare
+    :class:`ManagedSandboxConfig` — through the managed-host lifecycle
+    and resolve the per-provider config through :meth:`for_provider` /
+    :meth:`recorded`, so they never branch on which config shape the
+    deployment was built from.
+
+    Built by :func:`parse_sandbox_config` from the server YAML, or by
+    :meth:`single` around a directly-constructed embedding config.
+
+    :param configs: One single-provider config per offered provider, in
+        configured order. Never empty. The first is the deployment
+        default a request that names no provider gets.
+    """
+
+    configs: tuple[ManagedSandboxConfig, ...]
+
+    @classmethod
+    def single(cls, config: ManagedSandboxConfig) -> ManagedSandboxDeployment:
+        """
+        Wrap one provider config as a one-provider deployment.
+
+        The path an embedding deployment's directly-constructed config
+        takes: ``create_app`` wraps it so the rest of the flow sees a
+        deployment uniformly.
+
+        :param config: The single provider's config.
+        :returns: A deployment offering exactly *config*.
+        """
+        return cls(configs=(config,))
+
+    @property
+    def default(self) -> ManagedSandboxConfig:
+        """
+        The provider a request that names none launches on.
+
+        Prefers the first launch-capable provider, so the default
+        launcher and the :attr:`managed_launch_supported` flag agree
+        even when a staged provider (e.g. ``lakebox``) is listed first.
+        Falls back to the first entry when none supports launch, so a
+        deployment of only staged providers still resolves.
+
+        :returns: The default single-provider config.
+        """
+        for config in self.configs:
+            if config.managed_launch_supported:
+                return config
+        return self.configs[0]
+
+    @property
+    def managed_launch_supported(self) -> bool:
+        """Whether ANY offered provider can serve a managed launch."""
+        return any(config.managed_launch_supported for config in self.configs)
 
     def offered(self) -> tuple[ManagedSandboxConfig, ...]:
-        """
-        Every provider config this deployment offers, in configured order.
-
-        A single-provider deployment yields itself, so callers never
-        branch on which config shape was used.
-
-        :returns: One entry per offered provider.
-        """
-        return self.providers or (self,)
+        """Every provider config this deployment offers, in configured order."""
+        return self.configs
 
     def for_provider(self, provider: str | None) -> ManagedSandboxConfig | None:
         """
         Resolve the config backing one provider name.
 
         :param provider: Provider short name, e.g. ``"modal"``. ``None``
-            selects the default (first) provider, which is what a
+            selects the deployment :attr:`default`, which is what a
             request that names no provider gets.
         :returns: The matching single-provider config, or ``None`` when
             this deployment does not offer *provider*.
         """
-        offered = self.offered()
         if provider is None:
-            return offered[0]
-        for candidate in offered:
-            if candidate.provider == provider:
-                return candidate
+            return self.default
+        for config in self.configs:
+            if config.provider == provider:
+                return config
         return None
 
     def recorded(self, provider: str | None) -> ManagedSandboxConfig:
         """
         Resolve the config to act on a host launched with *provider*.
 
-        Never fails, unlike :meth:`for_provider`: a single-provider
-        deployment answers with itself even when it names no provider
-        (a directly-constructed embedding config), so the lone launcher
-        still serves every managed host. Callers compare the built
-        launcher's provider against the host row before using it.
+        Never fails, unlike :meth:`for_provider`: falls back to the
+        :attr:`default` when the recorded provider is no longer offered,
+        so the caller (which compares the built launcher's provider
+        against the host row) still gets a config to try.
 
         :param provider: Provider recorded on the host row, or ``None``.
         :returns: The config whose launcher should act on that host.
         """
-        if not self.providers:
-            return self
-        return self.for_provider(provider) or self
+        return self.for_provider(provider) or self.default
 
     def launchable_providers(self) -> tuple[str, ...]:
         """
@@ -475,9 +518,9 @@ class ManagedSandboxConfig:
         :returns: Provider short names, in configured order.
         """
         return tuple(
-            entry.provider
-            for entry in self.offered()
-            if entry.managed_launch_supported and entry.provider is not None
+            config.provider
+            for config in self.configs
+            if config.managed_launch_supported and config.provider is not None
         )
 
 
@@ -796,7 +839,7 @@ def _parse_host_config(raw: dict[str, object]) -> dict[str, object] | None:
     return host_config
 
 
-def parse_sandbox_config(raw: object) -> ManagedSandboxConfig | None:
+def parse_sandbox_config(raw: object) -> ManagedSandboxDeployment | None:
     """
     Parse and validate the server config's ``sandbox:`` section.
 
@@ -814,12 +857,9 @@ def parse_sandbox_config(raw: object) -> ManagedSandboxConfig | None:
               modal: {image: docker.io/me/omnigent-host:latest}
             - provider: e2b
 
-    The returned config's scalar fields always describe the first
-    provider, so single-provider callers keep working unchanged.
-
     :param raw: The raw ``sandbox`` value from the server config YAML.
         ``None`` when the section is absent.
-    :returns: The parsed config, or ``None`` when *raw* is ``None``
+    :returns: The parsed deployment, or ``None`` when *raw* is ``None``
         (managed hosts not configured).
     :raises ValueError: When the section is present but malformed.
     """
@@ -829,20 +869,19 @@ def parse_sandbox_config(raw: object) -> ManagedSandboxConfig | None:
         raise ValueError("server config 'sandbox' must be a mapping")
     if "providers" in raw:
         return _parse_multi_provider_sandbox_config(raw)
-    return _parse_single_provider_sandbox_config(raw)
+    return ManagedSandboxDeployment.single(_parse_single_provider_sandbox_config(raw))
 
 
-def _parse_multi_provider_sandbox_config(raw: dict[str, object]) -> ManagedSandboxConfig:
+def _parse_multi_provider_sandbox_config(raw: dict[str, object]) -> ManagedSandboxDeployment:
     """
-    Parse the ``sandbox.providers`` list shape into one merged config.
+    Parse the ``sandbox.providers`` list shape into a deployment.
 
     Entries go through the single-provider parser with the shared
     top-level keys folded in, so a provider block validates identically
     in either shape.
 
     :param raw: The raw ``sandbox`` mapping, containing ``providers``.
-    :returns: A config whose scalar fields describe the first entry and
-        whose :attr:`ManagedSandboxConfig.providers` holds them all.
+    :returns: A deployment holding one config per listed provider.
     :raises ValueError: When the list or any entry is malformed.
     """
     if "provider" in raw:
@@ -878,16 +917,7 @@ def _parse_multi_provider_sandbox_config(raw: dict[str, object]) -> ManagedSandb
             raise ValueError(f"server config 'sandbox.providers' lists {name!r} more than once")
         seen.add(name)
         parsed.append(config)
-    first = parsed[0]
-    return ManagedSandboxConfig(
-        server_url=first.server_url,
-        launcher_factory=first.launcher_factory,
-        token_ttl_s=first.token_ttl_s,
-        managed_launch_supported=any(entry.managed_launch_supported for entry in parsed),
-        provider=first.provider,
-        host_config=first.host_config,
-        providers=tuple(parsed),
-    )
+    return ManagedSandboxDeployment(configs=tuple(parsed))
 
 
 def _parse_single_provider_sandbox_config(raw: dict[str, object]) -> ManagedSandboxConfig:
@@ -2263,21 +2293,21 @@ def _kubernetes_launcher_factory(
 
 
 def _select_provider_config(
-    config: ManagedSandboxConfig,
+    deployment: ManagedSandboxDeployment,
     provider: str | None,
 ) -> ManagedSandboxConfig:
     """
-    Narrow a deployment's config to the one provider a launch runs on.
+    Narrow a deployment to the one provider config a launch runs on.
 
-    :param config: The deployment's sandbox config.
+    :param deployment: The deployment's offered providers.
     :param provider: Requested provider short name, or ``None`` for the
         deployment default.
     :returns: The single-provider config to launch with.
     :raises HTTPException: 400 when *provider* is not configured.
     """
-    selected = config.for_provider(provider)
+    selected = deployment.for_provider(provider)
     if selected is None:
-        offered = ", ".join(config.launchable_providers()) or "none"
+        offered = ", ".join(deployment.launchable_providers()) or "none"
         raise HTTPException(
             status_code=400,
             detail=(
@@ -2290,7 +2320,7 @@ def _select_provider_config(
 
 async def launch_managed_host(
     *,
-    config: ManagedSandboxConfig,
+    config: ManagedSandboxDeployment,
     owner: str,
     host_store: HostStore,
     repo: RepoWorkspace | None = None,
@@ -2309,8 +2339,8 @@ async def launch_managed_host(
     and deletes the host row (which revokes the token) before
     re-raising.
 
-    :param config: The deployment's sandbox config (YAML-parsed or
-        directly constructed with a custom launcher factory).
+    :param config: The deployment's offered providers (YAML-parsed or
+        wrapped around a directly-constructed embedding config).
     :param owner: User the managed host acts for — the session
         creator, e.g. ``"alice@example.com"`` (or the reserved local
         user on single-user servers).
@@ -2338,8 +2368,8 @@ async def launch_managed_host(
         selected provider lacks managed-launch support; 502 when
         provisioning, cloning, host startup, or registration fails.
     """
-    config = _select_provider_config(config, provider)
-    launcher = config.launcher_factory()
+    entry = _select_provider_config(config, provider)
+    launcher = entry.launcher_factory()
     host_id = uuid.uuid4().hex
     # Visible label in the host picker; (owner, name) is the hosts
     # table PK, so embed the host_id's leading hex for uniqueness
@@ -2355,7 +2385,7 @@ async def launch_managed_host(
         ) from exc
     workspace = await _arm_and_start_host(
         launcher=launcher,
-        config=config,
+        config=entry,
         host_store=host_store,
         host_id=host_id,
         host_name=host_name,
@@ -2369,7 +2399,7 @@ async def launch_managed_host(
 
 async def relaunch_managed_host(
     *,
-    config: ManagedSandboxConfig,
+    config: ManagedSandboxDeployment,
     host: Host,
     host_store: HostStore,
     repo: RepoWorkspace | None = None,
@@ -2394,7 +2424,7 @@ async def relaunch_managed_host(
     new sandbox is torn down and the armed token revoked), so the
     session binding survives and a later attempt can retry.
 
-    :param config: The deployment's sandbox config.
+    :param config: The deployment's offered providers.
     :param host: The existing managed host row to relaunch
         (``sandbox_provider`` set; callers guard on that).
     :param host_store: Persistent host registrations.
@@ -2419,7 +2449,7 @@ async def relaunch_managed_host(
         )
     # Stay on the host's provider so the new generation is armed with ITS
     # token TTL, not the deployment default's.
-    config = config.recorded(host.sandbox_provider)
+    entry = config.recorded(host.sandbox_provider)
     # The old generation is normally already dead (that is why we are
     # here), but terminate defensively so a transient tunnel outage
     # can never leave two live sandboxes claiming one host identity.
@@ -2434,7 +2464,7 @@ async def relaunch_managed_host(
         ) from exc
     workspace = await _arm_and_start_host(
         launcher=launcher,
-        config=config,
+        config=entry,
         host_store=host_store,
         host_id=host.host_id,
         host_name=host.name,
@@ -2605,7 +2635,11 @@ async def _arm_and_start_host(
             await _terminate_sandbox_best_effort(launcher, record)
             await asyncio.to_thread(host_store.revoke_launch_token, host_id)
         else:
-            await terminate_managed_host(record, host_store, config)
+            # The row was just armed with THIS single-provider config, so a
+            # one-provider deployment tears it back down with the same launcher.
+            await terminate_managed_host(
+                record, host_store, ManagedSandboxDeployment.single(config)
+            )
         if isinstance(exc, HTTPException):
             raise
         message = exc.message if isinstance(exc, click.ClickException) else str(exc)
@@ -2642,7 +2676,7 @@ async def _wait_for_host_online(host_store: HostStore, host_id: str) -> None:
 
 def _launcher_for_teardown(
     host: Host,
-    config: ManagedSandboxConfig | None,
+    config: ManagedSandboxDeployment | None,
 ) -> SandboxHostLauncher | None:
     """
     Resolve the launcher that can terminate a managed host's sandbox.
@@ -2678,7 +2712,7 @@ def _launcher_for_teardown(
 
 def host_resume_supported(
     host: Host,
-    config: ManagedSandboxConfig | None,
+    config: ManagedSandboxDeployment | None,
 ) -> bool:
     """
     Whether :func:`resume_managed_host` could wake this host in place.
@@ -2709,7 +2743,7 @@ def host_resume_supported(
 
 def host_sandbox_is_running(
     host: Host,
-    config: ManagedSandboxConfig | None,
+    config: ManagedSandboxDeployment | None,
 ) -> bool | None:
     """
     Ask the matched provider whether this managed host's sandbox is running.
@@ -2736,7 +2770,7 @@ _resume_locks: dict[str, asyncio.Lock] = {}
 async def resume_managed_host(
     host_id: str,
     host_store: HostStore,
-    config: ManagedSandboxConfig | None,
+    config: ManagedSandboxDeployment | None,
     *,
     force: bool = False,
 ) -> None:
@@ -2786,7 +2820,7 @@ async def resume_managed_host(
     if launcher is None or not launcher.capabilities.resume_stopped or host.sandbox_id is None:
         return
     # Re-arm with the recorded provider's own TTL / host_config.
-    config = config.recorded(host.sandbox_provider)
+    entry = config.recorded(host.sandbox_provider)
     sandbox_id = host.sandbox_id
     # Single-flight per host (see _resume_locks).
     resume_lock = _resume_locks.setdefault(host_id, asyncio.Lock())
@@ -2815,7 +2849,7 @@ async def resume_managed_host(
                 token=token,
                 provider=launcher.provider,
                 sandbox_id=sandbox_id,
-                token_expires_at=now_epoch() + config.token_ttl_s,
+                token_expires_at=now_epoch() + entry.token_ttl_s,
             )
             await _start_sandbox_host(
                 launcher,
@@ -2823,11 +2857,11 @@ async def resume_managed_host(
                 token=token,
                 host_id=host.host_id,
                 host_name=host.name,
-                server_url=config.server_url,
+                server_url=entry.server_url,
                 repo_url=None,  # the persistent volume already holds the workspace
                 repo_branch=None,
                 repo_name=None,
-                host_config=config.host_config,
+                host_config=entry.host_config,
             )
             await _wait_for_host_online(host_store, host.host_id)
         except Exception as exc:
@@ -2844,7 +2878,7 @@ async def resume_managed_host(
 async def terminate_managed_host(
     host: Host,
     host_store: HostStore,
-    config: ManagedSandboxConfig | None,
+    config: ManagedSandboxDeployment | None,
 ) -> None:
     """
     Terminate a managed host's sandbox and delete its host row.
