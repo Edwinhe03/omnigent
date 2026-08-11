@@ -653,9 +653,9 @@ describe("leave a shared session", () => {
     );
   });
 
-  it("does not offer Leave on a row the viewer owns", () => {
+  it("shows Delete instead of Leave on a row the viewer owns", () => {
     // The owner grant is what keeps the session reachable — leaving would
-    // orphan it, so the owner archives or deletes instead.
+    // orphan it, so the owner deletes instead. One slot, not two items.
     mockConversations([CONV]);
     renderSidebar();
 
@@ -665,13 +665,31 @@ describe("leave a shared session", () => {
     expect(screen.queryByTestId("leave-conversation")).toBeNull();
   });
 
-  it("hides Leave in single-user mode, where nothing is shared", () => {
+  it("replaces the once-dead disabled Delete rather than adding an item", () => {
+    // The point of reusing the slot: a non-owner used to get Delete rendered
+    // disabled ("only the owner can delete"), a row that could never do
+    // anything. Leave takes that slot — so exactly ONE destructive item shows,
+    // and it is never a disabled Delete.
+    mockConversations([{ ...CONV, owner: "other@example.com" }]);
+    renderSidebar();
+    openSharedTab();
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: /My Session/ }));
+
+    expect(screen.getByTestId("leave-conversation")).toBeInTheDocument();
+    expect(screen.queryByTestId("delete-conversation")).toBeNull();
+  });
+
+  it("keeps the plain owner Delete in single-user mode, where nothing is shared", () => {
+    // Single-user mode has one identity and no sharing, so an unowned-looking
+    // row must not offer Leave — it falls back to Delete.
     mockConversations([{ ...CONV, owner: "other@example.com" }]);
     renderSidebar(undefined, serverInfo({ single_user: true }));
 
     fireEvent.contextMenu(screen.getByRole("link", { name: /My Session/ }));
 
     expect(screen.queryByTestId("leave-conversation")).toBeNull();
+    expect(screen.getByTestId("delete-conversation")).toBeInTheDocument();
   });
 });
 

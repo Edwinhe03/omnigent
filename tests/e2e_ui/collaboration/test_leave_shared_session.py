@@ -4,14 +4,19 @@ Every other sidebar row action is owner-only, so "Leave session" is the one
 action a shared-with viewer actually has: it drops their own grant so the
 session stops cluttering their sidebar, without touching the owner's copy.
 
+It is not a new menu item — the row's single destructive slot resolves by
+ownership. A non-owner previously got **Delete** rendered there permanently
+disabled ("only the session owner can delete"), a row that could never do
+anything; Leave takes that slot.
+
 The behavior under test:
 
 - A **non-owner** the session is shared with sees an enabled **Leave session**
-  item, and confirming it removes the row from their sidebar. Their access is
-  genuinely gone (the session 404s), while the **owner still sees it**.
-- The **owner** is offered no Leave item at all — their grant is what keeps the
-  session reachable, so leaving would orphan it (they archive or delete
-  instead).
+  in that slot (and NO Delete), and confirming it removes the row from their
+  sidebar. Their access is genuinely gone (the session 404s), while the
+  **owner still sees it**.
+- The **owner** gets **Delete** in the same slot and never Leave — their grant
+  is what keeps the session reachable, so leaving would orphan it.
 
 Runs against the dedicated multi-user server for the same reason as
 ``test_sidebar_ownership_gating``: the shared ``live_server`` is single-user,
@@ -114,11 +119,13 @@ def test_shared_viewer_leaves_session_and_row_disappears(
         expect(_row(page, sid)).to_be_visible(timeout=30_000)
 
         _open_row_menu(page, sid)
-        # Non-owner → Leave is offered and enabled (Rename/Share/Delete are all
-        # owner-gated, so this is the viewer's only real action).
+        # Non-owner → the destructive slot IS Leave: enabled, and in place of the
+        # Delete that used to render there permanently disabled. Rename/Share stay
+        # owner-gated, so this is the viewer's only real action.
         leave_item = page.get_by_test_id("leave-conversation")
         expect(leave_item).to_be_visible(timeout=15_000)
         expect(leave_item).not_to_have_attribute("data-disabled", re.compile(r".*"))
+        expect(page.get_by_test_id("delete-conversation")).to_have_count(0)
         leave_item.click()
 
         # Destructive → confirm first, then the row leaves the sidebar.
@@ -149,14 +156,14 @@ def test_shared_viewer_leaves_session_and_row_disappears(
         ctx.close()
 
 
-def test_owner_is_offered_no_leave_item(
+def test_owner_gets_delete_in_the_slot_not_leave(
     browser: Browser,
     multi_user_server: MultiUserServer,
 ) -> None:
-    """The owner sees Delete but no Leave — leaving would orphan the session.
+    """The owner's destructive slot is Delete, never Leave.
 
-    The guard is keyed on owning the session, so the item is absent rather than
-    disabled: there is no version of this action the owner should reach for.
+    Leaving would orphan the session, so ownership resolves the one slot to
+    Delete instead — the two are mutually exclusive rather than stacked.
     """
     server = multi_user_server
     sid = server.session_id
@@ -169,8 +176,8 @@ def test_owner_is_offered_no_leave_item(
         expect(_row(page, sid)).to_be_visible(timeout=30_000)
 
         _open_row_menu(page, sid)
-        # Delete proves the menu rendered its lifecycle group at all, so the
-        # missing Leave below is the gate and not a mis-timed assertion.
+        # Delete present proves the menu rendered its lifecycle group at all, so
+        # the missing Leave is the ownership branch and not a mis-timed assertion.
         expect(page.get_by_test_id("delete-conversation")).to_be_visible(timeout=15_000)
         expect(page.get_by_test_id("leave-conversation")).to_have_count(0)
     finally:

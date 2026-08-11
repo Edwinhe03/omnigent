@@ -34,7 +34,6 @@ import {
   ListFilterIcon,
   LaptopIcon,
   Loader2Icon,
-  LogOutIcon,
   MailIcon,
   Maximize2Icon,
   Minimize2Icon,
@@ -2941,7 +2940,14 @@ function ConversationMenuItems({
           </TooltipContent>
         </Tooltip>
       )}
-      {isOwner ? (
+      {/* One destructive slot, resolved by ownership — NOT two items. The owner
+          deletes the session; a shared-with viewer leaves it (gives up their own
+          grant). Non-owners used to get Delete rendered disabled here, an
+          always-dead row; Leave is the action that row should have offered all
+          along, so it reuses the slot, the trash icon, and the destructive
+          styling rather than adding a button beneath it. Single-user mode has no
+          sharing, so it keeps the plain owner Delete. */}
+      {isOwner || isSingleUser ? (
         <C.Item
           data-testid="delete-conversation"
           variant="destructive"
@@ -2951,33 +2957,12 @@ function ConversationMenuItems({
           Delete
         </C.Item>
       ) : (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div>
-              <C.Item data-testid="delete-conversation" disabled>
-                <Trash2Icon className="size-3.5" />
-                Delete
-              </C.Item>
-            </div>
-          </TooltipTrigger>
-          <TooltipContent side="left">
-            Only the session owner can delete this session
-          </TooltipContent>
-        </Tooltip>
-      )}
-      {/* Leave — the non-owner's counterpart to Delete: give up your own
-          access so the shared session stops cluttering your sidebar. Every
-          other item above is owner-only, so this is the one action a
-          shared-with viewer actually has. Hidden in single-user mode (nothing
-          is shared) and for the owner (leaving would orphan the session —
-          they archive or delete instead). */}
-      {!isSingleUser && !isOwner && (
         <C.Item
           data-testid="leave-conversation"
           variant="destructive"
           onSelect={() => setLeaveOpen(true)}
         >
-          <LogOutIcon className="size-3.5" />
+          <Trash2Icon className="size-3.5" />
           Leave session
         </C.Item>
       )}
