@@ -78,6 +78,10 @@ from omnigent.spec.types import AgentSpec
 
 _logger = logging.getLogger("omnigent.runner.app")
 
+#: Root of the installed ``omnigent`` package, for locating packaged assets
+#: (e.g. ``onboarding/agent/skills/``) independently of this module's depth.
+_OMNIGENT_PACKAGE_DIR = Path(__file__).resolve().parent.parent.parent
+
 _NATIVE_TERMINAL_START_FAILED_CODE = "native_terminal_start_failed"
 _REPL_TERMINAL_NAME = "tui"
 _REPL_TERMINAL_SESSION_KEY = "main"
@@ -268,9 +272,32 @@ def _register_auto_forwarder_task(session_id: str, task: asyncio.Task[object]) -
     _AUTO_FORWARDER_TASKS[session_id] = task
 
     def _evict(done_task: asyncio.Task[object]) -> None:
-        """Drop the registry entry unless a successor already replaced it."""
+        """Drop the registry entry unless a successor already replaced it; log the exit."""
         if _AUTO_FORWARDER_TASKS.get(session_id) is done_task:
             del _AUTO_FORWARDER_TASKS[session_id]
+        # Obituary: a stopped forwarder takes mirroring, status and the busy
+        # signal with it, so no exit path may be silent. ``exception()`` also
+        # retrieves the failure (no "Task exception was never retrieved").
+        if done_task.cancelled():
+            _logger.info(
+                "Transcript forwarder task %s cancelled; session=%s",
+                done_task.get_name(),
+                session_id,
+            )
+        elif (exc := done_task.exception()) is not None:
+            _logger.error(
+                "Transcript forwarder task %s died; session mirroring is down "
+                "until the terminal is recreated; session=%s",
+                done_task.get_name(),
+                session_id,
+                exc_info=exc,
+            )
+        else:
+            _logger.warning(
+                "Transcript forwarder task %s returned; session mirroring has stopped; session=%s",
+                done_task.get_name(),
+                session_id,
+            )
 
     task.add_done_callback(_evict)
 
@@ -4890,6 +4917,43 @@ async def _agy_cold_start_poll_sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
+# How long to wait for agy to write a cold-started conversation into this
+# session's Gemini dir before judging it foreign. agy creates the db as part of
+# ``StartCascade`` (observed same-second), so this only absorbs filesystem lag.
+_AGY_CASCADE_OWNERSHIP_GRACE_S = 3.0
+_AGY_CASCADE_OWNERSHIP_POLL_S = 0.25
+
+
+async def _agy_cascade_is_locally_owned(bridge_dir: Path, cascade_id: str) -> bool:
+    """
+    Whether *cascade_id* belongs to the agy running under THIS bridge dir.
+
+    agy stores each conversation as
+    ``<gemini_dir>/antigravity-cli/conversations/<id>.db``, and a ``StartCascade``
+    lands in the store of whichever agy answered the port — so the presence of
+    that file in OUR Gemini dir is the ownership proof the cold-start cannot get
+    any other way (no conversation exists yet to check by id).
+
+    Polls up to :data:`_AGY_CASCADE_OWNERSHIP_GRACE_S` so ordinary filesystem lag
+    is not mistaken for foreign ownership.
+
+    :param bridge_dir: This session's native Antigravity bridge directory.
+    :param cascade_id: The conversation id just created by ``StartCascade``.
+    :returns: ``True`` when the conversation db exists in this session's Gemini
+        dir within the grace window.
+    """
+    from omnigent.antigravity_native_bridge import agy_gemini_dir
+
+    db = agy_gemini_dir(bridge_dir) / "antigravity-cli" / "conversations" / f"{cascade_id}.db"
+    deadline = time.monotonic() + _AGY_CASCADE_OWNERSHIP_GRACE_S
+    while True:
+        if await asyncio.to_thread(db.is_file):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await _agy_cold_start_poll_sleep(_AGY_CASCADE_OWNERSHIP_POLL_S)
+
+
 async def _cold_start_agy_conversation(
     bridge_dir: Path,
     session_id: str,
@@ -5020,6 +5084,23 @@ async def _cold_start_agy_conversation(
             port,
             session_id,
             exc_info=True,
+        )
+        return None
+    # Confirm the cascade landed in THIS session's Gemini dir before adopting it.
+    # ``StartCascade`` against a foreign agy succeeds and returns an id, but that
+    # agy writes the conversation into its OWN ``--gemini_dir`` — persisting the
+    # id would durably cross-bind this session (the reader mirrors another
+    # session's conversation while our agy is orphaned). Belt-and-braces behind
+    # the port scoping in ``resolve_cold_start_agy_rpc_port``.
+    if not await _agy_cascade_is_locally_owned(bridge_dir, cascade_id):
+        _logger.warning(
+            "Antigravity cold-start: conversation %s created on port %s is NOT in this "
+            "session's Gemini dir — StartCascade hit a FOREIGN agy. Discarding it and "
+            "leaving the placeholder for session %s; the reader will bind our agy's own "
+            "conversation once a turn creates it.",
+            cascade_id,
+            port,
+            session_id,
         )
         return None
     # Persist the real id (replacing the ``agy_conv_*`` placeholder) so
@@ -5557,6 +5638,30 @@ def _publish_terminal_pending(
     )
 
 
+def _measured_prefix_bytes(transcript_path: Path) -> int | None:
+    """
+    Measure a just-written resume transcript so the forwarder can skip exactly it.
+
+    Taken before Claude launches, while the file holds only the synthesized
+    prefix. ``None`` on any read failure, which leaves the forwarder on its
+    live end-offset fallback.
+
+    :param transcript_path: Resume transcript this launch wrote, e.g.
+        ``Path("~/.claude/projects/-Users-me-repo/<sid>.jsonl")``.
+    :returns: File size in bytes, or ``None`` when it cannot be measured.
+    """
+    try:
+        return transcript_path.stat().st_size
+    except OSError:
+        _logger.warning(
+            "Could not measure synthesized Claude resume transcript; "
+            "forwarder will seed from the live transcript end; transcript=%s",
+            transcript_path,
+            exc_info=True,
+        )
+        return None
+
+
 def _native_terminal_start_error_payload(exc: BaseException, runtime_name: str) -> dict[str, str]:
     """
     Build the structured error payload for a native terminal start failure.
@@ -5701,10 +5806,14 @@ def _ensure_orchestrator_skills_in_bundle(
     target_dir = bundle_dir / "skills" / skill_name
     if target_dir.exists():
         return
-    source = (
-        Path(__file__).resolve().parent.parent / "onboarding" / "agent" / "skills" / skill_name
-    )
+    # Anchored on the package root, not a ``.parent`` count off this file:
+    # moving this module deeper must not silently break the source path.
+    source = _OMNIGENT_PACKAGE_DIR / "onboarding" / "agent" / "skills" / skill_name
     if not source.is_dir():
+        _logger.debug(
+            "Orchestrator skill source %s is not a directory; skipping injection",
+            source,
+        )
         return
     try:
         target_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -6145,6 +6254,12 @@ async def _auto_create_claude_terminal(
     # transcript that doesn't exist. See
     # designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
     resume_external_session_id: str | None = None
+    # Byte length of the resume transcript this launch synthesized, measured
+    # BEFORE Claude starts. The forwarder seeds its cursor from this rather than
+    # from a live end-offset: resolving the transcript path needs Claude's first
+    # hook, and the executor's prompt inject waits on the same boot, so a
+    # ``stat`` taken later routinely skips the freshly-injected message.
+    resume_prefix_bytes: int | None = None
     if server_client is not None and session_external_id is not None:
         from omnigent.claude_native import _ensure_local_claude_resume_transcript
 
@@ -6157,6 +6272,7 @@ async def _auto_create_claude_terminal(
             )
             if _transcript is not None:
                 resume_external_session_id = session_external_id
+                resume_prefix_bytes = _measured_prefix_bytes(_transcript)
         except Exception:  # noqa: BLE001 — best-effort; launch fresh on failure
             _logger.warning(
                 "Could not synthesize Claude resume transcript for %s; launching without --resume",
@@ -6203,6 +6319,7 @@ async def _auto_create_claude_terminal(
         if _cloned is not None:
             # Resume our OWN clone (plain --resume, no --fork-session).
             resume_external_session_id = our_uuid
+            resume_prefix_bytes = _measured_prefix_bytes(_cloned)
             # Record the assigned id now so Omnigent reflects the clone's own
             # Claude session immediately, and a later relaunch resumes it
             # via the normal cold-resume path (this branch is gated on
@@ -6265,6 +6382,7 @@ async def _auto_create_claude_terminal(
         )
         if _built is not None:
             resume_external_session_id = our_uuid
+            resume_prefix_bytes = _measured_prefix_bytes(_built)
             # Record the assigned id so Omnigent reflects the clone's own Claude
             # session and a later relaunch resumes it via the cold-resume
             # path above. Best-effort, mirroring the clone branch.
@@ -6578,6 +6696,7 @@ async def _auto_create_claude_terminal(
                 bridge_dir=bridge_dir,
                 agent_name="claude-native-ui",
                 start_at_end=resume_external_session_id is not None,
+                start_at_offset=resume_prefix_bytes,
                 auth=_runner_auth,
             )
         finally:
