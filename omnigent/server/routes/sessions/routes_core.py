@@ -1320,7 +1320,11 @@ def register_core_routes(
             it. The client reconciles the unknown id into its cache, then
             re-sends its watch-set including it, after which it is tracked
             like any normal watched row. Idle users with no new sessions
-            receive nothing — so the zero-traffic property holds."""
+            receive nothing — so the zero-traffic property holds.
+
+            Also handles the inverse ``session_removed`` (the user left a
+            shared session): an unwatched row can't surface in the diff
+            either, so it is pushed as a ``removed`` delta."""
             async for evt in user_session_stream.subscribe(_discovery_key(user_id)):
                 if not isinstance(evt, dict):
                     continue
@@ -1346,6 +1350,29 @@ def register_core_routes(
                             # discoverable on the client's next list reconcile.
                             _logger.warning(
                                 "session-updates discovery push failed for %r; "
+                                "falling back to list reconcile",
+                                sid,
+                                exc_info=True,
+                            )
+                elif evt_type == "session_removed":
+                    sid = evt.get("session_id")
+                    if not isinstance(sid, str):
+                        continue
+                    async with emit_lock:
+                        # Watched ⇒ the diff's own "removed" branch reports it
+                        # (and prunes last_sent); leave that to the ticker so
+                        # the id isn't announced twice.
+                        if sid in watched:
+                            continue
+                        try:
+                            await _send({"type": "removed", "ids": [sid]})
+                        except WebSocketDisconnect:
+                            raise
+                        except Exception:
+                            # As with the added-push above: the row still drops
+                            # on the client's next list reconcile.
+                            _logger.warning(
+                                "session-updates removal push failed for %r; "
                                 "falling back to list reconcile",
                                 sid,
                                 exc_info=True,

@@ -52,6 +52,10 @@ const mocks = vi.hoisted(() => {
     // mobile in-place project view test can assert both the list and the pick.
     projects: [] as string[],
     moveToProject: { mutate: vi.fn() },
+    leave: { mutate: vi.fn(), isPending: false },
+    // The signed-in viewer. Rows with no `owner` read as owned by them; a row
+    // owned by someone else is the shared case Leave applies to.
+    viewerId: "viewer@example.com" as string | null,
     conversations: [] as unknown[],
     pinnedStore,
   };
@@ -94,6 +98,7 @@ vi.mock("@/hooks/useConversations", () => ({
   setConversationPinned: vi.fn(() => Promise.resolve({})),
   PINNED_CONVERSATIONS_KEY: ["pinned-conversations"],
   useRenameConversation: () => mocks.rename,
+  useLeaveSession: () => mocks.leave,
   useArchiveConversation: () => ({ mutate: vi.fn() }),
   useBulkArchiveConversations: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   useBulkDeleteConversations: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
@@ -131,6 +136,15 @@ vi.mock("@/components/PermissionsModal", () => ({ PermissionsModal: () => null }
 // jsdom's default loopback origin would otherwise read as single-user and hide
 // the tabs the shared-session row actions rely on.
 vi.mock("@/lib/serverOrigin", () => ({ isCurrentServerLocal: () => false }));
+// Pin "who am I": ownership (and therefore Leave, which revokes the viewer's
+// own grant) is derived from this id. Unmocked it resolves to null in jsdom,
+// which reads as "not the owner" for shared rows but leaves Leave with no id
+// to revoke.
+vi.mock("@/lib/identity", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/identity")>()),
+  getCurrentUserId: () => mocks.viewerId,
+  resolveIdentity: () => Promise.resolve(mocks.viewerId),
+}));
 
 import { type Conversation, useConversations } from "@/hooks/useConversations";
 import { resetReadStateForTests, seedReadState } from "@/hooks/useUnseenConversations";
@@ -238,6 +252,7 @@ beforeEach(() => {
   mocks.rename.isSuccess = false;
   mocks.rename.isError = false;
   mocks.moveToProject.mutate.mockReset();
+  mocks.leave.mutate.mockReset();
   mocks.projects = [];
   // Default every test to the desktop viewport; the mobile flyout test opts in.
   mocks.isMobile = false;
@@ -599,6 +614,64 @@ describe("double-click to rename", () => {
 
     expect(screen.queryByTestId("rename-conversation-input")).toBeNull();
     expect(mocks.rename.mutate).not.toHaveBeenCalled();
+  });
+});
+
+describe("leave a shared session", () => {
+  // Every other row action is owner-only, so "Leave session" is the one thing
+  // a shared-with viewer can actually do: drop the session from their own
+  // sidebar without touching the owner's copy.
+
+  /** Switch to the "Shared with me" tab, where non-owned rows live. */
+  function openSharedTab() {
+    // Radix Tabs triggers activate on mousedown (primary button), not click.
+    fireEvent.pointerDown(screen.getByTestId("session-filter"), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(screen.getByTestId("session-filter-shared"));
+  }
+
+  it("offers Leave on a shared row and calls the mutation after confirming", () => {
+    mockConversations([{ ...CONV, owner: "other@example.com" }]);
+    renderSidebar();
+    openSharedTab();
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: /My Session/ }));
+    fireEvent.click(screen.getByTestId("leave-conversation"));
+
+    // Destructive, and the row vanishes on success — so it confirms first.
+    expect(mocks.leave.mutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("confirm-leave-conversation"));
+    // Leaving revokes the VIEWER's own grant, so the mutation carries their id
+    // — not the owner's. Sending the owner's id would be a revoke attempt the
+    // server rejects for lack of manage access.
+    expect(mocks.leave.mutate).toHaveBeenCalledWith(
+      { id: "conv_1", viewerId: "viewer@example.com" },
+      expect.anything(),
+    );
+  });
+
+  it("does not offer Leave on a row the viewer owns", () => {
+    // The owner grant is what keeps the session reachable — leaving would
+    // orphan it, so the owner archives or deletes instead.
+    mockConversations([CONV]);
+    renderSidebar();
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: /My Session/ }));
+
+    expect(screen.getByTestId("delete-conversation")).toBeInTheDocument();
+    expect(screen.queryByTestId("leave-conversation")).toBeNull();
+  });
+
+  it("hides Leave in single-user mode, where nothing is shared", () => {
+    mockConversations([{ ...CONV, owner: "other@example.com" }]);
+    renderSidebar(undefined, serverInfo({ single_user: true }));
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: /My Session/ }));
+
+    expect(screen.queryByTestId("leave-conversation")).toBeNull();
   });
 });
 

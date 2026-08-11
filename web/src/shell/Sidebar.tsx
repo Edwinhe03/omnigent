@@ -34,6 +34,7 @@ import {
   ListFilterIcon,
   LaptopIcon,
   Loader2Icon,
+  LogOutIcon,
   MailIcon,
   Maximize2Icon,
   Minimize2Icon,
@@ -113,6 +114,7 @@ import {
   useProjects,
   useProjectSessions,
   useConversations,
+  useLeaveSession,
   useMoveToProject,
   useDeleteProject,
   useRenameProject,
@@ -2668,6 +2670,7 @@ function ConversationMenuItems({
   setIsEditing,
   setStopOpen,
   setDeleteOpen,
+  setLeaveOpen,
   setMenuOpen,
   runArchive,
 }: {
@@ -2696,6 +2699,7 @@ function ConversationMenuItems({
   setIsEditing: (editing: boolean) => void;
   setStopOpen: (open: boolean) => void;
   setDeleteOpen: (open: boolean) => void;
+  setLeaveOpen: (open: boolean) => void;
   // Closes the controlled kebab after a project pick; a no-op for the
   // (uncontrolled) context menu, which Radix closes on select automatically.
   setMenuOpen: (open: boolean) => void;
@@ -2961,6 +2965,22 @@ function ConversationMenuItems({
           </TooltipContent>
         </Tooltip>
       )}
+      {/* Leave — the non-owner's counterpart to Delete: give up your own
+          access so the shared session stops cluttering your sidebar. Every
+          other item above is owner-only, so this is the one action a
+          shared-with viewer actually has. Hidden in single-user mode (nothing
+          is shared) and for the owner (leaving would orphan the session —
+          they archive or delete instead). */}
+      {!isSingleUser && !isOwner && (
+        <C.Item
+          data-testid="leave-conversation"
+          variant="destructive"
+          onSelect={() => setLeaveOpen(true)}
+        >
+          <LogOutIcon className="size-3.5" />
+          Leave session
+        </C.Item>
+      )}
     </>
   );
 }
@@ -3078,6 +3098,7 @@ function ConversationRow({
   const rename = useRenameConversation();
   const del = useStopAndDeleteConversation();
   const archive = useArchiveConversation();
+  const leave = useLeaveSession();
   const moveToProject = useMoveToProject();
   // The kebab's user-facing "Stop session" action. Archiving does NOT go
   // through here — the server stops the session itself once the archived
@@ -3106,6 +3127,7 @@ function ConversationRow({
   // Opt-in "delete local branch" checkbox (worktree sessions only).
   const [deleteBranch, setDeleteBranch] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
   // True while an archive is in flight. Drives the "Archiving…" status
   // row, mirroring delete's "Deleting…" indicator — without it the row
   // shows nothing while the archive completes.
@@ -3115,7 +3137,11 @@ function ConversationRow({
   // effective-permission level, so rename/share/move/drag are owner-only and
   // non-owners get a read-only row. (Finer-grained edit/manage affordances
   // live on the open-session view, which fetches the caller's real level.)
-  const isOwner = isOwnedByViewer(conversation, useViewerId());
+  // Also the id Leave revokes: leaving is a self-revoke, so it needs the
+  // viewer's own id — resolved by the time a non-owned row renders, since
+  // `isOwner` below is derived from it.
+  const viewerId = useViewerId();
+  const isOwner = isOwnedByViewer(conversation, viewerId);
   // Server-wide sharing kill switch (OMNIGENT_SHARING_MODE=off) reported by
   // /v1/info — disables the row's Share item even for managers. Fail open
   // (share enabled) while the capability probe is still loading.
@@ -3369,6 +3395,35 @@ function ConversationRow({
     );
   }
 
+  function confirmLeave() {
+    // Leave is a self-revoke, so it needs the viewer's own id. The menu item is
+    // gated on the row NOT being owned by the viewer, which is only decidable
+    // once the id has resolved — so this is non-null wherever it's reachable.
+    if (viewerId === null) return;
+    // Close immediately — the row drops out of the list on success, so there's
+    // nothing left to show progress against. A failure surfaces as a toast
+    // (the row is still there to retry from).
+    setLeaveOpen(false);
+    leave.mutate(
+      { id: conversation.id, viewerId },
+      {
+        onSuccess: () => {
+          // The session 404s for this user now, so don't leave them staring at
+          // its chat surface. Read the live activeId — they may have navigated
+          // away while the request was in flight.
+          if (activeIdRef.current === conversation.id) navigate("/", { replace: true });
+        },
+        onError: (err) =>
+          showToast(
+            <span>
+              Couldn't leave the session
+              {err instanceof Error && err.message ? `: ${err.message}` : ""}
+            </span>,
+          ),
+      },
+    );
+  }
+
   // Shared by the kebab dropdown and the right-click context menu so the two
   // menus render identical items. `setMenuOpen` is supplied per-call (the
   // controlled kebab passes the real setter; the uncontrolled context menu a
@@ -3392,6 +3447,7 @@ function ConversationRow({
     setIsEditing,
     setStopOpen,
     setDeleteOpen,
+    setLeaveOpen,
     runArchive,
   };
 
@@ -3719,6 +3775,41 @@ function ConversationRow({
               disabled={del.isPending}
             >
               Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={leaveOpen} onOpenChange={setLeaveOpen}>
+        <DialogContent
+          // Keep dialog clicks off the surrounding Link (same defensive
+          // handling as the delete dialog above).
+          onClick={(e) => e.stopPropagation()}
+        >
+          <DialogHeader>
+            <DialogTitle>Leave session?</DialogTitle>
+            <DialogDescription>
+              <span className="font-medium break-all">{label}</span> will be removed from your
+              sidebar. Nothing is deleted — the session and its history stay with its owner, who can
+              share it with you again.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="border-t-0 bg-transparent">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setLeaveOpen(false)}
+              disabled={leave.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              data-testid="confirm-leave-conversation"
+              onClick={confirmLeave}
+              disabled={leave.isPending}
+            >
+              Leave
             </Button>
           </DialogFooter>
         </DialogContent>
