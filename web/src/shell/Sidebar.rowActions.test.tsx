@@ -13,6 +13,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ServerInfo } from "@/lib/capabilities";
+import type * as IdentityModule from "@/lib/identity";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 
 // Controllable rename mutation so the double-click test can assert the
@@ -142,7 +143,7 @@ vi.mock("@/lib/serverOrigin", () => ({ isCurrentServerLocal: () => false }));
 // which reads as "not the owner" for shared rows but leaves Leave with no id
 // to revoke.
 vi.mock("@/lib/identity", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/identity")>()),
+  ...(await importOriginal<typeof IdentityModule>()),
   getCurrentUserId: () => mocks.viewerId,
   resolveIdentity: () => Promise.resolve(mocks.viewerId),
 }));

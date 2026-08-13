@@ -3330,13 +3330,10 @@ function ConversationRow({
           // its chat surface. Mirrors delete/archive's post-mutation navigate.
           if (isActive) navigate("/", { replace: true });
         },
-        onError: (err) =>
-          showToast(
-            <span>
-              Couldn't leave the session
-              {err instanceof Error && err.message ? `: ${err.message}` : ""}
-            </span>,
-          ),
+        onError: (err) => {
+          const detail = err instanceof Error && err.message ? `: ${err.message}` : "";
+          showToast(`Couldn't leave the session${detail}`);
+        },
       },
     );
   }
