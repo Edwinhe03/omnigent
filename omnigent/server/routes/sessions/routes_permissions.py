@@ -51,7 +51,6 @@ from omnigent.server.routes._sessions.common import (
 )
 from omnigent.server.routes._sessions.helpers import (
     _announce_session_added,
-    _announce_session_removed,
 )
 from omnigent.server.schemas import (
     AgentObject,
@@ -272,11 +271,9 @@ def register_permissions_routes(
                 code=ErrorCode.FORBIDDEN,
             )
         await asyncio.to_thread(permission_store.revoke, target_user_id, session_id)
-        if leaving_self:
-            # Drop the row from the leaver's other open tabs. The watch-set
-            # diff only reports ids the client already watches; this covers
-            # tabs where the row is listed but unwatched.
-            _announce_session_removed(user_id, session_id)
+        # The leaver's own tab drops the row via the client mutation's success
+        # handler; their other tabs converge on the next watch-set diff, which
+        # reports the now-inaccessible id as removed. No extra push needed.
         return Response(status_code=204)
 
     @router.get(

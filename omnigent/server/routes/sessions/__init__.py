@@ -349,7 +349,6 @@ from omnigent.server.routes._sessions.helpers import (
     _allow_remember_eligible as _allow_remember_eligible,
     _ancestor_session_ids as _ancestor_session_ids,
     _announce_session_added as _announce_session_added,
-    _announce_session_removed as _announce_session_removed,
     _apply_liveness_to_items as _apply_liveness_to_items,
     _apply_pending_policy_ask_writes as _apply_pending_policy_ask_writes,
     _attachment_disposition as _attachment_disposition,

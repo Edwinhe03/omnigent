@@ -531,24 +531,6 @@ def _announce_session_added(user_id: str | None, session_id: str) -> None:
     )
 
 
-def _announce_session_removed(user_id: str | None, session_id: str) -> None:
-    """
-    Push a ``session_removed`` discovery event to a user's updates streams.
-
-    The inverse of :func:`_announce_session_added`: called when a session stops
-    being accessible to ``user_id`` (they left a shared session), so their other
-    open tabs drop the row without waiting for a list refetch. A no-op when the
-    user has no stream connected.
-
-    :param user_id: The user who lost access, or ``None`` in single-user mode.
-    :param session_id: The no-longer-accessible session id, e.g.
-        ``"conv_abc123"``.
-    """
-    user_session_stream.publish(
-        _discovery_key(user_id), {"type": "session_removed", "session_id": session_id}
-    )
-
-
 def announce_hosts_changed(user_id: str | None) -> None:
     """
     Push a ``hosts_changed`` event to a user's session-updates streams.
@@ -9258,7 +9240,6 @@ __all__ = [
     "_allow_remember_eligible",
     "_ancestor_session_ids",
     "_announce_session_added",
-    "_announce_session_removed",
     "_apply_liveness_to_items",
     "_apply_pending_policy_ask_writes",
     "_attachment_disposition",
