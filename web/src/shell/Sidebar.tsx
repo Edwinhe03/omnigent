@@ -38,20 +38,18 @@ import {
   Maximize2Icon,
   Minimize2Icon,
   MoreHorizontalIcon,
-  PanelRightOpenIcon,
   PencilIcon,
   PinIcon,
   PinOffIcon,
   SearchIcon,
   Settings2Icon,
-  SettingsIcon,
   ShareIcon,
   SquareIcon,
   SquareCheckIcon,
   SquarePenIcon,
   Trash2Icon,
+  WalletIcon,
   XIcon,
-  PanelLeftOpenIcon,
 } from "lucide-react";
 import {
   DndContext,
@@ -69,6 +67,7 @@ import {
 } from "@dnd-kit/core";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useParams } from "@/lib/routing";
+import { SidebarHeaderActions } from "./SidebarHeaderActions";
 import omnigentWordmark from "@/assets/omnigent-wordmark.svg";
 import { Button } from "@/components/ui/button";
 import {
@@ -106,10 +105,10 @@ import {
 import {
   type Conversation,
   type PinnedConversationsResult,
-  BulkConversationMutationError,
   useArchiveConversation,
   useBulkArchiveConversations,
   useBulkDeleteConversations,
+  useBulkMoveToProject,
   useProjects,
   useProjectSessions,
   useConversations,
@@ -298,6 +297,7 @@ function useActiveNavItem(): {
   isNewChatPage: boolean;
   isInboxPage: boolean;
   isTasksPage: boolean;
+  isUsagePage: boolean;
   newSessionProjectName: string | null;
 } {
   const { conversationId: activeConversationId } = useParams<{ conversationId: string }>();
@@ -305,16 +305,18 @@ function useActiveNavItem(): {
   const leaf = location.pathname.split("/").filter(Boolean).at(-1);
   const isInboxPage = leaf === "inbox";
   const isTasksPage = leaf === "tasks";
-  const isNewSessionRoute = activeConversationId == null && !isInboxPage && !isTasksPage;
+  const isUsagePage = leaf === "usage";
+  const isNewSessionRoute =
+    activeConversationId == null && !isInboxPage && !isTasksPage && !isUsagePage;
   const requestedProject = isNewSessionRoute
     ? new URLSearchParams(location.search).get("project")
     : null;
   const newSessionProjectName = requestedProject || null;
-  // Exclude inbox/tasks: they also have no `:conversationId`, so they would
-  // otherwise light up the "New session" button. A project-prefilled new
-  // session belongs to that project row instead of the global nav item.
+  // Exclude inbox/tasks/usage: they also have no `:conversationId`, so they
+  // would otherwise light up the "New session" button. A project-prefilled
+  // new session belongs to that project row instead of the global nav item.
   const isNewChatPage = isNewSessionRoute && newSessionProjectName == null;
-  return { isNewChatPage, isInboxPage, isTasksPage, newSessionProjectName };
+  return { isNewChatPage, isInboxPage, isTasksPage, isUsagePage, newSessionProjectName };
 }
 
 /**
@@ -587,7 +589,8 @@ export function Sidebar({
   }
 
   // Which top-level nav button to highlight for the current route.
-  const { isNewChatPage, isInboxPage, isTasksPage, newSessionProjectName } = useActiveNavItem();
+  const { isNewChatPage, isInboxPage, isTasksPage, isUsagePage, newSessionProjectName } =
+    useActiveNavItem();
 
   // On /settings the card keeps its chrome but swaps the conversation list
   // for the settings section nav (see settingsNav.tsx) — entering settings
@@ -773,7 +776,12 @@ export function Sidebar({
         <SettingsSidebarBody onNavClick={onNavClick} />
       ) : (
         <>
-          <div className="flex h-12 shrink-0 items-center justify-between pr-3 pl-4">
+          {/* sidebar-header-row is the hook for the macOS Electron shell, where
+          this row shares the window's top strip with the traffic lights: the
+          brand mark is dropped and the actions slide left to sit beside the
+          window controls (see the [data-electron-mac] rules in index.css).
+          Inert in a browser and on other platforms, which keep the row below. */}
+          <div className="sidebar-header-row flex h-12 shrink-0 items-center justify-between pr-3 pl-4">
             {/* Brand mark doubles as the "home" affordance: clicking it
             returns to `/`, the new-session composer. Without this there
             is no way back to the landing composer once you're inside a
@@ -783,7 +791,8 @@ export function Sidebar({
             <Link
               to="/"
               onClick={onNavClick}
-              className="rounded-none transition-opacity duration-200 ease-[var(--ease-otto)] hover:opacity-70"
+              data-testid="sidebar-brand"
+              className="sidebar-brand rounded-none transition-opacity duration-200 ease-[var(--ease-otto)] hover:opacity-70"
             >
               <img
                 src={omnigentWordmark}
@@ -792,85 +801,17 @@ export function Sidebar({
                 className="h-[15px] w-auto shrink-0 translate-y-px dark:invert"
               />
             </Link>
-            <div className="flex items-center gap-1" data-testid="sidebar-header-actions">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label="Search"
-                    onClick={() => onOpenSearch?.()}
-                    className="size-6 text-muted-foreground hover:text-foreground"
-                    data-testid="sidebar-search-button"
-                  >
-                    <SearchIcon className="ui-icon" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">Search</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    asChild
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label="Settings"
-                    className="size-6 text-muted-foreground hover:text-foreground"
-                  >
-                    {/* No onNavClick: on mobile, entering Settings keeps the
-                    drawer open and swaps it to the section list. */}
-                    <Link to="/settings" data-testid="settings-button">
-                      <SettingsIcon className="ui-icon" />
-                    </Link>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">Settings</TooltipContent>
-              </Tooltip>
-              {!peek ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label="Close sidebar"
-                      onClick={onClose}
-                      className="size-6 text-muted-foreground hover:text-foreground"
-                    >
-                      {/* panel-right-open while the sidebar IS open — this button
-                    only renders in the open state (ChatHeader's PanelLeftIcon
-                    covers the collapsed state). */}
-                      <PanelRightOpenIcon className="ui-icon" />
-                    </Button>
-                  </TooltipTrigger>
-                  {/* Bottom placement keeps the tooltip clear of the macOS
-                Electron shell's traffic lights at the window's top edge. */}
-                  <TooltipContent side="bottom">Collapse sidebar</TooltipContent>
-                </Tooltip>
-              ) : (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label="Open sidebar"
-                      onClick={onOpen}
-                      className="size-6 text-muted-foreground hover:text-foreground"
-                    >
-                      {/* panel-right-open while the sidebar IS open — this button
-                    only renders in the open state (ChatHeader's PanelLeftIcon
-                    covers the collapsed state). */}
-                      <PanelLeftOpenIcon className="ui-icon" />
-                    </Button>
-                  </TooltipTrigger>
-                  {/* Bottom placement keeps the tooltip clear of the macOS
-                Electron shell's traffic lights at the window's top edge. */}
-                  <TooltipContent side="bottom">Open sidebar</TooltipContent>
-                </Tooltip>
-              )}
-            </div>
+            {/* On the macOS shell this copy is hidden and an identical cluster
+            renders in the title-bar strip instead (see AppShell), so the icons
+            keep their place when the sidebar collapses or peeks. Everywhere
+            else this is the only copy. */}
+            <SidebarHeaderActions
+              expanded={!peek}
+              // onOpen is optional (the sidebar renders standalone in tests), so
+              // fall back to a no-op rather than widening the child's contract.
+              onToggle={peek ? () => onOpen?.() : onClose}
+              onOpenSearch={onOpenSearch}
+            />
           </div>
 
           <div className="flex flex-col gap-0 px-2 pt-2 pb-0" data-testid="sidebar-primary-nav">
@@ -975,6 +916,29 @@ export function Sidebar({
                     {inboxCount}
                   </span>
                 )}
+              </Link>
+            </Button>
+            <Button
+              asChild
+              variant="ghost"
+              className={cn(
+                SIDEBAR_ROW,
+                "w-full justify-start border-0 font-normal",
+                SIDEBAR_HOVER_HIGHLIGHT,
+                isUsagePage && SIDEBAR_ACTIVE_HIGHLIGHT,
+              )}
+              data-testid="usage-nav"
+            >
+              <Link to="/usage" onClick={onNavClick}>
+                <WalletIcon
+                  className={cn(
+                    "ui-icon",
+                    isUsagePage
+                      ? "text-[var(--sidebar-active-foreground)]"
+                      : "text-muted-foreground",
+                  )}
+                />
+                Usage
               </Link>
             </Button>
           </div>
@@ -1935,6 +1899,7 @@ function ConversationList({
                         allConversations={projectSessionPool}
                         onDeselectAll={onDeselectAll}
                         onExit={onExitSelectionMode}
+                        onProjectAssigned={expandProject}
                       />
                     ) : undefined
                   }
@@ -2018,6 +1983,7 @@ function ConversationList({
                             allConversations={sections.sessions}
                             onDeselectAll={onDeselectAll}
                             onExit={onExitSelectionMode}
+                            onProjectAssigned={expandProject}
                           />
                         ) : undefined
                       }
@@ -3064,14 +3030,6 @@ function ConversationRow({
   // project flyout's HoverCard and leave it lingering over the chat. Gate the
   // flyout off below the `md` breakpoint (see `projectFlyoutName`).
   const isMobile = useIsMobileViewport();
-  // Track the *live* active conversation id. Delete is fire-and-forget,
-  // so the user can navigate to another conversation before the mutation
-  // resolves — the onSuccess redirect must key off where they are now,
-  // not the `isActive` captured when delete was initiated.
-  const activeIdRef = useRef(activeId);
-  useEffect(() => {
-    activeIdRef.current = activeId;
-  }, [activeId]);
   // When this row becomes the active conversation (e.g. a freshly created
   // session navigated to via `/c/:id`), scroll it toward the center of the
   // sidebar so it's comfortably in view rather than pinned to an edge.
@@ -3114,8 +3072,8 @@ function ConversationRow({
   const [shareOpen, setShareOpen] = useState(false);
   const [leaveOpen, setLeaveOpen] = useState(false);
   // True while an archive is in flight. Drives the "Archiving…" status
-  // row, mirroring delete's "Deleting…" indicator — without it the row
-  // shows nothing while the archive completes.
+  // row — without it the row shows nothing while the archive completes.
+  // Delete needs no counterpart: it drops its row optimistically.
   const [isArchiving, setIsArchiving] = useState(false);
   const gitBranch = conversation.git_branch ?? null;
   // Every row action gates on ownership alone — the sidebar carries no
@@ -3288,26 +3246,6 @@ function ConversationRow({
     );
   }
 
-  // While a delete is in flight (or after it failed), swap the
-  // interactive row for a status row so the user sees progress without
-  // the dialog blocking. On success the row is spliced out of the
-  // cached list and this row unmounts; on error we keep it with
-  // retry/dismiss affordances.
-  if (del.isPending || del.isError) {
-    return (
-      <li>
-        <DeletingRow
-          label={label}
-          isError={del.isError}
-          // `del.variables` holds the args from the last mutate call,
-          // so retry replays the exact same delete (incl. deleteBranch).
-          onRetry={() => del.variables && runDelete(del.variables)}
-          onDismiss={() => del.reset()}
-        />
-      </li>
-    );
-  }
-
   // Archiving is a single PATCH (see runArchive); show a status row for the
   // span instead of leaving the row looking idle. The spinner stays up until
   // the row itself leaves the sidebar: on success the list refetches and this
@@ -3323,27 +3261,19 @@ function ConversationRow({
     );
   }
 
-  function runDelete(args: { id: string; deleteBranch?: boolean }) {
-    del.mutate(args, {
-      onSuccess: () => {
-        // If the user is *still* viewing the conversation we just
-        // deleted, bounce back to `/` so the chat surface doesn't
-        // 404-loop on the now-missing id. Read the live activeId (ref)
-        // — they may have navigated away while the delete was in flight.
-        if (activeIdRef.current === conversation.id) navigate("/", { replace: true });
-      },
-    });
-  }
-
   function confirmDelete() {
-    // Fire-and-forget: close the dialog immediately so the user isn't
-    // blocked on the (potentially slow) DELETE — worktree cleanup can
-    // take seconds. The row renders its own "Deleting…" indicator while
-    // `del.isPending`, and a retryable error state if it fails.
-    const args = { id: conversation.id, deleteBranch: gitBranch !== null && deleteBranch };
+    // Fire-and-forget: close the dialog and drop the row immediately so the
+    // user isn't blocked on the (potentially slow) DELETE — server-side
+    // teardown can take seconds. The mutation removes the row from the
+    // cached lists optimistically, which unmounts this component, so
+    // anything that must happen on delete either runs here or lives in the
+    // hook (a mutate-level callback would never fire).
     setDeleteOpen(false);
     setDeleteBranch(false);
-    runDelete(args);
+    // Viewing the session being deleted? Leave now, so the chat surface
+    // doesn't sit on an id that's about to 404.
+    if (isActive) navigate("/", { replace: true });
+    del.mutate({ id: conversation.id, deleteBranch: gitBranch !== null && deleteBranch });
   }
 
   function runArchive() {
@@ -3374,7 +3304,10 @@ function ConversationRow({
       {
         // Point the user at where the session went — it's no longer in
         // the sidebar list, so surface its new home in Settings.
-        onSuccess: showArchivedToast,
+        onSuccess: () => {
+          if (isActive) navigate("/", { replace: true });
+          showArchivedToast();
+        },
         onError: () => setIsArchiving(false),
       },
     );
@@ -3394,9 +3327,8 @@ function ConversationRow({
       {
         onSuccess: () => {
           // The session 404s for this user now, so don't leave them staring at
-          // its chat surface. Read the live activeId — they may have navigated
-          // away while the request was in flight.
-          if (activeIdRef.current === conversation.id) navigate("/", { replace: true });
+          // its chat surface. Mirrors delete/archive's post-mutation navigate.
+          if (isActive) navigate("/", { replace: true });
         },
         onError: (err) =>
           showToast(
@@ -3898,76 +3830,12 @@ function PinnedProjectFlyoutContent({
 }
 
 /**
- * Status row shown in place of a conversation while its delete is in
- * flight (`isError === false`) or after it failed (`isError === true`).
- * Keeps the user un-blocked: the delete dialog closes immediately and
- * this surfaces progress / failure inline in the sidebar.
- */
-function DeletingRow({
-  label,
-  isError,
-  onRetry,
-  onDismiss,
-}: {
-  label: string;
-  isError: boolean;
-  onRetry: () => void;
-  onDismiss: () => void;
-}) {
-  if (isError) {
-    return (
-      <div
-        className="flex w-full items-center gap-1.5 rounded-md px-2 py-2 text-ui"
-        data-testid="conversation-delete-failed"
-        role="alert"
-      >
-        <AlertTriangleIcon className="size-3.5 shrink-0 text-destructive" />
-        {/* Name the session in the visible text — with multiple failed
-            deletes the user must be able to tell the rows apart. */}
-        <span
-          className="min-w-0 flex-1 truncate text-destructive"
-          title={`Couldn't delete ${label}`}
-        >
-          Couldn't delete <span className="font-medium">{label}</span>
-        </span>
-        <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5" onClick={onRetry}>
-          Retry
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Dismiss delete error"
-          onClick={onDismiss}
-        >
-          <XIcon className="size-3.5" />
-        </Button>
-      </div>
-    );
-  }
-  return (
-    // Match the interactive row's responsive metrics so the swap only changes
-    // color/opacity rather than shifting the list.
-    <div
-      className={cn(SIDEBAR_ROW, "flex w-full items-center text-muted-foreground opacity-70")}
-      data-testid="conversation-deleting"
-      aria-live="polite"
-    >
-      <Loader2Icon className="size-3.5 shrink-0 animate-spin" aria-hidden />
-      <span className="min-w-0 flex-1 truncate" title={label}>
-        {label}
-      </span>
-      <span className="shrink-0 text-sm">Deleting…</span>
-    </div>
-  );
-}
-
-/**
  * In-flight status row shown while a session is being archived (the
- * archive PATCH in ConversationRow.runArchive). Mirrors the
- * non-error arm of {@link DeletingRow}; archive failures fall back to
- * the interactive row rather than a persistent error state, so there's
- * no retry/dismiss affordance here.
+ * archive PATCH in ConversationRow.runArchive). Delete has no
+ * counterpart: it removes its row optimistically, so there is nothing
+ * left to show progress on. Archive failures fall back to the
+ * interactive row rather than a persistent error state, so there's no
+ * retry/dismiss affordance here.
  */
 function ArchivingRow({ label }: { label: string }) {
   return (
@@ -4425,16 +4293,20 @@ function BulkActionBar({
   allConversations,
   onDeselectAll,
   onExit,
+  onProjectAssigned,
 }: {
   selectedIds: Set<string>;
   allConversations: Conversation[];
   onDeselectAll: () => void;
   onExit: () => void;
+  onProjectAssigned?: (projectName: string) => void;
 }) {
   const navigate = useNavigate();
   const { conversationId: activeId } = useParams<{ conversationId: string }>();
   const bulkArchive = useBulkArchiveConversations();
   const bulkDelete = useBulkDeleteConversations();
+  const bulkMove = useBulkMoveToProject();
+  const { data: projects = [] } = useProjects();
   const viewerId = useViewerId();
 
   const selectedConversations = useMemo(
@@ -4461,7 +4333,7 @@ function BulkActionBar({
     ownedSelected.length > 0 && (archivedSelected.length === 0 || nonArchivedSelected.length === 0);
 
   const count = selectedIds.size;
-  const isBusy = bulkArchive.isPending || bulkDelete.isPending;
+  const isBusy = bulkArchive.isPending || bulkDelete.isPending || bulkMove.isPending;
 
   // Delete acts only on owned rows, so surface that count on the control when it
   // differs from "N selected" — otherwise a mixed-ownership selection (reachable
@@ -4476,6 +4348,21 @@ function BulkActionBar({
       : "Delete";
 
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [moveSearch, setMoveSearch] = useState("");
+
+  function handleMoveToProject(project: string) {
+    const ids = ownedSelected.map((c) => c.id);
+    if (ids.length === 0) return;
+    bulkMove.mutate(
+      { ids, project },
+      {
+        onSuccess: () => {
+          if (project) onProjectAssigned?.(project);
+          onExit();
+        },
+      },
+    );
+  }
 
   function handleArchive() {
     if (nonArchivedSelected.length === 0) return;
@@ -4483,6 +4370,8 @@ function BulkActionBar({
       { ids: nonArchivedSelected.map((c) => c.id), archived: true },
       {
         onSuccess: () => {
+          if (activeId && nonArchivedSelected.some((c) => c.id === activeId))
+            navigate("/", { replace: true });
           onDeselectAll();
         },
       },
@@ -4505,21 +4394,14 @@ function BulkActionBar({
     const ids = ownedSelected.map((c) => c.id);
     if (ids.length === 0) return;
     setConfirmDeleteOpen(false);
-    bulkDelete.mutate(ids, {
-      onSuccess: () => {
-        if (activeId && ids.includes(activeId)) navigate("/", { replace: true });
-        onDeselectAll();
-      },
-      onError: (error) => {
-        if (
-          activeId &&
-          error instanceof BulkConversationMutationError &&
-          error.succeeded.includes(activeId)
-        ) {
-          navigate("/", { replace: true });
-        }
-      },
-    });
+    // The rows leave the sidebar optimistically, so the selection is already
+    // meaningless and the chat surface would be sitting on an id that's about
+    // to 404. Both are settled here rather than in a mutate-level callback:
+    // this bar unmounts with the selection, and callbacks on an unmounted
+    // observer never fire.
+    if (activeId && ids.includes(activeId)) navigate("/", { replace: true });
+    onDeselectAll();
+    bulkDelete.mutate(ids);
   }
 
   return (
@@ -4593,6 +4475,65 @@ function BulkActionBar({
                 <TooltipContent side="bottom">Unarchive</TooltipContent>
               </Tooltip>
             )}
+            <DropdownMenu
+              onOpenChange={(open) => {
+                if (!open) setMoveSearch("");
+              }}
+            >
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      className="shrink-0"
+                      disabled={isBusy || ownedSelected.length === 0}
+                      aria-label="Move to project"
+                      data-testid="bulk-move-to-project"
+                    >
+                      {bulkMove.isPending ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        <FolderInputIcon className="size-3.5" />
+                      )}
+                    </Button>
+                  </DropdownMenuTrigger>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Move to project</TooltipContent>
+              </Tooltip>
+              <DropdownMenuContent align="end" className="w-52">
+                <div className="flex items-center gap-2 border-b px-2 py-1.5">
+                  <SearchIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                  <input
+                    className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                    placeholder="Search projects"
+                    value={moveSearch}
+                    onChange={(e) => setMoveSearch(e.target.value)}
+                    onKeyDown={(e) => e.stopPropagation()}
+                  />
+                </div>
+                <div className="max-h-48 overflow-y-auto">
+                  {(moveSearch
+                    ? projects.filter((p) =>
+                        p.name.toLowerCase().includes(moveSearch.toLowerCase()),
+                      )
+                    : projects
+                  ).map((p) => (
+                    <DropdownMenuItem
+                      key={p.name}
+                      className="px-2 py-1"
+                      onSelect={() => handleMoveToProject(p.name)}
+                    >
+                      <span className="flex-1 truncate text-left">{p.name}</span>
+                    </DropdownMenuItem>
+                  ))}
+                  {projects.length === 0 && (
+                    <p className="px-2 py-1.5 text-sm text-muted-foreground">No projects yet.</p>
+                  )}
+                </div>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -4617,7 +4558,7 @@ function BulkActionBar({
           </div>
         </div>
 
-        {(bulkArchive.isError || bulkDelete.isError) && (
+        {(bulkArchive.isError || bulkDelete.isError || bulkMove.isError) && (
           <p className="text-sm text-destructive" role="alert">
             Some actions failed. Retry or dismiss.
           </p>

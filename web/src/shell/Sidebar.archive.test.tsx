@@ -49,6 +49,7 @@ vi.mock("@/hooks/useConversations", () => ({
   useArchiveConversation: () => mocks.archive,
   useBulkArchiveConversations: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   useBulkDeleteConversations: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+  useBulkMoveToProject: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   useBulkStopSessions: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   useStopSession: () => mocks.stop,
   useProjects: () => ({ data: [] }),
@@ -191,7 +192,7 @@ describe("archive flow", () => {
     const row = screen.getByTestId("conversation-archiving");
     expect(within(row).getByText("Archiving…")).toBeInTheDocument();
     // The interactive link is replaced by the status row, so the session
-    // can't be re-opened or re-archived mid-flight (mirrors Deleting…).
+    // can't be re-opened or re-archived mid-flight.
     expect(screen.queryByRole("link", { name: /My Session/ })).not.toBeInTheDocument();
   });
 

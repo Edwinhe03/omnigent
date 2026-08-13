@@ -120,6 +120,7 @@ from omnigent.runner.native import (
     _resolve_opencode_compact_model,
     _resolved_spec_workdir,
     _resolved_workdir_for_spec,
+    _rewrap_like,
     _session_labels_for_runner_spawn,
     _session_payload_for_host_spawn_check,
     _unwrap_resolved_spec,
@@ -614,6 +615,31 @@ class _SessionSnapshot:
     sub_agent_name: str | None = None
     parent_session_id: str | None = None
     agent_name: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _CommentRelayBinding:
+    """A running comment relay plus the agent and bridge it was built for.
+
+    A relay advertises the tool surface of one agent spec and writes it into
+    one bridge directory. Recording both lets
+    ``_ensure_comment_relay_started`` notice that the session moved to a
+    different agent and replace the relay, instead of leaving the previous
+    agent's surface advertised to the new harness.
+
+    :param relay: The relay currently serving the session.
+    :param spec_entry: Resolved spec the advertised surface was built from,
+        compared by identity: the session spec cache hands back the same
+        object until an agent switch or an agent update evicts it, so a
+        changed object means the surface has to be rebuilt. ``None`` when
+        the spec could not be resolved and the fallback surface was used.
+    :param bridge_dir: Directory the relay wrote ``tool_relay.json`` into,
+        e.g. ``Path("/tmp/omnigent-bridge/conv_abc123")``.
+    """
+
+    relay: ClaudeNativeToolRelay
+    spec_entry: _SpecEntry | None
+    bridge_dir: Path
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1938,7 +1964,7 @@ def create_runner_app(
     _session_sub_agent_names: dict[str, str] = {}
     _session_tool_schemas: dict[str, list[_JsonObject]] = {}  # session_id → cached tool schemas
     _session_mcp_spec_hash: dict[str, str] = {}  # session_id → last MCP spec hash
-    _session_comment_relays: dict[str, ClaudeNativeToolRelay] = {}
+    _session_comment_relays: dict[str, _CommentRelayBinding] = {}
     _codex_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     _pi_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     _opencode_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
@@ -2716,19 +2742,18 @@ def create_runner_app(
             spec = _unwrap_spec_entry(spec_entry)
             raw_sub_agent_name = body.get("sub_agent_name")
             _sa_name_assign = cast(str | None, raw_sub_agent_name)
+            # A sub-agent's bundle assets live under its own directory; keeping
+            # the parent's workdir would load the parent's skills and local
+            # tools into the child.
             if _sa_name_assign:
-                from omnigent.runtime.workflow import _find_spec_by_name
-
-                _sub_spec = _find_spec_by_name(spec, _sa_name_assign)
-                if _sub_spec is not None:
-                    spec = _sub_spec
-                    spec_entry = (
-                        ResolvedSpec(spec=spec, workdir=_resolved_spec_workdir(spec_entry))
-                        if _resolved_spec_workdir(spec_entry) is not None
-                        else spec
-                    )
-                else:
+                _sub_entry = _native_runtime._resolve_sub_agent_spec_entry(
+                    spec_entry, _sa_name_assign
+                )
+                if _sub_entry is None:
                     _warn_unresolved_sub_agent(session_id, _sa_name_assign)
+                else:
+                    spec_entry = _sub_entry
+                    spec = _unwrap_resolved_spec(_sub_entry)
             harness_name = spec.executor.config.get("harness") or spec.executor.type
             harness_name = canonicalize_harness(harness_name) or harness_name
 
@@ -3339,8 +3364,8 @@ def create_runner_app(
         _session_fs_registries.pop(session_id, None)
         _session_agent_ids.pop(session_id, None)
         _session_tool_schemas.pop(session_id, None)
-        if _relay := _session_comment_relays.pop(session_id, None):
-            _relay.close()
+        if _binding := _session_comment_relays.pop(session_id, None):
+            _binding.relay.close()
         _session_histories.pop(session_id, None)
         _last_server_item_id.pop(session_id, None)
         _session_event_queues.pop(session_id, None)
@@ -5053,6 +5078,24 @@ def create_runner_app(
         logger=_logger,
     )
 
+    def _discard_comment_relay(session_id: str, relay: ClaudeNativeToolRelay) -> None:
+        """Unbind and close *relay*, unless another path already replaced it.
+
+        Removal is by relay instance rather than by session id: a
+        replacement installed while the caller was working owns the entry
+        and has already closed *relay*, so popping the key would tear down
+        the newer relay instead of the intended one.
+
+        :param session_id: Session/conversation id the relay was bound to.
+        :param relay: The relay instance the caller installed.
+        :returns: None.
+        """
+        binding = _session_comment_relays.get(session_id)
+        if binding is None or binding.relay is not relay:
+            return
+        del _session_comment_relays[session_id]
+        relay.close()
+
     async def _ensure_comment_relay_started(
         session_id: str,
         *,
@@ -5061,41 +5104,78 @@ def create_runner_app(
         await_notify: bool = False,
         session_labels: Mapping[str, str] | None = None,
     ) -> None:
-        if session_id in _session_comment_relays:
-            return
-
         import json as _json
 
         from omnigent.claude_native_bridge import (
+            BRIDGE_ID_LABEL_KEY,
             bridge_dir_for_bridge_id,
             post_tools_changed,
             start_tool_relay,
         )
 
+        try:
+            spec_entry = await _resolve_session_spec_entry(session_id)
+        except OmnigentError:
+            # Resolution failed; this is not the same as a session that
+            # resolves to no spec. A relay already serving the session was
+            # built from a real spec, so replacing it with the fallback
+            # surface would withdraw spec-gated tools the agent does grant.
+            # Keep it: once resolution recovers, the resolved spec differs
+            # from the stored one and the relay rebuilds then.
+            if session_id in _session_comment_relays:
+                return
+            spec_entry = None
+
+        # The bridge dir, when the caller pinned it down or handed over the
+        # labels it comes from. Deriving it any other way costs a server
+        # round trip, which a session whose agent has not changed must not
+        # pay on every turn.
+        known_bridge_dir: Path | None = None
         if explicit_bridge_dir is not None:
-            bridge_dir = explicit_bridge_dir
-        else:
-            if bridge_id is None:
-                bridge_id = await _claude_native_bridge_id_with_optional_labels(
+            known_bridge_dir = explicit_bridge_dir
+        elif bridge_id is not None:
+            known_bridge_dir = bridge_dir_for_bridge_id(bridge_id or session_id)
+        elif session_labels is not None:
+            known_bridge_dir = bridge_dir_for_bridge_id(
+                session_labels.get(BRIDGE_ID_LABEL_KEY) or session_id
+            )
+
+        # Same agent and no bridge hint to check against: skip the lookup that
+        # would cost a server round trip. This rests on a bridge id only ever
+        # being reassigned alongside the agent (a native-harness-family
+        # switch), which the spec comparison already caught. The callers that
+        # can reassign it independently — the terminal-launch and per-harness
+        # startup paths — all pass a bridge hint and take the branch below.
+        current = _session_comment_relays.get(session_id)
+        if current is not None and current.spec_entry is spec_entry and known_bridge_dir is None:
+            return
+
+        bridge_dir = known_bridge_dir
+        if bridge_dir is None:
+            bridge_dir = bridge_dir_for_bridge_id(
+                await _claude_native_bridge_id_with_optional_labels(
                     server_client=server_client,
                     session_id=session_id,
                     session_labels=session_labels,
                 )
+                or session_id
+            )
 
-            if session_id in _session_comment_relays:
-                return
-
-            bridge_dir = bridge_dir_for_bridge_id(bridge_id or session_id)
-
-        try:
-            relay_spec = await _resolve_session_agent_spec(session_id)
-        except OmnigentError:
-            relay_spec = None
-        if session_id in _session_comment_relays:
+        # Re-read after the awaits above: a concurrent caller may have
+        # installed a relay that already matches the current agent.
+        current = _session_comment_relays.get(session_id)
+        if (
+            current is not None
+            and current.spec_entry is spec_entry
+            and current.bridge_dir == bridge_dir
+        ):
             return
+
         from omnigent.runner.tool_dispatch import build_native_relay_tool_schemas
 
-        relay_schemas: list[_JsonObject] = build_native_relay_tool_schemas(relay_spec)
+        relay_schemas: list[_JsonObject] = build_native_relay_tool_schemas(
+            _unwrap_spec_entry(spec_entry)
+        )
 
         _captured_session_id = session_id
 
@@ -5127,7 +5207,18 @@ def create_runner_app(
                 exc_info=True,
             )
             return
-        _session_comment_relays[session_id] = relay
+        superseded = _session_comment_relays.get(session_id)
+        _session_comment_relays[session_id] = _CommentRelayBinding(
+            relay=relay,
+            spec_entry=spec_entry,
+            bridge_dir=bridge_dir,
+        )
+        # Close last: the new advertisement is already written, and
+        # ClaudeNativeToolRelay.close only unlinks a tool_relay.json that
+        # still points at the relay being closed, so a shared bridge dir
+        # keeps the new file.
+        if superseded is not None:
+            superseded.relay.close()
 
         async def _notify_tools_changed() -> None:
             try:
@@ -5233,28 +5324,30 @@ def create_runner_app(
                         exc_info=True,
                     )
 
-        _sa_name = await _recover_sub_agent_name(conv)
-        if _sa_name and cached_spec is not None:
-            from omnigent.runtime.workflow import _find_spec_by_name
+        # The resolver branches above write straight into the cache, so the
+        # entry read at the top of this block can already be stale.
+        cached_spec_entry = _session_spec_cache.get(conv, cached_spec_entry)
 
-            sub_spec = _find_spec_by_name(cached_spec, _sa_name)
-            if sub_spec is not None:
-                cached_spec = sub_spec
-                _session_spec_cache[conv] = (
-                    ResolvedSpec(spec=cached_spec, workdir=cached_spec_workdir)
-                    if cached_spec_workdir is not None
-                    else cached_spec
-                )
+        _sa_name = await _recover_sub_agent_name(conv)
+        # The child's workdir is rooted before _spec_with_workdir_paths below,
+        # which joins relative local-tool paths onto whatever workdir is current.
+        if _sa_name and cached_spec is not None:
+            sub_entry = _native_runtime._resolve_sub_agent_spec_entry(cached_spec_entry, _sa_name)
+            if sub_entry is None:
+                # Suppress if the cache already holds the child spec (prior turn
+                # or POST /v1/sessions already swapped it in).
+                if cached_spec.name != _sa_name:
+                    _warn_unresolved_sub_agent(conv, _sa_name)
             else:
-                _warn_unresolved_sub_agent(conv, _sa_name)
+                cached_spec_entry = sub_entry
+                cached_spec = _unwrap_resolved_spec(sub_entry)
+                cached_spec_workdir = _resolved_spec_workdir(sub_entry)
+                _session_spec_cache[conv] = sub_entry
 
         cached_spec = _spec_with_workdir_paths(cached_spec, cached_spec_workdir)
         if cached_spec is not None:
-            _session_spec_cache[conv] = (
-                ResolvedSpec(spec=cached_spec, workdir=cached_spec_workdir)
-                if cached_spec_workdir is not None
-                else cached_spec
-            )
+            cached_spec_entry = _rewrap_like(cached_spec_entry, cached_spec, cached_spec_workdir)
+            _session_spec_cache[conv] = cached_spec_entry
 
         harness_name: str | None = None
         spawn_env: dict[str, str] | None = None
@@ -5352,7 +5445,7 @@ def create_runner_app(
 
                     _tmgr = ToolManager(
                         cached_spec,
-                        workdir=cached_spec_workdir or runner_workspace,
+                        workdir=_resolved_workdir_for_spec(cached_spec_entry, runner_workspace),
                     )
                     all_tools.extend(_tmgr.get_tool_schemas())
                 except (
@@ -6776,10 +6869,17 @@ def create_runner_app(
                 async def _claude_ensure_build(
                     ctx: NativeLaunchContext,
                 ) -> NativeLaunchContext:
-                    claude_agent_spec = await _resolve_session_agent_spec(session_id)
+                    # Resolve the entry, not just the spec: a sub-agent session
+                    # must launch against its own bundle dir so --plugin-dir
+                    # carries its skills rather than the parent's.
+                    claude_entry = await _resolve_session_spec_entry(session_id)
+                    claude_agent_spec = _unwrap_resolved_spec(claude_entry)
                     return dataclasses.replace(
                         ctx,
-                        agent_spec=claude_agent_spec,
+                        agent_spec=claude_entry,
+                        bundle_dir=_resolved_spec_workdir(claude_entry),
+                        agent_name=getattr(claude_agent_spec, "name", None),
+                        skills_filter=getattr(claude_agent_spec, "skills_filter", "all"),
                         auth_token_factory=auth_token_factory,
                         resolve_launch_config=lambda: _resolve_session_claude_launch_config(
                             session_id
@@ -6794,8 +6894,16 @@ def create_runner_app(
                 async def _codex_ensure_build(
                     ctx: NativeLaunchContext,
                 ) -> NativeLaunchContext:
-                    codex_agent_spec = await _resolve_session_agent_spec(session_id)
-                    return dataclasses.replace(ctx, agent_spec=codex_agent_spec)
+                    # Entry, not bare spec: a sub-agent session's CODEX_HOME
+                    # skills must come from its own bundle dir.
+                    codex_entry = await _resolve_session_spec_entry(session_id)
+                    codex_agent_spec = _unwrap_resolved_spec(codex_entry)
+                    return dataclasses.replace(
+                        ctx,
+                        agent_spec=codex_entry,
+                        bundle_dir=_resolved_spec_workdir(codex_entry),
+                        skills_filter=getattr(codex_agent_spec, "skills_filter", "all"),
+                    )
 
                 _ensure_build = _codex_ensure_build
                 _ensure_is_owned = _is_runner_owned_codex_terminal
@@ -6893,14 +7001,22 @@ def create_runner_app(
             )
         bridge_inject = bool(body.get("bridge_inject_dir"))
         bridge_id = session_id
-        relay_existed = False
+        # Set only when this launch installed the relay, so a failure rolls
+        # back what it started and leaves a relay that was already serving
+        # the session (or that another path installed meanwhile) alone.
+        launched_relay: ClaudeNativeToolRelay | None = None
         if bridge_inject:
             bridge_id = await _claude_native_bridge_id_for_session(
                 server_client=server_client,
                 session_id=session_id,
             )
-            relay_existed = session_id in _session_comment_relays
+            relay_before = _session_comment_relays.get(session_id)
             await _ensure_comment_relay_started(session_id, bridge_id=bridge_id)
+            relay_after = _session_comment_relays.get(session_id)
+            if relay_after is not None and (
+                relay_before is None or relay_before.relay is not relay_after.relay
+            ):
+                launched_relay = relay_after.relay
 
         try:
             launch_method = (
@@ -6919,10 +7035,8 @@ def create_runner_app(
                 resource_role=(CLAUDE_NATIVE_TERMINAL_ROLE if bridge_inject else None),
             )
         except RuntimeError as exc:
-            if bridge_inject and not relay_existed:
-                relay = _session_comment_relays.pop(session_id, None)
-                if relay is not None:
-                    relay.close()
+            if launched_relay is not None:
+                _discard_comment_relay(session_id, launched_relay)
             return JSONResponse(
                 status_code=500,
                 content={
@@ -7737,22 +7851,19 @@ def create_runner_app(
                     code=ErrorCode.NOT_FOUND,
                 )
             sub_agent_name = snapshot.sub_agent_name
+            # Root the child at its own bundle dir. Always wrapped, so an
+            # unresolvable workdir registers nothing rather than falling back
+            # to the parent's bundle root.
             if sub_agent_name:
                 _session_sub_agent_names[session_id] = sub_agent_name
-                from omnigent.runtime.workflow import _find_spec_by_name
-
-                parent_spec = _unwrap_resolved_spec(spec_entry)
-                if parent_spec is not None:
-                    sub_spec = _find_spec_by_name(parent_spec, sub_agent_name)
-                    if sub_spec is not None:
-                        workdir = _resolved_spec_workdir(spec_entry)
-                        spec_entry = (
-                            ResolvedSpec(spec=sub_spec, workdir=workdir)
-                            if workdir is not None
-                            else sub_spec
-                        )
-                    else:
+                if _unwrap_resolved_spec(spec_entry) is not None:
+                    sub_entry = _native_runtime._resolve_sub_agent_spec_entry(
+                        spec_entry, sub_agent_name
+                    )
+                    if sub_entry is None:
                         _warn_unresolved_sub_agent(session_id, sub_agent_name)
+                    else:
+                        spec_entry = sub_entry
             _session_spec_cache[session_id] = spec_entry
             return spec_entry
 
@@ -8460,22 +8571,24 @@ def create_runner_app(
                     )
             else:
                 spec_entry = _session_spec_cache.get(session_id)
-                spec_workdir = _resolved_spec_workdir(spec_entry)
+                spec_workdir = _resolved_workdir_for_spec(spec_entry, runner_workspace)
                 spec = _unwrap_resolved_spec(spec_entry)
                 if spec is None and spec_resolver is not None:
                     _agent_id = _session_agent_ids.get(session_id)
                     if _agent_id:
                         try:
                             resolved = await spec_resolver(_agent_id, session_id)
-                            spec_workdir = _resolved_spec_workdir(resolved)
+                            spec_workdir = _resolved_workdir_for_spec(resolved, runner_workspace)
                             spec = _unwrap_resolved_spec(resolved)
                         except Exception:  # noqa: BLE001
                             pass
                 _agent_id_local = _session_agent_ids.get(session_id)
                 dispatch_workspace = (
+                    # A resolved entry with no bundle dir gets no workspace at
+                    # all: widening that to the runner workspace would hand a
+                    # sub-agent the tool tree its own bundle does not contain.
                     spec_workdir
-                    if spec_workdir is not None
-                    and _is_spec_local_native_python_tool(spec, tool_name)
+                    if _is_spec_local_native_python_tool(spec, tool_name)
                     else runner_workspace
                 )
                 try:
@@ -8727,6 +8840,18 @@ def create_runner_app(
             )
 
     async def _catch_up_scan() -> None:
+        # The tunnel just reconnected, which usually means the SERVER restarted
+        # (deploy, crash, replica failover) and lost its in-memory session-status
+        # cache. This runner did not restart, so every status source still
+        # believes its last edge was delivered and nothing re-asserts — a
+        # native session mid-turn during the restart would sit on a stale
+        # ``idle`` for the rest of the turn. Re-arm them before the item scan
+        # below (which skips native harnesses entirely).
+        if resource_registry is not None:
+            try:
+                resource_registry.resync_session_statuses()
+            except Exception:  # noqa: BLE001 — best-effort; never block catch-up.
+                _logger.warning("Session status resync failed after reconnect", exc_info=True)
         for session_id in list(_session_histories):
             if _is_native_harness(session_id):
                 continue
@@ -8800,9 +8925,13 @@ def create_runner_app(
         and _pane_reaper_registry is not None
         and hasattr(_pane_reaper_registry, "native_panes")
     ):
-        from omnigent.native_cost_popup import _list_tmux_clients
+        from omnigent.native_cost_popup import _list_tmux_clients, _tmux_window_activity_at
         from omnigent.runner.tool_dispatch import _publish_terminal_deleted_event
-        from omnigent.terminals.pane_reaper import NativePaneReaper, PaneRef
+        from omnigent.terminals.pane_reaper import (
+            PANE_OUTPUT_BUSY_WINDOW_S,
+            NativePaneReaper,
+            PaneRef,
+        )
 
         def _native_panes_for_reaper() -> list[PaneRef]:
             panes: list[PaneRef] = []
@@ -8823,7 +8952,18 @@ def create_runner_app(
             if _native_pane_status.get(conv_id) == "running":
                 return True
             clients = await asyncio.to_thread(_list_tmux_clients, str(pane.socket_path), "main")
-            return bool(clients)
+            if clients:
+                return True
+            # Primary evidence: tmux stamps window_activity on every byte the
+            # pane emits, so a producing terminal stays busy even when the
+            # status pipeline above has silently stalled (a stalled forwarder
+            # once froze the busy signal and got a live session reaped).
+            activity_at = await asyncio.to_thread(
+                _tmux_window_activity_at, str(pane.socket_path), "main"
+            )
+            return (
+                activity_at is not None and time.time() - activity_at < PANE_OUTPUT_BUSY_WINDOW_S
+            )
 
         async def _reap_native_pane(pane: PaneRef) -> None:
             try:
@@ -8917,9 +9057,10 @@ async def _resolve_harness_config(
         resolves the parent's harness (``claude-sdk``) and the process
         manager respawns — tearing down the child's live ``claude-native``
         terminal ("Bridge closed: terminal resource not found"). When set,
-        the parent spec is swapped to the matching sub-spec via
-        :func:`_find_spec_by_name` before harness derivation. ``None`` for
-        top-level sessions.
+        the parent entry is swapped for the child's — spec AND bundle dir —
+        via :func:`_resolve_sub_agent_spec_entry` before harness derivation,
+        so the spawn-env advertises the child's bundle rather than the
+        parent's. ``None`` for top-level sessions.
     :param cwd: Runtime working directory for harnesses that need it.
     :returns: ``(harness, spawn_env)``; a default for unresolved specs.
     """
@@ -8933,14 +9074,18 @@ async def _resolve_harness_config(
             # _run_turn_bg swaps; applied here so the harness-HTTP path is
             # sub-agent-aware too, even after a reconnect drops the
             # in-memory _session_sub_agent_names map.
+            # The child's bundle dir comes from the same resolution, so the
+            # spawn-env below advertises the child's bundle — not the
+            # parent's, whose skills and tools the child has no claim to.
             if sub_agent_name:
-                from omnigent.runtime.workflow import _find_spec_by_name
-
-                sub_spec = _find_spec_by_name(spec, sub_agent_name)
-                if sub_spec is not None:
-                    spec = sub_spec
-                else:
+                sub_entry = _native_runtime._resolve_sub_agent_spec_entry(
+                    spec_entry, sub_agent_name
+                )
+                if sub_entry is None:
                     _warn_unresolved_sub_agent(session_id, sub_agent_name)
+                else:
+                    spec = _unwrap_resolved_spec(sub_entry)
+                    workdir = _resolved_spec_workdir(sub_entry)
             harness = harness_override or spec.executor.config.get("harness") or spec.executor.type
             harness = canonicalize_harness(harness) or harness
             spawn_env = _build_spawn_env_from_spec(
