@@ -80,6 +80,7 @@ def test_build_ucode_configure_command_uses_workspaces() -> None:
         "https://one.example.databricks.com,https://two.example.databricks.com",
         "--agents",
         "claude,codex,pi",
+        "--skip-unavailable",
     ]
 
 
@@ -109,6 +110,7 @@ def test_build_ucode_configure_command_supports_uvx_prefix() -> None:
         "https://one.example.databricks.com",
         "--agents",
         "claude,codex,pi",
+        "--skip-unavailable",
     ]
 
 
@@ -194,6 +196,7 @@ def test_configure_ucode_for_workspace_targets_single_workspace() -> None:
             "https://example.cloud.databricks.com",
             "--agents",
             "claude,codex,pi",
+            "--skip-unavailable",
         ]
     ]
 
@@ -232,4 +235,5 @@ def test_build_ucode_configure_command_normalizes_pasted_url() -> None:
         "https://example.cloud.databricks.com",
         "--agents",
         "claude",
+        "--skip-unavailable",
     ]

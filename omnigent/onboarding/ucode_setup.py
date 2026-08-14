@@ -68,6 +68,7 @@ def build_ucode_configure_command(
         ",".join(normalize_workspace_url(url) for url in workspace_urls),
         "--agents",
         ",".join(agents),
+        "--skip-unavailable",
     ]
 
 
