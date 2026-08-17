@@ -1745,3 +1745,43 @@ async def test_codex_native_launch_config_reads_the_auto_harness_flag(
         config = await _codex_native_launch_config(session_id="conv_abc", server_client=client)
 
     assert config.auto_harness is expected
+
+
+def test_resolve_databricks_codex_model_matches_servable_ids() -> None:
+    """The codex launch model resolves against what the workspace serves.
+
+    An unset model takes the newest servable id; a legacy ``databricks-``
+    override resolves to the served ``system.ai.`` id for that same model; and a
+    model the workspace does not serve passes through untouched (the gateway's
+    error beats a silent substitution).
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from omnigent.codex_native_app_server import _resolve_databricks_codex_model
+
+    servable = ("system.ai.gpt-5-6-sol", "system.ai.gpt-5-6-luna")
+    with (
+        patch(
+            "omnigent.runtime.credentials.databricks.resolve_databricks_workspace",
+            return_value=SimpleNamespace(token="tok"),
+        ),
+        patch(
+            "omnigent.databricks_model_discovery.discover_databricks_codex_models",
+            return_value=servable,
+        ),
+    ):
+        assert (
+            _resolve_databricks_codex_model("https://h.example.com", "prof", None)
+            == "system.ai.gpt-5-6-sol"
+        )
+        assert (
+            _resolve_databricks_codex_model(
+                "https://h.example.com", "prof", "databricks-gpt-5-6-luna"
+            )
+            == "system.ai.gpt-5-6-luna"
+        )
+        assert (
+            _resolve_databricks_codex_model("https://h.example.com", "prof", "databricks-gpt-9-9")
+            == "databricks-gpt-9-9"
+        )
