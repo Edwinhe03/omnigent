@@ -447,6 +447,18 @@ def test_build_codex_native_server_uses_profile_host_without_static_token(
     )
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
 
+    # This test exercises the profile-host base URL + auth command, not model
+    # resolution. Force live codex discovery offline so the build makes no
+    # model-services network call for the profile host; the explicit
+    # ``model="test-model"`` is then used as-is.
+    def _discovery_offline(_profile: str | None) -> object:
+        raise RuntimeError("model discovery is offline in this test")
+
+    monkeypatch.setattr(
+        "omnigent.runtime.credentials.databricks.resolve_databricks_workspace",
+        _discovery_offline,
+    )
+
     app_server = build_codex_native_server(
         socket_path=tmp_path / "codex.sock",
         codex_home=tmp_path / "codex-home",
