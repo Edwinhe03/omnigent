@@ -4284,6 +4284,7 @@ function ContextRing({ contextWindow, tokensUsed }: { contextWindow: number; tok
 export function formatStatusModelLabel(
   model: string | null,
   codexModelOptions: readonly NativeModelOption[] = [],
+  formatConcreteClaude = false,
 ): string | null {
   const raw = model?.trim();
   if (!raw) return null;
@@ -4302,6 +4303,15 @@ export function formatStatusModelLabel(
     if (alias[2]) label += ` ${alias[2]}`;
     if (alias[3]) label += " (1M context)";
     return label;
+  }
+  const concreteClaude = formatConcreteClaude
+    ? lower.match(/claude-(fable|opus|sonnet|haiku)-(\d+)(?:[-.](\d+))?/)
+    : null;
+  if (concreteClaude !== null) {
+    const [, family, major, minor] = concreteClaude;
+    const version = minor ? `${major}.${minor}` : major;
+    const longContext = lower.endsWith("[1m]") ? " (1M context)" : "";
+    return `${family[0]!.toUpperCase()}${family.slice(1)} ${version}${longContext}`;
   }
   return raw;
 }
@@ -7103,7 +7113,10 @@ function ComposerModelEffortLabel({
   const selectedEffort = useSessionEffort();
   const costControlModeOverride = useChatStore((s) => s.costControlModeOverride);
   const pendingModelChange = useChatStore((s) => s.pendingModelChange);
-  const { modelLabel } = useResolvedComposerModel(modelPickerKind, codexModelOptions);
+  const { effectiveModel, modelLabel } = useResolvedComposerModel(
+    modelPickerKind,
+    codexModelOptions,
+  );
   const routingOn = costRoutingEligible && costControlModeOverride === "on";
   // An asked-but-unconfirmed switch on a reported-model session: the chip
   // keeps the harness's model; this spinner is the honest "asked, not yet
@@ -7135,7 +7148,11 @@ function ComposerModelEffortLabel({
   // SDK/bundle sessions (no native picker) still surface their resolved model
   // in the label even though the gear modal has no Model dropdown for them —
   // showModels gates only the modal control, not this read-out.
-  const model = showModels || modelPickerKind === null ? modelLabel : null;
+  const statusModelLabel =
+    modelPickerKind === "claude"
+      ? formatStatusModelLabel(effectiveModel, codexModelOptions, true)
+      : modelLabel;
+  const model = showModels || modelPickerKind === null ? statusModelLabel : null;
   // SDK/bundle agents (e.g. Polly) that resolve no model/effort fall back to
   // the harness identity ("Polly (Pi)") so the slot isn't empty. Scoped to
   // SDK/bundle (modelPickerKind === null): native wrappers keep an empty label

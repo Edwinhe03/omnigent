@@ -6895,6 +6895,46 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     window.localStorage.removeItem("omnigent.picker.model");
   });
 
+  it("keeps a resolved Claude catalog across transient empty refreshes", async () => {
+    seedSession("conv_cn_catalog_refresh", []);
+    let snapshotCount = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (
+        url.split("?")[0] === "/v1/sessions/conv_cn_catalog_refresh" &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        snapshotCount += 1;
+        return mockResponse({
+          id: "conv_cn_catalog_refresh",
+          agent_id: "agent_xyz",
+          status: "idle",
+          created_at: 0,
+          items: [],
+          labels: { "omnigent.wrapper": "claude-code-native-ui" },
+          model_override: "opus",
+          model_options: snapshotCount === 1 ? CLAUDE_MODEL_OPTIONS : [],
+        });
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    await useChatStore.getState().switchTo("conv_cn_catalog_refresh");
+    expect(useChatStore.getState().codexModelOptions).toEqual(CLAUDE_MODEL_OPTIONS);
+
+    handleSessionEvent({
+      type: "session_model_options",
+      conversationId: "conv_cn_catalog_refresh",
+    });
+    await tick();
+
+    expect(snapshotCount).toBeGreaterThanOrEqual(3);
+    expect(useChatStore.getState()).toMatchObject({
+      sessionModelOverride: "opus",
+      codexModelOptions: CLAUDE_MODEL_OPTIONS,
+    });
+  });
+
   it("refetches a resolved Claude catalog when its event races the bind snapshot", async () => {
     seedSession("conv_cn_race", []);
     window.localStorage.setItem("omnigent.picker.model", "opus");

@@ -5022,6 +5022,11 @@ async function refetchRunnerBackedSessionState(
   }
   // No sticky-model graft here: the sticky pick is a pure preference under
   // the reported-model semantics, so a delayed catalog only hydrates state.
+  const preserveResolvedModelOptions =
+    (session.codexModelOptions ?? []).length === 0 &&
+    currentState.codexModelOptions.length > 0 &&
+    currentState.boundAgentId === session.agentId &&
+    nativeModelFamilyForSession(session) !== null;
   const statePatch: Partial<ConversationState> =
     options.applyBindingPatch === true
       ? sessionBindingPatch(session)
@@ -5029,6 +5034,9 @@ async function refetchRunnerBackedSessionState(
           skills: session.skills ?? [],
           codexModelOptions: session.codexModelOptions ?? [],
         };
+  if (preserveResolvedModelOptions) {
+    statePatch.codexModelOptions = currentState.codexModelOptions;
+  }
   setterFor(conversationId)(statePatch);
 }
 

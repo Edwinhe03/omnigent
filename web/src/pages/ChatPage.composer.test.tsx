@@ -844,6 +844,29 @@ describe("Composer model/effort label", () => {
     // tests, where the Radix Select actually mounts its option rows.
   });
 
+  it("formats a concrete Claude model while its catalog is temporarily unavailable", () => {
+    useChatStore.setState({
+      selectedModel: null,
+      sessionModelOverride: null,
+      llmModel: "databricks-claude-opus-4-8[1m]",
+    });
+    renderWithTooltips(
+      <Composer
+        {...composerProps({
+          agents: [{ id: "a1", name: "claude" }],
+          selectedAgentId: "a1",
+          modelPickerKind: "claude",
+          showModels: true,
+          showEffort: false,
+          codexModelOptions: [],
+        })}
+      />,
+    );
+
+    expect(label()).toHaveTextContent("Opus 4.8 (1M context)");
+    expect(label()).not.toHaveTextContent("databricks-claude-opus-4-8[1m]");
+  });
+
   it("hides the label when the model/effort is unresolved (nothing to show yet)", () => {
     // A claude-native session before the snapshot fills llmModel/selectedEffort
     // has no model label and no effort label. The read-only label renders
