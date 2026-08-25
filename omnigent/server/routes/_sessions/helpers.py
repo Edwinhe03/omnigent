@@ -2154,16 +2154,17 @@ async def _persist_external_model_change(
     writes ``reported_model`` VERBATIM (the harness's own spelling,
     never collapsed to a picker alias) so the value survives reload,
     and publishes a ``session.model`` SSE event so every surface
-    re-renders from it. The user's request (``model_override``) is
-    deliberately untouched: requests and reports are separate roles,
-    and only reports are ever displayed. Unlike the PATCH path
+    re-renders from it. For a plain session, the exact report also
+    becomes ``model_override`` so an in-pane model choice survives a
+    cold resume. Smart-Routed sessions keep requests and reports
+    separate so a routed arm is not accidentally pinned. Unlike the PATCH path
     (:func:`update_session`), this does NOT forward a ``model_change``
     back to the runner — the terminal is already on the model, so
     re-injecting ``/model`` would loop.
 
-    No-ops (no write, no event) when the reported model already equals
-    the persisted ``reported_model`` — the steady state between real
-    changes, since forwarders re-observe on every poll.
+    No-ops when both persisted values already match. When only
+    ``reported_model`` matches, the request is repaired without
+    re-publishing the display event.
 
     :param session_id: Session/conversation identifier, e.g.
         ``"conv_abc123"``.
@@ -2172,7 +2173,7 @@ async def _persist_external_model_change(
     :param body: External model-change event body. ``data.model`` must
         be a non-empty string — the harness's verbatim model, e.g.
         ``"claude-opus-4-8[1m]"`` or ``"gpt-5.6-luna"``.
-    :param conversation_store: Store used to upsert ``reported_model``.
+    :param conversation_store: Store used to upsert the model state.
     :raises OmnigentError: If ``data.model`` is missing or not a
         non-empty string.
     """
@@ -2183,13 +2184,33 @@ async def _persist_external_model_change(
             code=ErrorCode.INVALID_INPUT,
         )
     model = raw_model.strip()
-    if conv.reported_model == model:
-        return
-    await asyncio.to_thread(
-        conversation_store.update_conversation,
-        session_id,
-        reported_model=model,
+    from omnigent.runner.subagent_routing import routing_class_from_snapshot
+
+    routing_class = routing_class_from_snapshot(
+        cost_control_mode=conv.cost_control_mode_override,
+        harness_override=conv.harness_override,
+        labels=conv.labels,
     )
+    persist_override = not routing_class.routing_enabled
+    reported_changed = conv.reported_model != model
+    override_changed = persist_override and conv.model_override != model
+    if not reported_changed and not override_changed:
+        return
+    if override_changed:
+        await asyncio.to_thread(
+            conversation_store.update_conversation,
+            session_id,
+            reported_model=model,
+            model_override=model,
+        )
+    else:
+        await asyncio.to_thread(
+            conversation_store.update_conversation,
+            session_id,
+            reported_model=model,
+        )
+    if not reported_changed:
+        return
     event = SessionModelEvent(
         type="session.model",
         conversation_id=session_id,

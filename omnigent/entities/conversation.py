@@ -105,15 +105,15 @@ class Conversation:
         the supported set; invalid values fail with ``invalid_input``.
     :param reported_model: The model the harness last REPORTED the
         session is actually on, verbatim in the harness's own
-        spelling, e.g. ``"claude-opus-4-8[1m]"``. Written only by
-        harness reports (``external_model_change``); never by user
-        picks. The only model value UI surfaces display. ``None``
-        means no report has arrived yet.
+        spelling, e.g. ``"claude-opus-4-8[1m]"``. Written by harness
+        reports (``external_model_change``), and the only model value
+        UI surfaces display. ``None`` means no report has arrived yet.
     :param model_override: Per-session LLM model override — the user's
         REQUEST, e.g. ``"claude-opus-4-7"``. ``None`` means use the
         agent default from the spec's ``llm.model``. Mutable via
-        ``PATCH /v1/sessions/{id}`` and the REPL's ``/model``
-        command. Mirrors the persistence shape of
+        ``PATCH /v1/sessions/{id}`` and, for non-routed sessions, the
+        harness's exact model report after an in-pane ``/model`` command.
+        Smart-Routed reports do not overwrite it. Mirrors the persistence shape of
         ``reasoning_effort`` so the web UI and the TUI stay
         in sync — both read it from the session snapshot and
         write it through the same PATCH endpoint.

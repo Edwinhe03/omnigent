@@ -119,11 +119,19 @@ def test_build_claude_native_base_args(
             "sid-123",
             ("--resume", "sid-123", "--effort", "high", "--verbose", "--model", "claude-opus-4-7"),
         ),
+        # Exact context variants survive the same cold-resume argv path.
+        (
+            None,
+            "databricks-claude-opus-5[1m]",
+            None,
+            "sid-456",
+            ("--resume", "sid-456", "--model", "databricks-claude-opus-5[1m]"),
+        ),
         # No resume id → no --resume (fresh launch, or no local
         # transcript could be synthesized).
         (None, None, ["--verbose"], None, ("--verbose",)),
     ],
-    ids=["resume-only", "resume-first-ordering", "no-resume"],
+    ids=["resume-only", "resume-first-ordering", "resume-exact-model", "no-resume"],
 )
 def test_build_claude_native_base_args_resume_prefix(
     reasoning_effort: str | None,

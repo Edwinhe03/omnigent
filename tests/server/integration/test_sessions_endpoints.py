@@ -5993,9 +5993,9 @@ async def test_post_external_model_change_publishes_session_model(
     A native forwarder posts this with the model the harness is actually
     on — the launch's own report, or an in-pane switch — in the
     harness's own spelling. The value must land VERBATIM on the
-    snapshot's ``llm_model`` (the display authority) while the user's
-    request (``model_override``) stays untouched: reports and requests
-    are separate roles.
+    snapshot's ``llm_model`` (the display authority). For a plain session,
+    the exact value also becomes the next launch request so an in-pane
+    ``/model`` choice survives a cold resume.
     """
     published: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(
@@ -6016,11 +6016,37 @@ async def test_post_external_model_change_publishes_session_model(
     assert published[0][1]["conversation_id"] == session["id"]
     assert published[0][1]["model"] == "claude-opus-4-8[1m]"
 
-    # Persisted verbatim so a reload restores the display; the request
-    # slot is untouched.
+    # Persisted verbatim for both display and the next cold launch.
     snapshot = (await client.get(f"/v1/sessions/{session['id']}")).json()
     assert snapshot["llm_model"] == "claude-opus-4-8[1m]"
-    assert snapshot["model_override"] is None
+    assert snapshot["model_override"] == "claude-opus-4-8[1m]"
+
+
+async def test_post_external_model_change_does_not_pin_smart_routing(
+    client: httpx.AsyncClient,
+) -> None:
+    """A routed model report remains display truth, not a launch request."""
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    patch = await client.patch(
+        f"/v1/sessions/{session['id']}",
+        json={
+            "cost_control_mode_override": "on",
+            "model_override": "smart-routing",
+            "silent": True,
+        },
+    )
+    assert patch.status_code == 200, patch.text
+
+    resp = await client.post(
+        f"/v1/sessions/{session['id']}/events",
+        json={"type": "external_model_change", "data": {"model": "claude-opus-5[1m]"}},
+    )
+    assert resp.status_code == 202, resp.text
+
+    snapshot = (await client.get(f"/v1/sessions/{session['id']}")).json()
+    assert snapshot["llm_model"] == "claude-opus-5[1m]"
+    assert snapshot["model_override"] == "smart-routing"
 
 
 async def test_post_external_model_change_dedupes_when_unchanged(
@@ -6028,7 +6054,7 @@ async def test_post_external_model_change_dedupes_when_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    A repeat ``external_model_change`` for the already-reported model
+    A repeat ``external_model_change`` for the already-persisted model
     is a no-op: no second ``session.model`` event, no redundant write.
 
     Forwarders re-observe on every poll, so the steady state is the same
@@ -6067,6 +6093,42 @@ async def test_post_external_model_change_dedupes_when_unchanged(
     assert resp.status_code == 202, resp.text
     # Already reported — nothing re-published.
     assert [event["type"] for _, event in published] == []
+
+
+async def test_post_external_model_change_repairs_stale_plain_override(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeated report repairs an older coarse request without another event."""
+    published: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.session_stream.publish",
+        lambda sid, ev: published.append((sid, ev)),
+    )
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+
+    first = await client.post(
+        f"/v1/sessions/{session['id']}/events",
+        json={"type": "external_model_change", "data": {"model": "claude-opus-5[1m]"}},
+    )
+    assert first.status_code == 202, first.text
+    patch = await client.patch(
+        f"/v1/sessions/{session['id']}",
+        json={"model_override": "opus", "silent": True},
+    )
+    assert patch.status_code == 200, patch.text
+    published.clear()
+
+    repeated = await client.post(
+        f"/v1/sessions/{session['id']}/events",
+        json={"type": "external_model_change", "data": {"model": "claude-opus-5[1m]"}},
+    )
+    assert repeated.status_code == 202, repeated.text
+
+    snapshot = (await client.get(f"/v1/sessions/{session['id']}")).json()
+    assert snapshot["model_override"] == "claude-opus-5[1m]"
+    assert published == []
 
 
 async def test_post_external_model_change_rejects_empty_model(
