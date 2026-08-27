@@ -2136,11 +2136,7 @@ export function NewChatLandingScreen() {
   const { data: agents } = useAvailableAgents();
   // refetchOnFocus: returning from a terminal `omni setup` must clear the
   // readiness badge even if the live push was missed while the tab was hidden.
-  const {
-    data: hosts,
-    isLoading: hostsLoading,
-    isFetching: hostsFetching,
-  } = useHosts({ refetchOnFocus: true });
+  const { data: hosts, isLoading: hostsLoading } = useHosts({ refetchOnFocus: true });
 
   // Offer an import affordance on the empty landing: a brand-new user with no
   // Omnigent sessions can pull in their existing local CLI history. Same query
@@ -2758,11 +2754,9 @@ export function NewChatLandingScreen() {
         setSelectedHostId(stored.host_id);
         return;
       }
-      // Cached data can omit the remembered host while a fresh list is already
-      // in flight. Let that refresh settle before using the normal fallback.
-      if (hostsFetching) return;
-      // The fresh list confirms the stored host is gone or offline — fall
-      // through to the default.
+      // A transient host-list gap must not replace the saved VM with the local
+      // or sandbox default. Leave the slot empty until it returns or the user picks again.
+      return;
     }
 
     if (managedSandboxesEnabled) {
@@ -2775,7 +2769,6 @@ export function NewChatLandingScreen() {
   }, [
     hosts,
     hostsLoading,
-    hostsFetching,
     selectedHostId,
     sandboxSelected,
     managedSandboxesEnabled,
