@@ -184,6 +184,22 @@ class _ConversationStore:
         conv = self._conversations[conversation_id]
         conv.labels.update(updates)
 
+    def set_host_id(
+        self,
+        conversation_id: str,
+        host_id: str,
+        workspace: str | None = None,
+        git_branch: str | None = None,
+    ) -> Conversation:
+        """Set a conversation's host placement fields."""
+        conv = self._conversations[conversation_id]
+        conv.host_id = host_id
+        if workspace is not None:
+            conv.workspace = workspace
+        if git_branch is not None:
+            conv.git_branch = git_branch
+        return conv
+
     def append(
         self,
         conversation_id: str,
@@ -449,6 +465,8 @@ def runner_globals_reset() -> Iterator[None]:
 def app(runner_globals_reset: None) -> FastAPI:
     del runner_globals_reset
     app = FastAPI()
+    conversation_store = _ConversationStore()
+    app.state.test_conversation_store = conversation_store
 
     @app.exception_handler(OmnigentError)
     async def _handle_omnigent_error(
@@ -473,7 +491,7 @@ def app(runner_globals_reset: None) -> FastAPI:
 
     app.include_router(
         create_sessions_router(
-            _ConversationStore(),  # type: ignore[arg-type]
+            conversation_store,  # type: ignore[arg-type]
             _StubAgentStore(),  # type: ignore[arg-type]
         ),
         prefix="/v1",
@@ -1550,8 +1568,15 @@ async def test_delete_terminal_proxies_to_runner(
 @pytest.mark.asyncio
 async def test_transfer_terminal_authorizes_sessions_and_proxies_to_runner(
     client: httpx.AsyncClient,
+    app: FastAPI,
 ) -> None:
-    """POST terminal transfer validates source and target then proxies."""
+    """POST terminal transfer proxies and carries the source placement."""
+    conversation_store: _ConversationStore = app.state.test_conversation_store
+    source = conversation_store.get_conversation("79b22ebd2309e48fdeb450c65611d51b")
+    assert source is not None
+    source.host_id = "host_arca"
+    source.workspace = "/home/alice/workspace"
+    source.git_branch = "feature/clear"
     terminal_resource = {
         "id": "terminal_bash_s1",
         "object": "session.resource",
@@ -1589,6 +1614,11 @@ async def test_transfer_terminal_authorizes_sessions_and_proxies_to_runner(
         ),
     ]
     assert router.resource_calls == ["79b22ebd2309e48fdeb450c65611d51b"]
+    target = conversation_store.get_conversation("5d29bee4350489d66feafecfebd94a97")
+    assert target is not None
+    assert target.host_id == "host_arca"
+    assert target.workspace == "/home/alice/workspace"
+    assert target.git_branch == "feature/clear"
 
 
 @pytest.mark.asyncio

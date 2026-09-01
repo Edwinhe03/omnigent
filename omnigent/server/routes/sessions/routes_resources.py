@@ -1087,7 +1087,9 @@ def register_resources_routes(
 
         Used by native Claude ``/clear`` rotation: ownership changes
         from the previous conversation to the fresh one while the tmux
-        pane keeps running.
+        pane keeps running. A successful transfer also carries the
+        source host, workspace, and git branch to the target because the
+        live terminal remains on that same placement.
 
         :param request: The incoming FastAPI request (for auth) with
             JSON body ``{"target_session_id": "conv_new"}``.
@@ -1132,6 +1134,15 @@ def register_resources_routes(
             raise OmnigentError(
                 error.get("message", "Terminal transfer failed"),
                 code=error.get("code", ErrorCode.INTERNAL_ERROR),
+            )
+
+        if conv.host_id is not None:
+            await asyncio.to_thread(
+                conversation_store.set_host_id,
+                target_session_id,
+                conv.host_id,
+                conv.workspace,
+                conv.git_branch,
             )
 
         _publish_and_persist_resource_event(
