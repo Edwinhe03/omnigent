@@ -60,6 +60,7 @@ from omnigent.server.background_session_titles import (
 )
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
 from omnigent.server.managed_hosts import ManagedSandboxDeployment
+from omnigent.server.managed_sandbox_reaper import ManagedSandboxReaper
 from omnigent.server.mcp_pool import ServerMcpPool
 from omnigent.server.performance_metrics import (
     ServerMetricsOtelPublisher,
@@ -1443,9 +1444,26 @@ def create_app(
             # endpoints (see routes/scheduled_tasks.py); there is no startup
             # sweep and no periodic reconcile.
 
+        managed_sandbox_reaper: ManagedSandboxReaper | None = None
+        if sandbox_config is not None and sandbox_config.reaper.enabled:
+            if host_store is None:
+                _logger.warning(
+                    "Managed sandbox reaper is enabled but no host store is configured; "
+                    "the reaper will not run"
+                )
+            else:
+                managed_sandbox_reaper = ManagedSandboxReaper(
+                    host_store=host_store,
+                    sandbox_config=sandbox_config,
+                )
+                app_inst.state.managed_sandbox_reaper = managed_sandbox_reaper
+                await managed_sandbox_reaper.start()
+
         try:
             yield
         finally:
+            if managed_sandbox_reaper is not None:
+                await managed_sandbox_reaper.shutdown()
             # Run completion is event-driven (the _publish_status hook) plus a
             # lazy-on-read stale backstop — there is no run-reconciler task to
             # cancel. Only the per-job scheduler holds timers that need stopping.
