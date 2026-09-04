@@ -15,6 +15,7 @@ import shlex
 import ssl
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -8426,6 +8427,102 @@ def test_claude_transcript_records_handles_compaction_item() -> None:
     ]
     assert len(boundaries) == 1
     assert boundaries[0]["compactMetadata"]["postTokens"] == 4321
+
+
+def test_claude_transcript_records_handles_native_compaction_messages() -> None:
+    """Claude-native compacted messages survive cold-resume reconstruction."""
+    items: list[dict[str, Any]] = [
+        {
+            "id": "msg_before",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "discarded before compaction"}],
+        },
+        {
+            "id": "cmp_native",
+            "type": "compaction",
+            "token_count": 1234,
+            "compacted_messages": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "native compact summary",
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "native reply"},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_native",
+                            "name": "Read",
+                            "input": {"file_path": "README.md"},
+                        },
+                    ],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_native",
+                            "content": "native tool result",
+                        }
+                    ],
+                },
+            ],
+        },
+        {
+            "id": "msg_after",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "after compaction"}],
+        },
+    ]
+
+    records = claude_native._claude_transcript_records_from_session_items(
+        items,
+        session_id="conv_native",
+        external_session_id="02857840-6362-408f-b41f-309e396ed7c6",
+        cwd=Path("/tmp/test"),
+        bridge_dir=Path("/tmp/test-bridge"),
+    )
+
+    assert [record.get("type") for record in records] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+        "user",
+    ]
+    assert records[1]["message"] == {"role": "user", "content": "native compact summary"}
+    assert records[2]["message"] == {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "native reply"},
+            {
+                "type": "tool_use",
+                "id": "toolu_native",
+                "name": "Read",
+                "input": {"file_path": "README.md"},
+            },
+        ],
+    }
+    assert records[3]["message"] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_native",
+                "content": "native tool result",
+            }
+        ],
+    }
+    assert records[4]["message"] == {"role": "user", "content": "after compaction"}
+    assert all(record["parentUuid"] == previous["uuid"] for previous, record in pairwise(records))
+    assert "discarded before compaction" not in json.dumps(records)
 
 
 def test_websocket_connect_passes_ssl_context_for_wss(

@@ -5163,6 +5163,7 @@ def _claude_transcript_records_from_session_items(
                         parent_uuid=parent_uuid,
                         cwd=cwd,
                         bridge_dir=bridge_dir,
+                        allow_native_message_content=True,
                     )
                     if cm_record is not None:
                         records.append(cm_record)
@@ -5201,6 +5202,7 @@ def _claude_transcript_record_from_session_item(
     parent_uuid: str | None,
     cwd: Path,
     bridge_dir: Path,
+    allow_native_message_content: bool = False,
 ) -> _JsonObject | None:
     """
     Convert one Omnigent item into one Claude transcript record.
@@ -5224,6 +5226,8 @@ def _claude_transcript_record_from_session_item(
         ``Path("/home/me/repo")``.
     :param bridge_dir: Session bridge directory for re-materializing
         attachment blocks.
+    :param allow_native_message_content: Accept Claude-native string and
+        content-block shapes when API-block conversion finds no content.
     :returns: Claude transcript record, or ``None`` for unsupported or
         empty Omnigent items.
     """
@@ -5235,12 +5239,18 @@ def _claude_transcript_record_from_session_item(
         role = item.get("role")
         if role == "user":
             user_content = _claude_user_content_from_api_blocks(item.get("content"), bridge_dir)
+            if user_content is None and allow_native_message_content:
+                user_content = _claude_native_message_content(item.get("content"), role="user")
             if user_content is None:
                 return None
             record_type = "user"
             message = {"role": "user", "content": user_content}
         elif role == "assistant":
             assistant_content = _claude_assistant_content_from_api_blocks(item.get("content"))
+            if assistant_content is None and allow_native_message_content:
+                assistant_content = _claude_native_message_content(
+                    item.get("content"), role="assistant"
+                )
             if assistant_content is None:
                 return None
             record_type = "assistant"
@@ -5319,6 +5329,29 @@ def _claude_transcript_record_from_session_item(
         "message": message,
         **extra,
     }
+
+
+def _claude_native_message_content(
+    content: object,
+    *,
+    role: str,
+) -> str | list[_JsonObject] | None:
+    """Validate Claude-native message content for transcript reconstruction."""
+    if isinstance(content, str):
+        if not content:
+            return None
+        if role == "assistant":
+            return [{"type": "text", "text": content}]
+        return content
+    if not isinstance(content, list) or not content:
+        return None
+    blocks: list[_JsonObject] = []
+    for value in content:
+        block = _json_object(value)
+        if block is None or not isinstance(block.get("type"), str):
+            return None
+        blocks.append(block)
+    return blocks
 
 
 def _synthetic_claude_transcript_uuid(
