@@ -3221,15 +3221,15 @@ async def test_terminate_managed_host_deletes_row_before_provider_call(
     assert fake.terminated == ["sb-delete-first"]
 
 
-async def test_terminate_managed_host_deletes_row_even_when_terminate_fails(
+async def test_terminate_managed_host_retries_tombstone_after_terminate_fails(
     db_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    Best-effort contract: a provider termination failure neither
-    propagates nor blocks the row deletion (the provider's lifetime
-    cap reaps the sandbox; the credential must die now).
+    A provider failure does not block logical deletion, and the persisted
+    sandbox id is retried by the existing reaper.
     """
     fake = FakeSandboxLauncher()
+    original_terminate = fake.terminate
 
     def _explode(sandbox_id: str) -> None:
         """Simulate a provider API failure during termination."""
@@ -3253,15 +3253,83 @@ async def test_terminate_managed_host_deletes_row_even_when_terminate_fails(
     assert (
         host_store.resolve_launch_token("057e7fa3f1cdb40c0ec393a3d42affc7", "tok-term-2") is None
     )
+    tombstones = host_store.list_stale_managed_sandbox_hosts(now_epoch())
+    assert len(tombstones) == 1
+    assert tombstones[0].deleted_at is not None
+    assert tombstones[0].sandbox_id == "sb-term-2"
+
+    monkeypatch.setattr(fake, "terminate", original_terminate)
+    reaper = ManagedSandboxReaper(
+        host_store=host_store,
+        sandbox_config=_injected_config(fake),
+    )
+    assert await reaper.sweep_once() == 1
+    assert fake.terminated == ["sb-term-2"]
+    assert host_store.list_stale_managed_sandbox_hosts(now_epoch()) == []
+
+
+async def test_terminate_managed_host_retains_only_failed_generation(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeSandboxLauncher()
+    original_terminate = fake.terminate
+    host_store = HostStore(db_uri)
+    host_id = "9e50e018919e494886b984df0bbec12b"
+    original = host_store.register_managed_host(
+        host_id=host_id,
+        name="managed-term-partial",
+        user_id=_OWNER,
+        token="tok-term-old-partial",
+        provider="modal",
+        sandbox_id="sb-term-old-partial",
+        token_expires_at=now_epoch() + 3600,
+    )
+    assert host_store.detach_stale_managed_sandbox(
+        host_id,
+        sandbox_id="sb-term-old-partial",
+        expected_updated_at=original.updated_at,
+    )
+    host = host_store.replace_managed_host_sandbox(
+        host_id=host_id,
+        user_id=_OWNER,
+        token="tok-term-new-partial",
+        provider="modal",
+        sandbox_id="sb-term-new-partial",
+        token_expires_at=now_epoch() + 3600,
+    )
+    assert host is not None
+    attempts: list[str] = []
+
+    def _terminate(sandbox_id: str) -> None:
+        attempts.append(sandbox_id)
+        if sandbox_id == "sb-term-new-partial":
+            raise click.ClickException("provider unavailable")
+        original_terminate(sandbox_id)
+
+    monkeypatch.setattr(fake, "terminate", _terminate)
+    await terminate_managed_host(host, host_store, _injected_config(fake))
+
+    assert attempts == ["sb-term-new-partial", "sb-term-old-partial"]
+    tombstones = host_store.list_stale_managed_sandbox_hosts(now_epoch())
+    assert len(tombstones) == 1
+    assert tombstones[0].sandbox_id == "sb-term-new-partial"
+    assert tombstones[0].terminating_sandbox_id is None
+
+    monkeypatch.setattr(fake, "terminate", original_terminate)
+    reaper = ManagedSandboxReaper(
+        host_store=host_store,
+        sandbox_config=_injected_config(fake),
+    )
+    assert await reaper.sweep_once() == 1
+    assert fake.terminated == ["sb-term-old-partial", "sb-term-new-partial"]
+    assert host_store.list_stale_managed_sandbox_hosts(now_epoch()) == []
 
 
 async def test_terminate_managed_host_skips_mismatched_provider(db_uri: str) -> None:
     """
-    A config change between launch and teardown (current launcher's
-    provider ≠ the provider recorded on the row) must NOT aim the new
-    provider's terminate at a stale sandbox id — the sandbox is left
-    to its lifetime cap, but the row still dies (token revoked, no
-    picker ghost). Also covers config=None (section removed).
+    A config change between launch and teardown must not aim the new provider's
+    terminate at a stale sandbox id. The host becomes invisible and its cleanup
+    tombstone remains available if that provider is configured again later.
     """
     fake = FakeSandboxLauncher()  # provider "modal"
     host_store = HostStore(db_uri)
@@ -3284,7 +3352,7 @@ async def test_terminate_managed_host_skips_mismatched_provider(db_uri: str) -> 
         host_store.resolve_launch_token("487212fd2b157b6ab6a6d6d3ef06ce5b", "tok-term-3") is None
     )
 
-    # config=None behaves the same: row deleted, nothing terminated.
+    # config=None behaves the same: host hidden, cleanup retained.
     host2 = host_store.register_managed_host(
         host_id="b114bf90a8fd155ce6007c3bb262aa79",
         name="managed-term4",

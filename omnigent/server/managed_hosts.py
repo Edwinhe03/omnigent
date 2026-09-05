@@ -3418,12 +3418,11 @@ async def terminate_managed_host(
     """
     Terminate a managed host's sandbox and delete its host row.
 
-    The latest row is locked and deleted before provider termination. This
-    serializes full teardown with generation replacement: either teardown takes
-    the newly registered generation, or replacement observes the missing row
-    and cleans up its unregistered sandbox. Deleting the row also removes the
-    host from the picker and revokes its launch token. Provider termination
-    remains best-effort and never blocks database teardown.
+    The latest row is locked and logically deleted before provider termination.
+    This removes the host from user-visible reads, revokes its token, and
+    serializes teardown with generation replacement. Recorded sandbox ids remain
+    on the tombstone until termination succeeds, allowing the reaper to retry
+    transient provider failures.
 
     :param host: The managed host to tear down. Active and pending sandbox ids
         are both terminated when present.
@@ -3432,19 +3431,25 @@ async def terminate_managed_host(
         the launcher for the provider-side terminate), or ``None``
         when managed hosts are no longer configured.
     """
-    deleted = await asyncio.to_thread(host_store.delete_host, host.host_id)
-    if deleted is None:
+    tombstone = await asyncio.to_thread(host_store.delete_host, host.host_id)
+    if tombstone is None:
         return
-    launcher = _launcher_for_teardown(deleted, config)
-    sandbox_ids = dict.fromkeys((deleted.sandbox_id, deleted.terminating_sandbox_id))
+    launcher = _launcher_for_teardown(tombstone, config)
+    sandbox_ids = dict.fromkeys((tombstone.sandbox_id, tombstone.terminating_sandbox_id))
     for sandbox_id in sandbox_ids:
         if sandbox_id is not None:
-            await _terminate_sandbox_best_effort(
+            terminated = await _terminate_sandbox_best_effort(
                 launcher,
                 sandbox_id,
-                host_id=deleted.host_id,
-                provider=deleted.sandbox_provider,
+                host_id=tombstone.host_id,
+                provider=tombstone.sandbox_provider,
             )
+            if terminated:
+                await asyncio.to_thread(
+                    host_store.mark_deleted_sandbox_terminated,
+                    tombstone.host_id,
+                    sandbox_id=sandbox_id,
+                )
 
 
 async def _terminate_sandbox_best_effort(
