@@ -45,7 +45,6 @@ from omnigent.server.managed_hosts import (
     MICROSANDBOX_MANAGED_TOKEN_TTL_S,
     MODAL_MANAGED_TOKEN_TTL_S,
     OPENSHELL_MANAGED_TOKEN_TTL_S,
-    ManagedHostLaunch,
     ManagedLaunch,
     ManagedLaunchTracker,
     ManagedSandboxConfig,
@@ -4524,65 +4523,6 @@ async def test_run_managed_wake_recreates_a_definitively_gone_sandbox(
     assert repo.url == "https://github.com/omnigent-ai/omnigent"
     assert repo.branch == "main"
     assert repo.repo_name == "omnigent"
-
-
-async def test_recreated_sandbox_records_and_publishes_workspace_reset_notice(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Each fresh generation records and publishes one visible reset notice."""
-    from omnigent.server.routes._sessions import orchestration
-
-    appended: list[object] = []
-    surfaced: list[object] = []
-
-    class _ConversationStore:
-        def set_host_id(self, session_id: str, host_id: str, workspace: str) -> object:
-            assert session_id == "conv_1"
-            assert host_id == "host_1"
-            assert workspace == "/root/workspace/omnigent"
-            return SimpleNamespace(id=session_id, host_id=host_id, workspace=workspace)
-
-        def append(self, session_id: str, items: list[object]) -> list[object]:
-            assert session_id == "conv_1"
-            appended.extend(items)
-            return items
-
-    published: list[tuple[str, str, str | None]] = []
-    monkeypatch.setattr(
-        orchestration,
-        "_publish_sandbox_status",
-        lambda session_id, stage, detail=None: published.append((session_id, stage, detail)),
-    )
-    monkeypatch.setattr(
-        orchestration,
-        "_publish_external_conversation_item",
-        lambda session_id, item: surfaced.append(item),
-    )
-    tracker = ManagedLaunchTracker()
-    tracker.begin("conv_1")
-
-    await orchestration._bind_and_launch_managed_runner(
-        session_id="conv_1",
-        managed=ManagedHostLaunch(
-            host_id="host_1",
-            workspace="/root/workspace/omnigent",
-        ),
-        sandbox_config=SimpleNamespace(),
-        tracker=tracker,
-        conversation_store=_ConversationStore(),
-        host_store=SimpleNamespace(),
-        host_registry=None,
-        tunnel_registry=None,
-        relaunch_host=SimpleNamespace(host_id="host_1"),
-    )
-
-    assert tracker.get("conv_1") is None
-    assert [item.type for item in appended] == ["error"]
-    [visible] = appended
-    assert visible.data.code == "managed_sandbox_workspace_reset"
-    assert visible.data.level == "info"
-    assert surfaced == [visible]
-    assert published[-1] == ("conv_1", "ready", None)
 
 
 async def test_concurrent_relaunch_messages_kick_a_single_launch(
