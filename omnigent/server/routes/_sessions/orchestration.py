@@ -3520,10 +3520,9 @@ def _managed_relaunch_repo(conv: Conversation, session_id: str) -> RepoWorkspace
 
 _WORKSPACE_RESET_ERROR_CODE = "managed_sandbox_workspace_reset"
 _WORKSPACE_RESET_NOTICE = (
-    "The sandbox backing this session no longer existed, so Omnigent created a "
-    "fresh sandbox and reset the workspace. Files created or edited in earlier "
-    "turns that were not committed and pushed are gone. If the session started "
-    "from a repository, that repository has been cloned again."
+    "The sandbox backing this session no longer exists. A fresh sandbox is being "
+    "created. Local files that were not committed and pushed are gone. If the "
+    "session started from a repository, that repository has been cloned again."
 )
 
 
