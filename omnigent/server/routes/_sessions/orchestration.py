@@ -3530,7 +3530,7 @@ async def _note_workspace_reset_on_recreate(
     session_id: str,
     conversation_store: ConversationStore,
 ) -> None:
-    """Tell both the user and replayed agent context that the workspace reset."""
+    """Persist and publish the user-facing notice that the workspace reset."""
     response_id = f"turn_{uuid.uuid4().hex}"
     visible_item = NewConversationItem(
         type="error",
@@ -3542,20 +3542,11 @@ async def _note_workspace_reset_on_recreate(
             level="info",
         ),
     )
-    meta_item = NewConversationItem(
-        type="message",
-        response_id=response_id,
-        data=MessageData(
-            role="user",
-            content=[{"type": "input_text", "text": _WORKSPACE_RESET_NOTICE}],
-            is_meta=True,
-        ),
-    )
     try:
-        await asyncio.to_thread(
+        persisted = await asyncio.to_thread(
             conversation_store.append,
             session_id,
-            [visible_item, meta_item],
+            [visible_item],
         )
     except Exception:  # noqa: BLE001
         _logger.warning(
@@ -3564,6 +3555,9 @@ async def _note_workspace_reset_on_recreate(
             exc_info=True,
             extra={"session_id": session_id},
         )
+        return
+    if persisted:
+        _publish_external_conversation_item(session_id, persisted[0])
 
 
 def _kick_managed_relaunch(

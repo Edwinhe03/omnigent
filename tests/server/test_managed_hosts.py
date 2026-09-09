@@ -4526,13 +4526,14 @@ async def test_run_managed_wake_recreates_a_definitively_gone_sandbox(
     assert repo.repo_name == "omnigent"
 
 
-async def test_recreated_sandbox_records_visible_and_agent_reset_context(
+async def test_recreated_sandbox_records_and_publishes_workspace_reset_notice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each fresh generation records one visible notice and one hidden message."""
+    """Each fresh generation records and publishes one visible reset notice."""
     from omnigent.server.routes._sessions import orchestration
 
     appended: list[object] = []
+    surfaced: list[object] = []
 
     class _ConversationStore:
         def set_host_id(self, session_id: str, host_id: str, workspace: str) -> object:
@@ -4551,6 +4552,11 @@ async def test_recreated_sandbox_records_visible_and_agent_reset_context(
         orchestration,
         "_publish_sandbox_status",
         lambda session_id, stage, detail=None: published.append((session_id, stage, detail)),
+    )
+    monkeypatch.setattr(
+        orchestration,
+        "_publish_external_conversation_item",
+        lambda session_id, item: surfaced.append(item),
     )
     tracker = ManagedLaunchTracker()
     tracker.begin("conv_1")
@@ -4571,14 +4577,11 @@ async def test_recreated_sandbox_records_visible_and_agent_reset_context(
     )
 
     assert tracker.get("conv_1") is None
-    assert [item.type for item in appended] == ["error", "message"]
-    visible, meta = appended
-    assert visible.response_id == meta.response_id
+    assert [item.type for item in appended] == ["error"]
+    [visible] = appended
     assert visible.data.code == "managed_sandbox_workspace_reset"
     assert visible.data.level == "info"
-    assert meta.data.role == "user"
-    assert meta.data.is_meta is True
-    assert meta.data.content == [{"type": "input_text", "text": visible.data.message}]
+    assert surfaced == [visible]
     assert published[-1] == ("conv_1", "ready", None)
 
 
