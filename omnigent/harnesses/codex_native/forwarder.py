@@ -90,7 +90,7 @@ _REPLAY_MAX_RECORDS = 500
 _REPLAY_POST_TIMEOUT_SECONDS = 5.0
 _REPLAY_DEADLINE_SECONDS = 30.0
 _DELTA_FLUSH_INTERVAL_SECONDS = 0.05
-_DELTA_FLUSH_CHAR_THRESHOLD = 64
+_DELTA_FLUSH_CHAR_THRESHOLD = 512
 # A worker cancelled at loop teardown can no longer resolve its queued markers, so an
 # unbounded wait parks the caller for good. Under the runner's 10s auto-forwarder cancel
 # budget so this resolves first.
@@ -1113,7 +1113,7 @@ _ToolItemBuilder = Callable[[str, _JsonObject], "_CodexToolCall | None"]
 @dataclass(frozen=True)
 class _DeltaChunk:
     """
-    One queued text delta with optional stream identity.
+    One queued transient delta with optional stream identity.
 
     :param message_id: Stable native message stream id, e.g.
         ``"codex:thread_123:turn_123:agentMessage:item_agent"``, or
@@ -1121,11 +1121,14 @@ class _DeltaChunk:
     :param delta: Text fragment, e.g. ``"hel"``.
     :param tool_call_id: Codex command item id when this is a live
         command-output chunk, otherwise ``None``.
+    :param reasoning_started: Whether this chunk opens a reasoning block,
+        or ``None`` when this is not a reasoning delta.
     """
 
     message_id: str | None
     delta: str
     tool_call_id: str | None = None
+    reasoning_started: bool | None = None
 
 
 def _resolve_marker(done: asyncio.Future[None]) -> None:
@@ -1169,9 +1172,9 @@ class _DeltaFlushStop:
 
 class _OutputTextDeltaCoalescer:
     """
-    Coalesce high-frequency Codex text and command-output deltas.
+    Coalesce high-frequency Codex text, reasoning, and command-output deltas.
 
-    Codex can emit many tiny text and command-output notifications.
+    Codex can emit many tiny transient notifications.
     Posting each one through Omnigent as an awaited HTTP request makes the
     forwarder drain behind Codex. This worker keeps event ingestion
     cheap while preserving the order of flushed text relative to
@@ -1201,7 +1204,7 @@ class _OutputTextDeltaCoalescer:
         :param flush_interval_seconds: Maximum buffering delay in
             seconds, e.g. ``0.05``.
         :param flush_char_threshold: Character threshold that triggers
-            an immediate flush, e.g. ``64``.
+            an immediate flush, e.g. ``512``.
         """
         self._client = client
         self._session_id = session_id
@@ -1239,6 +1242,15 @@ class _OutputTextDeltaCoalescer:
         self._ensure_worker()
         self._queue.put_nowait(_DeltaChunk(message_id=None, delta=delta, tool_call_id=call_id))
 
+    async def append_reasoning(self, delta: str, *, started: bool) -> None:
+        """Queue reasoning text for coalesced delivery."""
+        if not delta and not started:
+            return
+        self._ensure_worker()
+        self._queue.put_nowait(
+            _DeltaChunk(message_id=None, delta=delta, reasoning_started=started)
+        )
+
     async def flush(self) -> None:
         """
         Flush all deltas queued before this call.
@@ -1258,25 +1270,32 @@ class _OutputTextDeltaCoalescer:
 
         :returns: None after the worker has stopped.
         """
-        if self._worker_task is None:
+        worker = self._worker_task
+        if worker is None:
             return
         # A worker that already stopped will never read the marker, so skip
         # straight to reaping it rather than waiting out the bound.
-        if self._worker_task.done():
+        if worker.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker
             self._worker_task = None
             return
         loop = asyncio.get_running_loop()
         done: asyncio.Future[None] = loop.create_future()
         self._queue.put_nowait(_DeltaFlushStop(done=done))
         await self._await_marker(done, "stop marker")
-        # Only reap a worker that has actually finished; awaiting a wedged one
-        # would reintroduce the unbounded wait this method exists to remove.
-        if self._worker_task.done():
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._worker_task
-        self._worker_task = None
+        if not worker.done():
+            worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker
+        if self._worker_task is worker:
+            self._worker_task = None
 
-    async def _await_marker(self, done: asyncio.Future[None], marker: str) -> None:
+    async def _await_marker(
+        self,
+        done: asyncio.Future[None],
+        marker: str,
+    ) -> None:
         """
         Wait for the worker to resolve a queue marker.
 
@@ -1347,8 +1366,14 @@ class _OutputTextDeltaCoalescer:
                     buffer
                     and buffer_chunk is not None
                     and (
-                        item.message_id != buffer_chunk.message_id
-                        or item.tool_call_id != buffer_chunk.tool_call_id
+                        item.tool_call_id != buffer_chunk.tool_call_id
+                        or (item.reasoning_started is None)
+                        != (buffer_chunk.reasoning_started is None)
+                        or (
+                            item.reasoning_started is None
+                            and item.message_id != buffer_chunk.message_id
+                        )
+                        or item.reasoning_started is True
                     )
                 ):
                     await self._flush_buffer(buffer, chunk=buffer_chunk)
@@ -1361,7 +1386,12 @@ class _OutputTextDeltaCoalescer:
                     buffer_chunk = item
                 buffer.append(item.delta)
                 buffered_chars += len(item.delta)
-                if "\n" in item.delta or buffered_chars >= self._flush_char_threshold:
+                flush_text_line = (
+                    item.tool_call_id is None
+                    and item.reasoning_started is None
+                    and "\n" in item.delta
+                )
+                if flush_text_line or buffered_chars >= self._flush_char_threshold:
                     await self._flush_buffer(buffer, chunk=buffer_chunk)
                     buffer = []
                     buffer_chunk = None
@@ -1397,6 +1427,17 @@ class _OutputTextDeltaCoalescer:
             return
         assert chunk is not None
         delta = "".join(buffer)
+        if chunk.reasoning_started is not None:
+            try:
+                await _post_output_reasoning_delta(
+                    self._client,
+                    self._session_id,
+                    delta,
+                    started=chunk.reasoning_started,
+                )
+            except Exception:  # noqa: BLE001 - preserve the long-lived forwarder.
+                _logger.warning("Codex forwarder reasoning delta flush failed", exc_info=True)
+            return
         if chunk.tool_call_id is not None:
             try:
                 await _post_tool_output_delta(
@@ -3367,11 +3408,9 @@ async def _maybe_handle_delta_event(
         await delta_coalescer.append_tool_output(delta, call_id=call_id)
         return True
     if method in {"item/reasoning/textDelta", "item/reasoning/summaryTextDelta"}:
-        # Flush any buffered assistant text first so a reasoning delta never
-        # jumps ahead of earlier-streamed answer text in arrival order.
-        if delta_coalescer is not None:
-            await delta_coalescer.flush()
-        await _handle_reasoning_delta(client, session_id, params, forwarder_state)
+        if delta_coalescer is None:
+            raise RuntimeError("Codex reasoning delta handling requires a text-delta coalescer")
+        await _handle_reasoning_delta(params, delta_coalescer, forwarder_state)
         return True
     return False
 
@@ -6442,9 +6481,8 @@ def _read_compacted_history(rollout_path: Path) -> dict[str, object] | None:
 
 
 async def _handle_reasoning_delta(
-    client: httpx.AsyncClient,
-    session_id: str,
     params: _JsonObject,
+    delta_coalescer: _OutputTextDeltaCoalescer,
     forwarder_state: _CodexForwarderState | None,
 ) -> None:
     """
@@ -6459,10 +6497,9 @@ async def _handle_reasoning_delta(
     executor's wire shape (#1254). The first delta of a reasoning item
     opens the block (``started=True`` → ``response.reasoning.started``).
 
-    :param client: HTTP client for Omnigent event posts.
-    :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param params: Codex reasoning delta params, e.g.
         ``{"turnId": "turn_123", "itemId": "item_r", "delta": "Let me"}``.
+    :param delta_coalescer: Shared transient-delta coalescer.
     :param forwarder_state: Optional forwarder state tracking which
         reasoning item is currently open (for the ``started`` edge).
     :returns: None.
@@ -6487,10 +6524,7 @@ async def _handle_reasoning_delta(
             # same block don't re-open it.
             started = forwarder_state.reasoning_stream_item_id is None
             forwarder_state.reasoning_stream_item_id = ""
-    # An empty, non-opening delta carries nothing to render.
-    if not delta and not started:
-        return
-    await _post_output_reasoning_delta(client, session_id, delta, started=started)
+    await delta_coalescer.append_reasoning(delta, started=started)
 
 
 async def _post_output_reasoning_delta(

@@ -1729,33 +1729,32 @@ async def test_reasoning_delta_opens_block_then_continues() -> None:
     """
     client = _RecordingClient()
     state = fwd._CodexForwarderState()
+    coalescer = fwd._OutputTextDeltaCoalescer(
+        client,
+        "conv_x",
+        flush_interval_seconds=60.0,
+        flush_char_threshold=1000,
+    )
 
     await fwd._handle_reasoning_delta(
-        client,
-        "conv_x",
         {"turnId": "turn_1", "itemId": "item_r", "delta": "Let me "},
+        coalescer,
         state,
     )
     await fwd._handle_reasoning_delta(
-        client,
-        "conv_x",
         {"turnId": "turn_1", "itemId": "item_r", "delta": "think."},
+        coalescer,
         state,
     )
+    await coalescer.flush()
+    await coalescer.close()
 
     assert client.posts == [
         (
             "/v1/sessions/conv_x/events",
             {
                 "type": "external_output_reasoning_delta",
-                "data": {"delta": "Let me ", "started": True},
-            },
-        ),
-        (
-            "/v1/sessions/conv_x/events",
-            {
-                "type": "external_output_reasoning_delta",
-                "data": {"delta": "think.", "started": False},
+                "data": {"delta": "Let me think.", "started": True},
             },
         ),
     ]
@@ -1772,13 +1771,17 @@ async def test_reasoning_delta_new_item_reopens_block() -> None:
     """
     client = _RecordingClient()
     state = fwd._CodexForwarderState()
+    coalescer = fwd._OutputTextDeltaCoalescer(
+        client,
+        "conv_x",
+        flush_interval_seconds=60.0,
+        flush_char_threshold=1000,
+    )
 
-    await fwd._handle_reasoning_delta(
-        client, "conv_x", {"itemId": "item_a", "delta": "first"}, state
-    )
-    await fwd._handle_reasoning_delta(
-        client, "conv_x", {"itemId": "item_b", "delta": "second"}, state
-    )
+    await fwd._handle_reasoning_delta({"itemId": "item_a", "delta": "first"}, coalescer, state)
+    await fwd._handle_reasoning_delta({"itemId": "item_b", "delta": "second"}, coalescer, state)
+    await coalescer.flush()
+    await coalescer.close()
 
     started_flags = [post[1]["data"]["started"] for post in client.posts]
     assert started_flags == [True, True]
@@ -1795,11 +1798,19 @@ async def test_reasoning_delta_skips_empty_non_opening_delta() -> None:
     """
     client = _RecordingClient()
     state = fwd._CodexForwarderState()
+    coalescer = fwd._OutputTextDeltaCoalescer(
+        client,
+        "conv_x",
+        flush_interval_seconds=60.0,
+        flush_char_threshold=1000,
+    )
 
     # Opening delta (empty) still posts to open the block.
-    await fwd._handle_reasoning_delta(client, "conv_x", {"itemId": "item_r", "delta": ""}, state)
+    await fwd._handle_reasoning_delta({"itemId": "item_r", "delta": ""}, coalescer, state)
     # Empty continuation for the same item is dropped.
-    await fwd._handle_reasoning_delta(client, "conv_x", {"itemId": "item_r", "delta": ""}, state)
+    await fwd._handle_reasoning_delta({"itemId": "item_r", "delta": ""}, coalescer, state)
+    await coalescer.flush()
+    await coalescer.close()
 
     assert len(client.posts) == 1
     assert client.posts[0][1]["data"] == {"delta": "", "started": True}
@@ -3032,21 +3043,25 @@ async def test_delta_coalescer_close_gives_up_on_a_wedged_worker(
     worker = coalescer._worker_task
     assert worker is not None
 
-    await asyncio.wait_for(coalescer.close(), timeout=fwd._DELTA_MARKER_TIMEOUT_SECONDS + 5.0)
+    try:
+        await asyncio.wait_for(coalescer.close(), timeout=fwd._DELTA_MARKER_TIMEOUT_SECONDS + 5.0)
 
-    # close() gave up on the bound rather than waiting out a worker still stuck in its post.
-    assert coalescer._worker_task is None
-    assert not worker.done()
-    worker.cancel()
+        # Once the close deadline expires, cancel and reap the worker so it
+        # cannot outlive the HTTP client that owns its in-flight POST.
+        assert coalescer._worker_task is None
+        assert worker.cancelled()
+    finally:
+        if not worker.done():
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
 
 
 @pytest.mark.asyncio
 async def test_delta_coalescer_worker_survives_an_already_settled_marker() -> None:
     """Resolving a marker whose future is already settled must not kill the worker.
 
-    ``set_result`` on a settled future raises ``InvalidStateError``, and
-    ``_ensure_worker`` only replaces a ``None`` task, so a worker lost this way is
-    never restarted and every later delta is dropped without a word.
+    ``set_result`` on a settled future raises ``InvalidStateError`` inside the
+    worker, so every later delta would otherwise be dropped without a word.
     """
     client = _RecordingClient()
     coalescer = _coalescer(client)
@@ -3073,10 +3088,9 @@ async def test_delta_coalescer_worker_survives_an_already_settled_marker() -> No
 async def test_delta_coalescer_survives_a_cancelled_flush_caller() -> None:
     """A cancelled ``flush()`` caller must not kill the worker.
 
-    The caller's cancellation settles its own future. Resolving it again raises
-    ``InvalidStateError`` inside the worker, and ``_ensure_worker`` only replaces a
-    ``None`` task, so the dead worker was never restarted and every later delta was
-    silently dropped.
+    The caller's cancellation can settle its own future. Resolving it again raises
+    ``InvalidStateError`` inside the worker, so every later delta would otherwise
+    be silently dropped.
     """
     client = _RecordingClient()
     coalescer = _coalescer(client)
@@ -3098,6 +3112,137 @@ async def test_delta_coalescer_survives_a_cancelled_flush_caller() -> None:
     )
     await asyncio.wait_for(coalescer.flush(), timeout=5.0)
     assert len(client.posts) > posts_before
+
+
+@pytest.mark.asyncio
+async def test_delta_coalescer_batches_newline_heavy_tool_output() -> None:
+    """Line-oriented command output is batched instead of POSTed per line."""
+    client = _RecordingClient()
+    coalescer = fwd._OutputTextDeltaCoalescer(
+        client,
+        "conv_x",
+        flush_interval_seconds=60.0,
+        flush_char_threshold=100_000,
+    )
+    chunks = [f"line {index}\n" for index in range(200)]
+
+    for chunk in chunks:
+        await coalescer.append_tool_output(chunk, call_id="call_1")
+    await coalescer.flush()
+    await coalescer.close()
+
+    assert client.posts == [
+        (
+            "/v1/sessions/conv_x/events",
+            {
+                "type": "external_tool_output_delta",
+                "data": {"call_id": "call_1", "delta": "".join(chunks)},
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delta_coalescer_preserves_mixed_stream_order() -> None:
+    """Assistant and reasoning batches retain their Codex arrival order."""
+    client = _RecordingClient()
+    coalescer = fwd._OutputTextDeltaCoalescer(
+        client,
+        "conv_x",
+        flush_interval_seconds=60.0,
+        flush_char_threshold=100_000,
+    )
+
+    await coalescer.append("answer one", message_id="message_1")
+    await coalescer.append_reasoning("think ", started=True)
+    await coalescer.append_reasoning("more", started=False)
+    await coalescer.append("answer two", message_id="message_2")
+    await coalescer.flush()
+    await coalescer.close()
+
+    assert [post[1]["type"] for post in client.posts] == [
+        "external_output_text_delta",
+        "external_output_reasoning_delta",
+        "external_output_text_delta",
+    ]
+    assert [post[1]["data"]["delta"] for post in client.posts] == [
+        "answer one",
+        "think more",
+        "answer two",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delta_coalescer_timeout_preserves_backlog_until_post_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout keeps queued deltas and later flushes ordered behind the slow POST."""
+
+    class _HangingFirstClient:
+        """Hold the first POST until the test releases the simulated stall."""
+
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.posts: list[tuple[str, dict]] = []
+            self.calls = 0
+
+        async def post(self, url: str, *, json: dict) -> httpx.Response:
+            self.calls += 1
+            if self.calls == 1:
+                self.entered.set()
+                await self.release.wait()
+            self.posts.append((url, json))
+            return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(fwd, "_DELTA_MARKER_TIMEOUT_SECONDS", 0.05)
+    client = _HangingFirstClient()
+    coalescer = fwd._OutputTextDeltaCoalescer(
+        client,
+        "conv_x",
+        flush_interval_seconds=60.0,
+        flush_char_threshold=1,
+    )
+
+    await coalescer.append("stale", message_id="old")
+    await asyncio.wait_for(client.entered.wait(), timeout=5.0)
+    await coalescer.flush()
+
+    await coalescer.append("fresh", message_id="new")
+    later_flush = asyncio.create_task(coalescer.flush())
+    await asyncio.sleep(0.01)
+    assert not later_flush.done()
+    client.release.set()
+    await later_flush
+    await coalescer.close()
+
+    assert client.calls == 2
+    assert client.posts == [
+        (
+            "/v1/sessions/conv_x/events",
+            {
+                "type": "external_output_text_delta",
+                "data": {
+                    "delta": "stale",
+                    "message_id": "old",
+                    "index": 0,
+                    "final": False,
+                },
+            },
+        ),
+        (
+            "/v1/sessions/conv_x/events",
+            {
+                "type": "external_output_text_delta",
+                "data": {
+                    "delta": "fresh",
+                    "message_id": "new",
+                    "index": 0,
+                    "final": False,
+                },
+            },
+        ),
+    ]
 
 
 def test_default_collaboration_mode_refuses_when_developer_instructions_never_confirmed() -> None:
