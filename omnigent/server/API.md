@@ -827,12 +827,19 @@ Request body:
     400 `invalid_input`. Wrapper bridges should write the value once
     when they first observe it from the underlying runtime.
 
+  expected_external_session_id (string, optional)
+    Compare-and-swap guard for runtime recovery. When present, both it
+    and `external_session_id` must be non-empty. The replacement succeeds
+    only when the stored id still equals the expected value. Multi-user
+    servers also require proof from the session's currently bound runner;
+    retrying after a successful replacement is idempotent.
+
 200 OK - body matches the `SessionResponse` shape above, with
 `runner_id` set to the newly bound value when `runner_id` was present.
 
 400 Bad Request - runner is not currently registered; `collaboration_mode`
 is used on a non-Codex-native session; or `external_session_id` would
-overwrite a different existing value
+overwrite a different existing value or fail its compare-and-swap guard
 404 Not Found - no session with that id
 
 This is the mutable affinity primitive for Alpha. The same endpoint

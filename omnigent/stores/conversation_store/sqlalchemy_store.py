@@ -3688,6 +3688,66 @@ class SqlAlchemyConversationStore(ConversationStore):
         )
         return _to_conversation(ap_row, meta, labels)
 
+    def replace_external_session_id(
+        self,
+        conversation_id: str,
+        *,
+        expected_value: str,
+        value: str,
+        expected_runner_id: str | None = None,
+    ) -> Conversation:
+        """Compare-and-swap a runtime-native session id during recovery."""
+        with self._session("replace_external_session_id") as session:
+            predicates = [
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+                SqlConversationMetadata.external_session_id == expected_value,
+            ]
+            if expected_runner_id is not None:
+                predicates.append(SqlConversationMetadata.runner_id == expected_runner_id)
+            result = cast(
+                _RowCountResult,
+                session.execute(
+                    update(SqlConversationMetadata)
+                    .where(*predicates)
+                    .values(external_session_id=value)
+                    .execution_options(synchronize_session=False)
+                ),
+            )
+            changed = result.rowcount == 1
+            meta = session.get(
+                SqlConversationMetadata,
+                (current_workspace_id(), conversation_id),
+                populate_existing=True,
+            )
+            if meta is None:
+                raise ConversationNotFoundError(
+                    f"conversation {conversation_id!r} does not exist",
+                )
+            runner_matches = expected_runner_id is None or meta.runner_id == expected_runner_id
+            if not changed and (meta.external_session_id != value or not runner_matches):
+                raise ValueError(
+                    f"conversation {conversation_id!r} has "
+                    f"external_session_id={meta.external_session_id!r} and "
+                    f"runner_id={meta.runner_id!r}; expected {expected_value!r}"
+                    + (
+                        f" on runner {expected_runner_id!r}"
+                        if expected_runner_id is not None
+                        else ""
+                    )
+                    + f" before replacing it with {value!r}",
+                )
+        with self._conv_session("replace_external_session_id") as ap_sess:
+            ap_row = ap_sess.get(SqlConversation, (current_workspace_id(), conversation_id))
+            if ap_row is None:
+                raise ConversationNotFoundError(
+                    f"conversation {conversation_id!r} does not exist",
+                )
+            if changed:
+                ap_row.updated_at = now_epoch()
+            labels = _fetch_labels(ap_sess, conversation_id)
+        return _to_conversation(ap_row, meta, labels)
+
     def create_session_with_agent(
         self,
         *,

@@ -2244,6 +2244,11 @@ class UpdateSessionRequest(BaseModel):
         writes; the server rejects attempts to overwrite an
         already-set different value with ``invalid_input`` to
         surface programmer errors. ``None`` leaves unchanged.
+    :param expected_external_session_id: Optional compare-and-swap guard for
+        recovery. When present, ``external_session_id`` replaces the stored
+        value only if it still equals this expected id; multi-user servers
+        additionally require proof from the currently bound runner. Omitted
+        for ordinary first-write and idempotent bridge updates.
     :param terminal_launch_args: Per-session native-terminal
         pass-through args, e.g. ``["--dangerously-skip-permissions"]``.
         A list (including ``[]``) replaces the stored value wholesale
@@ -2286,6 +2291,7 @@ class UpdateSessionRequest(BaseModel):
     subagent_routing_override: str | None = None
     share_workspace_files: bool | None = None
     external_session_id: str | None = None
+    expected_external_session_id: str | None = None
     terminal_launch_args: list[str] | None = None
     archived: bool | None = None
     project_id: str | None = None

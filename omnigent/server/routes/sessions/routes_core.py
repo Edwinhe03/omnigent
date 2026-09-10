@@ -42,6 +42,7 @@ from omnigent.errors import ErrorCategory, ErrorCode, ErrorImpact, ErrorPhase, O
 from omnigent.models.model_override import validate_model_override
 from omnigent.runner.identity import (
     RUNNER_TUNNEL_TOKEN_HEADER,
+    token_bound_runner_id,
 )
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runner.session_init_protocol import build_runner_session_init_payload
@@ -1976,6 +1977,46 @@ def register_core_routes(
                     f"To fork this session instead, run: omnigent run --fork {session_id}",
                     code=ErrorCode.FORBIDDEN,
                 )
+        replace_external_session_id = "expected_external_session_id" in body.model_fields_set
+        replacement_runner_id: str | None = None
+        if replace_external_session_id and (
+            body.expected_external_session_id is None
+            or not body.expected_external_session_id.strip()
+            or body.external_session_id is None
+            or not body.external_session_id.strip()
+        ):
+            raise OmnigentError(
+                "expected_external_session_id requires a non-empty external_session_id and "
+                "expected value",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        if replace_external_session_id and permission_store is not None:
+            tunnel_token = (request.headers.get(RUNNER_TUNNEL_TOKEN_HEADER) or "").strip()
+            if not tunnel_token:
+                raise OmnigentError(
+                    "Replacing external_session_id requires proof from the session's "
+                    "currently bound runner",
+                    code=ErrorCode.FORBIDDEN,
+                )
+            current = await asyncio.to_thread(
+                conversation_store.get_conversation,
+                session_id,
+            )
+            if current is None:
+                raise _session_not_found()
+            bound_runner_id = current.runner_id
+            authorized_runner = (
+                runner_tunnel_tokens is not None and tunnel_token in runner_tunnel_tokens
+            ) or (
+                bound_runner_id is not None
+                and token_bound_runner_id(tunnel_token) == bound_runner_id
+            )
+            if bound_runner_id is None or not authorized_runner:
+                raise OmnigentError(
+                    "Only the session's currently bound runner may replace external_session_id",
+                    code=ErrorCode.FORBIDDEN,
+                )
+            replacement_runner_id = bound_runner_id
         if body.labels:
             _reject_server_reserved_label_seed(body.labels)
             # Advisor-owned cost_control.* labels are written only by the
@@ -2457,20 +2498,28 @@ def register_core_routes(
             )
         if body.external_session_id is not None:
             try:
-                await asyncio.to_thread(
-                    conversation_store.set_external_session_id,
-                    session_id,
-                    body.external_session_id,
-                )
+                if replace_external_session_id:
+                    assert body.expected_external_session_id is not None
+                    await asyncio.to_thread(
+                        conversation_store.replace_external_session_id,
+                        session_id,
+                        expected_value=body.expected_external_session_id,
+                        value=body.external_session_id,
+                        expected_runner_id=replacement_runner_id,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        conversation_store.set_external_session_id,
+                        session_id,
+                        body.external_session_id,
+                    )
             except ConversationNotFoundError as exc:
                 # Race: row vanished between the update above and this
                 # write. Reuse the NOT_FOUND code for consistency.
                 raise _session_not_found() from exc
             except ValueError as exc:
-                # Store raises ValueError on attempted overwrite of an
-                # already-set external_session_id — surface as
-                # invalid_input so the caller (a wrapper bridge) sees a
-                # 400 with the conflict explained.
+                # Store raises ValueError on an unguarded overwrite or a
+                # failed compare-and-swap. Surface the conflict to the caller.
                 raise OmnigentError(
                     str(exc),
                     code=ErrorCode.INVALID_INPUT,

@@ -3201,6 +3201,74 @@ async def test_patch_session_external_session_id_rejects_overwrite(
     assert after.json()["external_session_id"] == "sid-1"
 
 
+async def test_patch_session_external_session_id_compare_and_swap(
+    client: httpx.AsyncClient,
+) -> None:
+    """A guarded recovery PATCH replaces only the observed native thread id."""
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    first = await client.patch(
+        f"/v1/sessions/{session['id']}",
+        json={"external_session_id": "sid-old"},
+    )
+    assert first.status_code == 200, first.text
+
+    replaced = await client.patch(
+        f"/v1/sessions/{session['id']}",
+        json={
+            "external_session_id": "sid-new",
+            "expected_external_session_id": "sid-old",
+        },
+    )
+
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["external_session_id"] == "sid-new"
+
+
+async def test_patch_session_external_session_id_compare_and_swap_rejects_stale_runner(
+    client: httpx.AsyncClient,
+) -> None:
+    """A stale expected id returns 400 and preserves the newer binding."""
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    first = await client.patch(
+        f"/v1/sessions/{session['id']}",
+        json={"external_session_id": "sid-current"},
+    )
+    assert first.status_code == 200, first.text
+
+    rejected = await client.patch(
+        f"/v1/sessions/{session['id']}",
+        json={
+            "external_session_id": "sid-stale-runner",
+            "expected_external_session_id": "sid-old",
+        },
+    )
+
+    assert rejected.status_code == 400
+    after = await client.get(f"/v1/sessions/{session['id']}")
+    assert after.status_code == 200
+    assert after.json()["external_session_id"] == "sid-current"
+
+
+async def test_patch_session_external_session_id_compare_and_swap_requires_both_values(
+    client: httpx.AsyncClient,
+) -> None:
+    """An invalid CAS fails before any other requested mutation is applied."""
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+
+    rejected = await client.patch(
+        f"/v1/sessions/{session['id']}",
+        json={"title": "must not persist", "expected_external_session_id": "sid-old"},
+    )
+
+    assert rejected.status_code == 400
+    after = await client.get(f"/v1/sessions/{session['id']}")
+    assert after.status_code == 200
+    assert after.json()["title"] != "must not persist"
+
+
 async def test_create_session_returns_null_external_session_id(
     client: httpx.AsyncClient,
 ) -> None:

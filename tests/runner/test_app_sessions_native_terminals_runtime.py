@@ -707,6 +707,169 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
 
 
 @pytest.mark.asyncio
+async def test_auto_create_codex_terminal_recovers_unreadable_resume_with_cas_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable persisted thread launches fresh and carries its CAS guard."""
+    from omnigent.harnesses.codex_native import app_server as codex_app_mod
+    from omnigent.runner import app as runner_app_mod
+
+    session_id = "56d0e57c1a154fe4b79fbb7b88b2d330"
+    old_thread_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
+    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+    monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
+
+    class _SnapshotServerClient:
+        async def get(self, url: str, **kwargs: Any) -> httpx.Response:
+            del kwargs
+            if url == f"/v1/sessions/{session_id}/items":
+                return httpx.Response(
+                    200,
+                    json={"data": [], "has_more": False},
+                    request=httpx.Request("GET", url),
+                )
+            return httpx.Response(
+                200,
+                json={"external_session_id": old_thread_id},
+                request=httpx.Request("GET", url),
+            )
+
+    class _FakeCodexAppServer:
+        codex_path = "/opt/codex/bin/codex"
+        codex_cli_version: tuple[int, int, int] | None = None
+
+        def __init__(self) -> None:
+            self.env = {"OPENAI_API_KEY": "sk-test"}
+            self.codex_home = tmp_path / "unconfigured-codex-home"
+            self.listen_url: str | None = None
+            self.config_overrides: list[str] = []
+
+        async def start(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    app_server = _FakeCodexAppServer()
+
+    def _fake_build_codex_native_server(**kwargs: Any) -> _FakeCodexAppServer:
+        app_server.codex_home = kwargs["codex_home"]
+        return app_server
+
+    event_client_connected = False
+
+    class _DiscoveryClient:
+        def __init__(self, *, ws_url: str, client_name: str) -> None:
+            self.ws_url = ws_url
+            self.client_name = client_name
+
+        async def connect(self) -> None:
+            nonlocal event_client_connected
+            event_client_connected = True
+
+        async def close(self) -> None:
+            return None
+
+    async def _unreadable_preload(
+        transport: str,
+        loaded_thread_id: str,
+        *,
+        terminal_launch_args: list[str] | None = None,
+    ) -> None:
+        del transport, terminal_launch_args
+        assert loaded_thread_id == old_thread_id
+        raise codex_app_mod.CodexAppServerResponseError(
+            {
+                "code": -32603,
+                "message": "thread-store internal error: malformed rollout",
+            }
+        )
+
+    launched_specs: list[Any] = []
+
+    class _FakeResourceRegistry:
+        async def launch_auxiliary_terminal(
+            self,
+            *,
+            session_id: str,
+            terminal_name: str,
+            session_key: str,
+            spec: Any,
+            resource_role: str | None = None,
+            parent_os_env: Any = None,
+        ) -> SessionResourceView:
+            del terminal_name, session_key, resource_role, parent_os_env
+            launched_specs.append(spec)
+            return SessionResourceView(
+                id="terminal_codex_main",
+                type="terminal",
+                session_id=session_id,
+                name="Codex",
+            )
+
+    discovery_calls: list[dict[str, Any]] = []
+
+    async def _fake_discover_thread_and_forward(**kwargs: Any) -> None:
+        discovery_calls.append(kwargs)
+
+    async def _unexpected_known_thread_forwarder(**kwargs: Any) -> None:
+        raise AssertionError(f"unreadable resume used known-thread forwarding: {kwargs}")
+
+    monkeypatch.setattr(
+        codex_app_mod,
+        "build_codex_native_server",
+        _fake_build_codex_native_server,
+    )
+    monkeypatch.setattr(codex_app_mod, "CodexAppServerClient", _DiscoveryClient)
+    monkeypatch.setattr(codex_app_mod, "preload_codex_thread_for_resume", _unreadable_preload)
+    monkeypatch.setattr(
+        runner_app_mod,
+        "_codex_discover_thread_and_forward",
+        _fake_discover_thread_and_forward,
+    )
+    monkeypatch.setattr(
+        runner_app_mod,
+        "_codex_forward_known_thread",
+        _unexpected_known_thread_forwarder,
+    )
+
+    agent_spec = AgentSpec(
+        spec_version=1,
+        name="codex",
+        executor=ExecutorSpec(
+            type="omnigent",
+            config={"harness": "codex-native", "model": "gpt-5-default"},
+        ),
+    )
+
+    try:
+        await _auto_create_codex_terminal(
+            session_id,
+            _FakeResourceRegistry(),  # type: ignore[arg-type]
+            lambda _sid, _event: None,
+            agent_spec=agent_spec,
+            server_client=_SnapshotServerClient(),  # type: ignore[arg-type]
+        )
+        await asyncio.sleep(0)
+    finally:
+        runner_app_mod._AUTO_FORWARDER_TASKS.pop(session_id, None)
+        runner_app_mod._AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+
+    assert event_client_connected is True
+    assert len(launched_specs) == 1
+    assert "resume" not in launched_specs[0].args
+    assert len(discovery_calls) == 1
+    assert discovery_calls[0]["replace_external_session_id_from"] == old_thread_id
+    assert discovery_calls[0]["thread_reset_error"] == (
+        "thread-store internal error: malformed rollout"
+    )
+
+
+@pytest.mark.asyncio
 async def test_auto_create_codex_terminal_fork_clones_rollout_and_resumes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3287,6 +3450,170 @@ async def test_codex_discover_thread_and_forward_persists_workspace_as_bridge_cw
     assert state is not None
     assert state.thread_id == thread_id
     assert state.cwd == str(workspace)
+
+
+@pytest.mark.asyncio
+async def test_codex_discover_thread_and_forward_compare_and_swaps_replacement_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unreadable-thread recovery binds the replacement before forwarding."""
+    from omnigent import cli_auth
+    from omnigent.harnesses.codex_native import forwarder as codex_native_forwarder
+    from omnigent.runner.app import (
+        _AUTO_CODEX_APP_SERVERS,
+        _codex_discover_thread_and_forward,
+    )
+
+    old_thread_id = "019e96aa-old0-7343-8d3b-6f914d60936b"
+    new_thread_id = "019e96aa-new0-7343-8d3b-6f914d60936b"
+    requests: list[tuple[str, dict[str, Any]]] = []
+    client_headers: list[dict[str, str]] = []
+    supervised: list[str] = []
+
+    async def _fake_wait(*_args: object, **_kwargs: object) -> str:
+        return new_thread_id
+
+    async def _fake_supervise(**kwargs: object) -> None:
+        supervised.append(cast(str, kwargs["thread_id"]))
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _ServerClient:
+        async def patch(self, url: str, *, json: dict[str, Any]) -> _Response:
+            requests.append((url, json))
+            return _Response()
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict[str, Any],
+            timeout: float,
+        ) -> _Response:
+            del timeout
+            requests.append((url, json))
+            return _Response()
+
+    @contextlib.asynccontextmanager
+    async def _fake_open_server_client(*_args: object, **kwargs: object):
+        client_headers.append(cast(dict[str, str], kwargs["headers"]))
+        yield _ServerClient()
+
+    class _EventClient:
+        async def close(self) -> None:
+            return None
+
+    class _AppServer:
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(codex_native_forwarder, "wait_for_thread_started", _fake_wait)
+    monkeypatch.setattr(codex_native_forwarder, "supervise_forwarder", _fake_supervise)
+    monkeypatch.setattr(cli_auth, "open_server_client", _fake_open_server_client)
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    monkeypatch.setenv("OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN", "runner-proof")
+    monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
+
+    session_id = "cas-replacement-session"
+    _AUTO_CODEX_APP_SERVERS[session_id] = _AppServer()
+    await _codex_discover_thread_and_forward(
+        session_id=session_id,
+        bridge_dir=tmp_path,
+        codex_ws_url="ws://127.0.0.1:1",
+        codex_home=tmp_path / "codex-home",
+        workspace=str(tmp_path / "workspace"),
+        event_client=_EventClient(),  # type: ignore[arg-type]
+        routing_summary="provider 'test' (model=gpt-test)",
+        replace_external_session_id_from=old_thread_id,
+        thread_reset_error="thread-store internal error: malformed rollout",
+    )
+
+    assert requests[0] == (
+        f"/v1/sessions/{session_id}",
+        {
+            "external_session_id": new_thread_id,
+            "expected_external_session_id": old_thread_id,
+        },
+    )
+    assert client_headers == [{"X-Omnigent-Runner-Tunnel-Token": "runner-proof"}]
+    notice_data = requests[1][1]["data"]["item_data"]
+    assert notice_data["code"] == "codex_thread_reset"
+    assert notice_data["level"] == "info"
+    assert (
+        "Codex reported: thread-store internal error: malformed rollout" in notice_data["message"]
+    )
+    assert supervised == [new_thread_id]
+    state = codex_native_bridge.read_bridge_state(tmp_path)
+    assert state is not None
+    assert state.thread_id == new_thread_id
+
+
+@pytest.mark.asyncio
+async def test_codex_discover_thread_and_forward_closes_on_replacement_cas_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed replacement CAS stops the native thread instead of diverging."""
+    from omnigent import cli_auth
+    from omnigent.harnesses.codex_native import forwarder as codex_native_forwarder
+    from omnigent.runner.app import (
+        _AUTO_CODEX_APP_SERVERS,
+        _codex_discover_thread_and_forward,
+    )
+
+    async def _fake_wait(*_args: object, **_kwargs: object) -> str:
+        return "019e96aa-new0-7343-8d3b-6f914d60936b"
+
+    class _ServerClient:
+        async def patch(self, url: str, *, json: dict[str, Any]) -> httpx.Response:
+            return httpx.Response(400, request=httpx.Request("PATCH", url), json={"error": json})
+
+    @contextlib.asynccontextmanager
+    async def _fake_open_server_client(*_args: object, **_kwargs: object):
+        yield _ServerClient()
+
+    class _EventClient:
+        async def close(self) -> None:
+            return None
+
+    class _AppServer:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    async def _unexpected_supervise(**_kwargs: object) -> None:
+        raise AssertionError("forwarder must not start after a failed replacement CAS")
+
+    monkeypatch.setattr(codex_native_forwarder, "wait_for_thread_started", _fake_wait)
+    monkeypatch.setattr(codex_native_forwarder, "supervise_forwarder", _unexpected_supervise)
+    monkeypatch.setattr(cli_auth, "open_server_client", _fake_open_server_client)
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
+
+    session_id = "cas-conflict-session"
+    app_server = _AppServer()
+    _AUTO_CODEX_APP_SERVERS[session_id] = app_server
+    with pytest.raises(httpx.HTTPStatusError):
+        await _codex_discover_thread_and_forward(
+            session_id=session_id,
+            bridge_dir=tmp_path,
+            codex_ws_url="ws://127.0.0.1:1",
+            codex_home=tmp_path / "codex-home",
+            workspace=str(tmp_path / "workspace"),
+            event_client=_EventClient(),  # type: ignore[arg-type]
+            routing_summary="provider 'test' (model=gpt-test)",
+            replace_external_session_id_from="019e96aa-old0-7343-8d3b-6f914d60936b",
+        )
+
+    assert app_server.closed is True
+    assert codex_native_bridge.read_bridge_state(tmp_path) is None
 
 
 @pytest.mark.asyncio

@@ -4419,6 +4419,8 @@ async def _auto_create_codex_terminal(
         ws_url=codex_ws_url,
         client_name="omnigent-codex-native-auto",
     )
+    replace_external_session_id_from: str | None = None
+    thread_reset_error: str | None = None
     if launch_config.external_session_id is not None:
         from omnigent.harnesses.codex_native.bridge import (
             CodexNativeBridgeState,
@@ -4451,13 +4453,11 @@ async def _auto_create_codex_terminal(
                 exc,
                 extra={"session_id": session_id},
             )
-            codex_error = (
+            replace_external_session_id_from = launch_config.external_session_id
+            thread_reset_error = (
                 exc.message
                 if isinstance(exc, CodexAppServerResponseError) and exc.message
                 else str(exc)
-            )
-            await _post_codex_thread_reset_notice(
-                session_id=session_id, server_client=server_client, codex_error=codex_error
             )
             launch_config = dataclasses.replace(launch_config, external_session_id=None)
         else:
@@ -4641,6 +4641,14 @@ async def _auto_create_codex_terminal(
                 login_required=_codex_launch.login_required,
                 subagent_router=_codex_router,
                 turn_router=_codex_turn_router,
+                **(
+                    {
+                        "replace_external_session_id_from": replace_external_session_id_from,
+                        "thread_reset_error": thread_reset_error,
+                    }
+                    if replace_external_session_id_from is not None
+                    else {}
+                ),
             )
             if launch_config.external_session_id is None
             else _codex_forward_known_thread(
@@ -4699,6 +4707,8 @@ async def _codex_discover_thread_and_forward(
     login_required: bool = False,
     subagent_router: SubagentRouter | None = None,
     turn_router: TurnRouter | None = None,
+    replace_external_session_id_from: str | None = None,
+    thread_reset_error: str | None = None,
 ) -> None:
     """
     Adopt the fresh Codex TUI's thread, then mirror it into the Omnigent session.
@@ -4738,6 +4748,10 @@ async def _codex_discover_thread_and_forward(
         endpoint a re-created terminal has since installed.
     :param turn_router: First-message routing endpoint this launch
         started, torn down alongside the subagent one.
+    :param replace_external_session_id_from: Persisted unreadable thread id
+        that must still be current before binding the discovered replacement.
+    :param thread_reset_error: Codex error to log after a replacement id is
+        safely bound.
     """
     from omnigent.harnesses.codex_native.bridge import (
         CodexNativeBridgeState,
@@ -4813,23 +4827,28 @@ async def _codex_discover_thread_and_forward(
             # The user signed in (or the TUI otherwise started a thread):
             # the pre-recorded fail-fast cause no longer applies.
             clear_bridge_startup_error(bridge_dir)
-        write_bridge_state(
-            bridge_dir,
-            CodexNativeBridgeState(
-                session_id=session_id,
-                socket_path=codex_ws_url,
-                thread_id=thread_id,
-                codex_home=str(codex_home),
-                # The session workspace: without it the executor falls back
-                # to the runner process's own cwd when starting turns.
-                cwd=workspace,
-            ),
-        )
-
         server_url = _required_runner_env("RUNNER_SERVER_URL")
         auth_factory = _make_auth_token_factory()
         auth_token = auth_factory() if auth_factory is not None else None
         headers: dict[str, str] = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+        from omnigent.runner._entry import _runner_tunnel_binding_token_from_env
+        from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER
+
+        binding_token = _runner_tunnel_binding_token_from_env()
+        if binding_token is not None:
+            headers[RUNNER_TUNNEL_TOKEN_HEADER] = binding_token
+
+        if replace_external_session_id_from is None:
+            write_bridge_state(
+                bridge_dir,
+                CodexNativeBridgeState(
+                    session_id=session_id,
+                    socket_path=codex_ws_url,
+                    thread_id=thread_id,
+                    codex_home=str(codex_home),
+                    cwd=workspace,
+                ),
+            )
 
         # Mirror the discovered Codex thread id onto the Omnigent session as its
         # external_session_id, the same way claude-native records its
@@ -4839,9 +4858,9 @@ async def _codex_discover_thread_and_forward(
         # external_session_id, and the forked clone's runner clones this
         # thread's rollout from it (see _clone_codex_rollout). Without it a
         # host-spawned codex session has no recorded thread id, so a fork
-        # would resume fresh. Best-effort: a transient Omnigent failure here still
-        # leaves chat streaming working — only fork-history carry-over
-        # degrades.
+        # would resume fresh. Fresh-thread discovery records this best-effort;
+        # unreadable-thread replacement must bind it before bridge publication
+        # so a stale runner cannot split the web chat from the terminal.
         from omnigent.cli_auth import open_server_client
 
         try:
@@ -4851,10 +4870,31 @@ async def _codex_discover_thread_and_forward(
                 auth=_RunnerDatabricksAuth(auth_factory),
                 timeout=httpx.Timeout(10.0),
             ) as _ext_client:
+                patch_body = {"external_session_id": thread_id}
+                if replace_external_session_id_from is not None:
+                    patch_body["expected_external_session_id"] = replace_external_session_id_from
                 _ext_resp = await _ext_client.patch(
                     f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
-                    json={"external_session_id": thread_id},
+                    json=patch_body,
                 )
+                if replace_external_session_id_from is not None:
+                    _ext_resp.raise_for_status()
+                    write_bridge_state(
+                        bridge_dir,
+                        CodexNativeBridgeState(
+                            session_id=session_id,
+                            socket_path=codex_ws_url,
+                            thread_id=thread_id,
+                            codex_home=str(codex_home),
+                            cwd=workspace,
+                        ),
+                    )
+                    if thread_reset_error is not None:
+                        await _post_codex_thread_reset_notice(
+                            session_id=session_id,
+                            server_client=_ext_client,
+                            codex_error=thread_reset_error,
+                        )
             if _ext_resp.status_code >= 400:
                 _logger.warning(
                     "AP rejected codex external_session_id PATCH (%s); session=%s thread=%s — "
@@ -4865,6 +4905,14 @@ async def _codex_discover_thread_and_forward(
                     extra={"session_id": session_id},
                 )
         except httpx.HTTPError:
+            if replace_external_session_id_from is not None:
+                _logger.error(
+                    "Could not compare-and-swap codex external_session_id for %s; "
+                    "closing the replacement thread to avoid web/TUI divergence",
+                    session_id,
+                    exc_info=True,
+                )
+                raise
             _logger.warning(
                 "Could not record codex external_session_id for %s; a fork of this "
                 "session will resume fresh",

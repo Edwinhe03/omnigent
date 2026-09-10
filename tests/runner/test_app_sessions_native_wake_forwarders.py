@@ -1363,10 +1363,11 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
             )
 
     runs: list[_ForwarderRun] = []
+    discovery_calls: list[dict[str, Any]] = []
 
     async def _parking_discover_thread(**kwargs: Any) -> None:
         """Park forever in place of the fresh-thread discovery forwarder."""
-        del kwargs
+        discovery_calls.append(kwargs)
         run = _ForwarderRun(task=asyncio.current_task())
         runs.append(run)
         try:
@@ -1413,17 +1414,12 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
         await asyncio.sleep(0)
 
         assert closed == [], "the fallback must keep the app-server for the fresh thread"
-        assert [p["url"] for p in posted] == [f"/v1/sessions/{session_id}/events"], (
-            "the fallback must surface exactly one notice into the session"
+        assert posted == [], (
+            "the recovery notice must wait until the replacement thread is discovered and bound"
         )
-        notice = posted[0]["json"]
-        assert notice["type"] == "external_conversation_item"
-        assert notice["data"]["item_type"] == "error"
-        assert notice["data"]["item_data"]["code"] == "codex_thread_reset"
-        assert notice["data"]["item_data"]["level"] == "info"
-        # The body names codex as the source and quotes its own error text.
-        assert "Codex reported an internal error" in notice["data"]["item_data"]["message"]
-        assert "stream did not contain valid UTF-8" in notice["data"]["item_data"]["message"]
+        assert len(discovery_calls) == 1
+        assert discovery_calls[0]["replace_external_session_id_from"] == thread_id
+        assert "stream did not contain valid UTF-8" in discovery_calls[0]["thread_reset_error"]
         assert connected == ["omnigent-codex-native-auto"], (
             "the fresh-thread path must connect the discovery listener"
         )

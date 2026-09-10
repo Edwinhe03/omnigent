@@ -1531,6 +1531,33 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def replace_external_session_id(
+        self,
+        conversation_id: str,
+        *,
+        expected_value: str,
+        value: str,
+        expected_runner_id: str | None = None,
+    ) -> Conversation:
+        """Compare-and-swap the runtime-native session id.
+
+        Recovery code uses this when the persisted native thread is unreadable
+        and the runtime creates a replacement. Retrying is idempotent when the
+        row already contains ``value``; a stale runner cannot replace a newer
+        binding.
+
+        :param conversation_id: Conversation to update.
+        :param expected_value: Native session id the caller observed.
+        :param value: Replacement native session id.
+        :param expected_runner_id: Optional runner binding that must still own
+            the conversation when the replacement lands.
+        :returns: The updated :class:`Conversation`.
+        :raises ConversationNotFoundError: If the conversation does not exist.
+        :raises ValueError: If the current id matches neither expected nor new.
+        """
+        ...
+
+    @abstractmethod
     def create_session_with_agent(
         self,
         *,

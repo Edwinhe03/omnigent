@@ -385,6 +385,76 @@ def test_single_user_server_skips_the_gate(
     assert COST_CONTROL_PLAN_LABEL in conv.labels
 
 
+# ── PATCH: recovery CAS uses the same runner proof ───────────────────────────
+
+
+def test_token_bound_runner_authorizes_external_session_id_rebind(
+    stores: tuple[SqlAlchemyConversationStore, SqlAlchemyAgentStore, SqlAlchemyPermissionStore],
+) -> None:
+    """A token-bound runner can atomically bind its replacement Codex thread."""
+    conversation_store = stores[0]
+    app = _multi_user_app(stores, runner_tunnel_tokens=frozenset({"pool-token"}))
+    conv_id = _seed_session(stores, runner_id=token_bound_runner_id(_RUNNER_TOKEN))
+    conversation_store.set_external_session_id(conv_id, "thread-old")
+
+    resp = TestClient(app).patch(
+        f"/v1/sessions/{conv_id}",
+        json={
+            "external_session_id": "thread-new",
+            "expected_external_session_id": "thread-old",
+        },
+        headers={
+            "X-Forwarded-Email": ALICE,
+            RUNNER_TUNNEL_TOKEN_HEADER: _RUNNER_TOKEN,
+        },
+    )
+
+    assert resp.status_code == 200
+    conv = conversation_store.get_conversation(conv_id)
+    assert conv is not None
+    assert conv.external_session_id == "thread-new"
+
+
+def test_allowlisted_stable_runner_authorizes_external_session_id_rebind(
+    stores: tuple[SqlAlchemyConversationStore, SqlAlchemyAgentStore, SqlAlchemyPermissionStore],
+) -> None:
+    """An allow-listed pool token can rebind a session using a stable runner id."""
+    conversation_store = stores[0]
+    app = _multi_user_app(stores, runner_tunnel_tokens=frozenset({"pool-token"}))
+    conv_id = _seed_session(stores, runner_id="runner_stable_pool_1")
+    conversation_store.set_external_session_id(conv_id, "thread-old")
+
+    rejected = TestClient(app).patch(
+        f"/v1/sessions/{conv_id}",
+        json={
+            "external_session_id": "thread-untrusted",
+            "expected_external_session_id": "thread-old",
+        },
+        headers={
+            "X-Forwarded-Email": ALICE,
+            RUNNER_TUNNEL_TOKEN_HEADER: "not-allowlisted",
+        },
+    )
+    assert rejected.status_code == 403
+
+    resp = TestClient(app).patch(
+        f"/v1/sessions/{conv_id}",
+        json={
+            "external_session_id": "thread-new",
+            "expected_external_session_id": "thread-old",
+        },
+        headers={
+            "X-Forwarded-Email": ALICE,
+            RUNNER_TUNNEL_TOKEN_HEADER: "pool-token",
+        },
+    )
+
+    assert resp.status_code == 200
+    conv = conversation_store.get_conversation(conv_id)
+    assert conv is not None
+    assert conv.external_session_id == "thread-new"
+
+
 # ── Create: no client may seed the namespace ─────────────────────────────────
 
 

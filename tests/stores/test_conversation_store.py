@@ -3887,6 +3887,103 @@ def test_set_external_session_id_rejects_overwrite_with_different_value(
     assert fetched.external_session_id == "sid-1"
 
 
+def test_replace_external_session_id_compare_and_swap(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """Recovery can replace exactly the stale native id it observed."""
+    conv = conversation_store.create_conversation()
+    conversation_store.set_external_session_id(conv.id, "sid-old")
+
+    updated = conversation_store.replace_external_session_id(
+        conv.id,
+        expected_value="sid-old",
+        value="sid-new",
+    )
+
+    assert updated.external_session_id == "sid-new"
+    fetched = conversation_store.get_conversation(conv.id)
+    assert fetched is not None
+    assert fetched.external_session_id == "sid-new"
+
+
+def test_replace_external_session_id_retry_is_idempotent(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """A lost CAS response may be retried after the new id is already stored."""
+    conv = conversation_store.create_conversation()
+    conversation_store.set_external_session_id(conv.id, "sid-old")
+    conversation_store.replace_external_session_id(
+        conv.id,
+        expected_value="sid-old",
+        value="sid-new",
+    )
+
+    updated = conversation_store.replace_external_session_id(
+        conv.id,
+        expected_value="sid-old",
+        value="sid-new",
+    )
+
+    assert updated.external_session_id == "sid-new"
+
+
+def test_replace_external_session_id_same_expected_and_new_still_requires_match(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """Equal expected/new values cannot turn CAS into a first-write operation."""
+    conv = conversation_store.create_conversation()
+
+    with pytest.raises(ValueError, match="expected 'sid-new'"):
+        conversation_store.replace_external_session_id(
+            conv.id,
+            expected_value="sid-new",
+            value="sid-new",
+        )
+
+    fetched = conversation_store.get_conversation(conv.id)
+    assert fetched is not None
+    assert fetched.external_session_id is None
+
+
+def test_replace_external_session_id_rejects_stale_expected_value(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """A stale runner cannot overwrite a newer native thread binding."""
+    conv = conversation_store.create_conversation()
+    conversation_store.set_external_session_id(conv.id, "sid-newer")
+
+    with pytest.raises(ValueError, match="expected 'sid-old'"):
+        conversation_store.replace_external_session_id(
+            conv.id,
+            expected_value="sid-old",
+            value="sid-stale-runner",
+        )
+
+    fetched = conversation_store.get_conversation(conv.id)
+    assert fetched is not None
+    assert fetched.external_session_id == "sid-newer"
+
+
+def test_replace_external_session_id_rejects_stale_runner(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """A recovery CAS cannot land after the conversation moves runners."""
+    conv = conversation_store.create_conversation(runner_id="runner-current")
+    conversation_store.set_external_session_id(conv.id, "sid-old")
+
+    with pytest.raises(ValueError, match="runner-current"):
+        conversation_store.replace_external_session_id(
+            conv.id,
+            expected_value="sid-old",
+            value="sid-stale-runner",
+            expected_runner_id="runner-stale",
+        )
+
+    fetched = conversation_store.get_conversation(conv.id)
+    assert fetched is not None
+    assert fetched.external_session_id == "sid-old"
+
+
 def test_set_external_session_id_missing_conversation_raises(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
