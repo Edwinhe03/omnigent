@@ -90,11 +90,17 @@ _REPLAY_MAX_RECORDS = 500
 _REPLAY_POST_TIMEOUT_SECONDS = 5.0
 _REPLAY_DEADLINE_SECONDS = 30.0
 _DELTA_FLUSH_INTERVAL_SECONDS = 0.05
-_DELTA_FLUSH_CHAR_THRESHOLD = 512
-# A worker cancelled at loop teardown can no longer resolve its queued markers, so an
-# unbounded wait parks the caller for good. Under the runner's 10s auto-forwarder cancel
-# budget so this resolves first.
-_DELTA_MARKER_TIMEOUT_SECONDS = 5.0
+_DELTA_FLUSH_CHAR_THRESHOLD = 8 * 1024
+# Transient output can be discarded because completed items are persisted
+# separately. Bound queued text so a slow relay cannot create hours of lag.
+_DELTA_QUEUE_CHAR_LIMIT = 256 * 1024
+_DELTA_POST_TIMEOUT_SECONDS = 5.0
+# Preserve healthy queued deltas briefly at ordering boundaries. If they do not
+# drain, shed the remaining previews and wait only for the current bounded POST.
+_DELTA_FLUSH_GRACE_SECONDS = 1.0
+# Bound the post-shedding wait below the runner's 10s cancellation budget and
+# above the delta POST deadline.
+_DELTA_MARKER_TIMEOUT_SECONDS = 6.0
 _EXTERNAL_REASONING_EFFORT_CHANGE_TYPE = "external_reasoning_effort_change"
 # Context-compaction progress edge. Publishes the same
 # ``response.compaction.in_progress`` / ``response.compaction.completed`` SSE
@@ -1204,7 +1210,7 @@ class _OutputTextDeltaCoalescer:
         :param flush_interval_seconds: Maximum buffering delay in
             seconds, e.g. ``0.05``.
         :param flush_char_threshold: Character threshold that triggers
-            an immediate flush, e.g. ``512``.
+            an immediate flush, e.g. ``8192``.
         """
         self._client = client
         self._session_id = session_id
@@ -1215,6 +1221,8 @@ class _OutputTextDeltaCoalescer:
         )
         self._worker_task: asyncio.Task[None] | None = None
         self._next_index_by_message_id: dict[str, int] = {}
+        self._queued_chars = 0
+        self._dropping_until_barrier = False
 
     async def append(self, delta: str, *, message_id: str | None = None) -> None:
         """
@@ -1227,8 +1235,7 @@ class _OutputTextDeltaCoalescer:
         """
         if not delta:
             return
-        self._ensure_worker()
-        self._queue.put_nowait(_DeltaChunk(message_id=message_id, delta=delta))
+        await self._enqueue(_DeltaChunk(message_id=message_id, delta=delta))
 
     async def append_tool_output(self, delta: str, *, call_id: str) -> None:
         """Queue command output for coalesced delivery.
@@ -1239,16 +1246,14 @@ class _OutputTextDeltaCoalescer:
         """
         if not delta or not call_id:
             return
-        self._ensure_worker()
-        self._queue.put_nowait(_DeltaChunk(message_id=None, delta=delta, tool_call_id=call_id))
+        await self._enqueue(_DeltaChunk(message_id=None, delta=delta, tool_call_id=call_id))
 
     async def append_reasoning(self, delta: str, *, started: bool) -> None:
         """Queue reasoning text for coalesced delivery."""
         if not delta and not started:
             return
-        self._ensure_worker()
-        self._queue.put_nowait(
-            _DeltaChunk(message_id=None, delta=delta, reasoning_started=started)
+        await self._enqueue(
+            _DeltaChunk(message_id=None, delta=delta, reasoning_started=started),
         )
 
     async def flush(self) -> None:
@@ -1257,12 +1262,33 @@ class _OutputTextDeltaCoalescer:
 
         :returns: None after all earlier deltas have been posted.
         """
-        if self._worker_task is None or self._worker_task.done():
+        if self._worker_task is None:
+            self._dropping_until_barrier = False
+            return
+        if self._worker_task.done():
+            self._reap_stopped_worker()
             return
         loop = asyncio.get_running_loop()
         done: asyncio.Future[None] = loop.create_future()
         self._queue.put_nowait(_DeltaFlushBarrier(done=done))
-        await self._await_marker(done, "flush barrier")
+        if not self._dropping_until_barrier and await self._await_marker(
+            done,
+            "flush barrier",
+            timeout_seconds=_DELTA_FLUSH_GRACE_SECONDS,
+            log_timeout=False,
+        ):
+            return
+        if not self._dropping_until_barrier:
+            self._dropping_until_barrier = True
+            _logger.warning(
+                "Codex delta backlog did not drain within %.1fs; dropping transient "
+                "output until the flush boundary (session=%s)",
+                _DELTA_FLUSH_GRACE_SECONDS,
+                self._session_id,
+            )
+        if await self._await_marker(done, "flush barrier after shedding"):
+            return
+        await self._cancel_and_reap_worker()
 
     async def close(self) -> None:
         """
@@ -1276,26 +1302,24 @@ class _OutputTextDeltaCoalescer:
         # A worker that already stopped will never read the marker, so skip
         # straight to reaping it rather than waiting out the bound.
         if worker.done():
-            with contextlib.suppress(asyncio.CancelledError):
-                await worker
-            self._worker_task = None
+            self._reap_stopped_worker()
             return
         loop = asyncio.get_running_loop()
         done: asyncio.Future[None] = loop.create_future()
         self._queue.put_nowait(_DeltaFlushStop(done=done))
-        await self._await_marker(done, "stop marker")
-        if not worker.done():
-            worker.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await worker
-        if self._worker_task is worker:
-            self._worker_task = None
+        if not await self._await_marker(done, "stop marker"):
+            await self._cancel_and_reap_worker()
+        elif self._worker_task is worker:
+            self._reap_stopped_worker()
 
     async def _await_marker(
         self,
         done: asyncio.Future[None],
         marker: str,
-    ) -> None:
+        *,
+        timeout_seconds: float | None = None,
+        log_timeout: bool = True,
+    ) -> bool:
         """
         Wait for the worker to resolve a queue marker.
 
@@ -1306,8 +1330,12 @@ class _OutputTextDeltaCoalescer:
 
         :param done: Future the worker resolves for this marker.
         :param marker: Marker name used in the timeout log.
-        :returns: None once resolved, once the worker stops, or once the bound elapses.
+        :param timeout_seconds: Maximum seconds to wait.
+        :param log_timeout: Whether to warn when the bound elapses.
+        :returns: Whether the marker resolved or a stopped worker was reaped.
         """
+        if timeout_seconds is None:
+            timeout_seconds = _DELTA_MARKER_TIMEOUT_SECONDS
         worker = self._worker_task
         waiters: set[asyncio.Future[None] | asyncio.Task[None]] = {done}
         if worker is not None:
@@ -1315,15 +1343,32 @@ class _OutputTextDeltaCoalescer:
         await asyncio.wait(
             waiters,
             return_when=asyncio.FIRST_COMPLETED,
-            timeout=_DELTA_MARKER_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
-        if not done.done() and (worker is None or not worker.done()):
+        if done.done():
+            return True
+        if worker is None or worker.done():
+            self._reap_stopped_worker()
+            return True
+        if log_timeout:
             _logger.warning(
                 "codex delta coalescer %s timed out after %.1fs (session=%s)",
                 marker,
-                _DELTA_MARKER_TIMEOUT_SECONDS,
+                timeout_seconds,
                 self._session_id,
             )
+        return False
+
+    async def _cancel_and_reap_worker(self) -> None:
+        """Cancel an unresponsive worker and discard its stale queued deltas."""
+        worker = self._worker_task
+        if worker is None:
+            return
+        if not worker.done():
+            worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        if self._worker_task is worker:
+            self._reap_stopped_worker()
 
     def _ensure_worker(self) -> None:
         """
@@ -1331,10 +1376,76 @@ class _OutputTextDeltaCoalescer:
 
         :returns: None.
         """
+        if self._worker_task is not None and self._worker_task.done():
+            self._reap_stopped_worker()
         if self._worker_task is None:
             self._worker_task = asyncio.create_task(
                 self._run(),
                 name="codex-native-delta-coalescer",
+            )
+
+    async def _enqueue(self, chunk: _DeltaChunk) -> None:
+        """Queue one transient chunk unless this segment already exceeded its budget."""
+        if self._dropping_until_barrier:
+            return
+        queued_chars = self._queued_chars + len(chunk.delta)
+        if queued_chars > _DELTA_QUEUE_CHAR_LIMIT:
+            # A ready app-server socket can yield many events without giving a
+            # newly-created worker CPU. Let a healthy worker drain once before
+            # treating the full queue as relay backpressure.
+            self._ensure_worker()
+            await asyncio.sleep(0)
+            if self._dropping_until_barrier:
+                return
+            queued_chars = self._queued_chars + len(chunk.delta)
+        if queued_chars > _DELTA_QUEUE_CHAR_LIMIT:
+            self._dropping_until_barrier = True
+            _logger.warning(
+                "Codex delta backlog exceeded %d chars; dropping transient output "
+                "until the next flush boundary (session=%s)",
+                _DELTA_QUEUE_CHAR_LIMIT,
+                self._session_id,
+            )
+            return
+        self._ensure_worker()
+        self._queued_chars = queued_chars
+        self._queue.put_nowait(chunk)
+
+    def _reap_stopped_worker(self) -> None:
+        """Reap a stopped worker and discard transient data it can no longer order."""
+        worker = self._worker_task
+        if worker is None or not worker.done():
+            return
+        worker_error: BaseException | None = None
+        with contextlib.suppress(asyncio.CancelledError):
+            worker_error = worker.exception()
+        if worker_error is not None:
+            _logger.warning(
+                "Codex delta coalescer worker stopped unexpectedly; restarting",
+                exc_info=(type(worker_error), worker_error, worker_error.__traceback__),
+            )
+        self._worker_task = None
+        dropped_chunks = 0
+        dropped_chars = 0
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if isinstance(item, _DeltaChunk):
+                dropped_chunks += 1
+                dropped_chars += len(item.delta)
+            else:
+                _resolve_marker(item.done)
+        self._queued_chars = 0
+        self._dropping_until_barrier = False
+        if dropped_chunks:
+            _logger.warning(
+                "Codex delta coalescer discarded %d stale chunk(s) (%d chars) "
+                "after its worker stopped (session=%s)",
+                dropped_chunks,
+                dropped_chars,
+                self._session_id,
             )
 
     async def _run(self) -> None:
@@ -1355,13 +1466,21 @@ class _OutputTextDeltaCoalescer:
             try:
                 item = await asyncio.wait_for(self._queue.get(), timeout=timeout)
             except TimeoutError:
-                await self._flush_buffer(buffer, chunk=buffer_chunk)
+                if not self._dropping_until_barrier:
+                    await self._flush_buffer(buffer, chunk=buffer_chunk)
                 buffer = []
                 buffer_chunk = None
                 buffered_chars = 0
                 flush_deadline = None
                 continue
             if isinstance(item, _DeltaChunk):
+                self._queued_chars -= len(item.delta)
+                if self._dropping_until_barrier:
+                    buffer = []
+                    buffer_chunk = None
+                    buffered_chars = 0
+                    flush_deadline = None
+                    continue
                 if (
                     buffer
                     and buffer_chunk is not None
@@ -1399,14 +1518,18 @@ class _OutputTextDeltaCoalescer:
                     flush_deadline = None
                 continue
             if isinstance(item, _DeltaFlushBarrier):
-                await self._flush_buffer(buffer, chunk=buffer_chunk)
+                if not self._dropping_until_barrier:
+                    await self._flush_buffer(buffer, chunk=buffer_chunk)
                 buffer = []
                 buffer_chunk = None
                 buffered_chars = 0
                 flush_deadline = None
+                self._dropping_until_barrier = False
                 _resolve_marker(item.done)
                 continue
-            await self._flush_buffer(buffer, chunk=buffer_chunk)
+            if not self._dropping_until_barrier:
+                await self._flush_buffer(buffer, chunk=buffer_chunk)
+            self._dropping_until_barrier = False
             _resolve_marker(item.done)
             return
 
@@ -6296,6 +6419,8 @@ async def _post_output_text_delta(
         session_id,
         event_type="external_output_text_delta",
         data=data,
+        max_attempts=1,
+        timeout=_DELTA_POST_TIMEOUT_SECONDS,
     )
     _log_failed_session_event_post("external_output_text_delta", response)
 
@@ -6320,6 +6445,8 @@ async def _post_tool_output_delta(
         session_id,
         event_type="external_tool_output_delta",
         data={"call_id": call_id, "delta": delta},
+        max_attempts=1,
+        timeout=_DELTA_POST_TIMEOUT_SECONDS,
     )
     _log_failed_session_event_post("external_tool_output_delta", response)
 
@@ -6550,6 +6677,8 @@ async def _post_output_reasoning_delta(
         session_id,
         event_type=_EXTERNAL_OUTPUT_REASONING_DELTA_TYPE,
         data={"delta": delta, "started": started},
+        max_attempts=1,
+        timeout=_DELTA_POST_TIMEOUT_SECONDS,
     )
     _log_failed_session_event_post(_EXTERNAL_OUTPUT_REASONING_DELTA_TYPE, response)
 
@@ -6817,6 +6946,8 @@ async def _post_session_event(
     *,
     event_type: str,
     data: _JsonObject,
+    max_attempts: int = _POST_MAX_ATTEMPTS,
+    timeout: float | None = None,
 ) -> httpx.Response | None:
     """
     Post one Omnigent session event, tracking forward-sync health (#1120).
@@ -6833,10 +6964,19 @@ async def _post_session_event(
     :param event_type: Session event type, e.g.
         ``"external_conversation_item"``.
     :param data: Event data payload, e.g. ``{"status": "running"}``.
+    :param max_attempts: Maximum POST attempts, e.g. ``1`` for transient deltas.
+    :param timeout: Optional per-request timeout overriding the client default.
     :returns: The final HTTP response, or ``None`` (see
         :func:`_post_session_event_inner`).
     """
-    result = await _post_session_event_inner(client, session_id, event_type=event_type, data=data)
+    result = await _post_session_event_inner(
+        client,
+        session_id,
+        event_type=event_type,
+        data=data,
+        max_attempts=max_attempts,
+        timeout=timeout,
+    )
     response = result.response
     if response is not None and response.status_code < 400:
         _note_forward_success()

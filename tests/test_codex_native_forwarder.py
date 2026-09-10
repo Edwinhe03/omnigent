@@ -44,13 +44,20 @@ class _RecordingClient:
         """Initialize with an empty record of posts."""
         self.posts: list[tuple[str, dict]] = []
 
-    async def post(self, url: str, *, json: dict) -> httpx.Response:
+    async def post(
+        self,
+        url: str,
+        *,
+        json: dict,
+        timeout: float | None = None,
+    ) -> httpx.Response:
         """
         Record ``(url, json)`` and return a 200 response.
 
         :param url: Request URL, e.g. ``"/v1/sessions/conv_x/events"``.
         :param json: JSON body, e.g.
             ``{"type": "external_model_change", "data": {"model": "gpt-5.4"}}``.
+        :param timeout: Ignored request timeout used by transient delta posts.
         :returns: A real ``httpx.Response`` with status 200.
         """
         self.posts.append((url, json))
@@ -2011,7 +2018,7 @@ async def test_post_session_event_dead_letters_durable_event_on_permanent_failur
 
     fwd._reset_forward_health()
 
-    async def _failing_inner(client, session_id, *, event_type, data):
+    async def _failing_inner(client, session_id, *, event_type, data, max_attempts, timeout):
         return fwd._PostResult(
             response=httpx.Response(500, request=httpx.Request("POST", "http://test"))
         )
@@ -2051,7 +2058,7 @@ async def test_post_session_event_does_not_dead_letter_ephemeral_event(
     """
     fwd._reset_forward_health()
 
-    async def _failing_inner(client, session_id, *, event_type, data):
+    async def _failing_inner(client, session_id, *, event_type, data, max_attempts, timeout):
         return fwd._PostResult(
             response=httpx.Response(500, request=httpx.Request("POST", "http://test"))
         )
@@ -2089,7 +2096,7 @@ async def test_post_session_event_dead_letters_usage_on_permanent_failure(
 
     fwd._reset_forward_health()
 
-    async def _failing_inner(client, session_id, *, event_type, data):
+    async def _failing_inner(client, session_id, *, event_type, data, max_attempts, timeout):
         return fwd._PostResult(
             response=httpx.Response(500, request=httpx.Request("POST", "http://test"))
         )
@@ -2191,7 +2198,7 @@ async def test_post_session_event_dead_letters_ambiguous_classification(
 
     fwd._reset_forward_health()
 
-    async def _ambiguous_inner(client, session_id, *, event_type, data):
+    async def _ambiguous_inner(client, session_id, *, event_type, data, max_attempts, timeout):
         return fwd._PostResult(
             response=None, delivered_ambiguous=True, transport_error="ReadTimeout"
         )
@@ -2229,7 +2236,7 @@ async def test_post_session_event_dead_letters_records_http_status(
 
     fwd._reset_forward_health()
 
-    async def _failing_inner(client, session_id, *, event_type, data):
+    async def _failing_inner(client, session_id, *, event_type, data, max_attempts, timeout):
         return fwd._PostResult(
             response=httpx.Response(503, request=httpx.Request("POST", "http://test"))
         )
@@ -3037,8 +3044,7 @@ async def test_delta_coalescer_close_gives_up_on_a_wedged_worker(
     monkeypatch.setattr(fwd, "_DELTA_MARKER_TIMEOUT_SECONDS", 0.1)
     client = _HangingClient()
     coalescer = _coalescer(client)
-    coalescer._ensure_worker()
-    coalescer._queue.put_nowait(fwd._DeltaChunk(message_id="m1", tool_call_id=None, delta="x"))
+    await coalescer.append("x", message_id="m1")
     await asyncio.wait_for(client.entered.wait(), timeout=5.0)
     worker = coalescer._worker_task
     assert worker is not None
@@ -3077,9 +3083,7 @@ async def test_delta_coalescer_worker_survives_an_already_settled_marker() -> No
     assert not coalescer._worker_task.done()
 
     posts_before = len(client.posts)
-    coalescer._queue.put_nowait(
-        fwd._DeltaChunk(message_id="m1", tool_call_id=None, delta="still here")
-    )
+    await coalescer.append("still here", message_id="m1")
     await asyncio.wait_for(coalescer.flush(), timeout=5.0)
     assert len(client.posts) > posts_before
 
@@ -3107,11 +3111,31 @@ async def test_delta_coalescer_survives_a_cancelled_flush_caller() -> None:
     assert not coalescer._worker_task.done()
 
     posts_before = len(client.posts)
-    coalescer._queue.put_nowait(
-        fwd._DeltaChunk(message_id="m1", tool_call_id=None, delta="still here")
-    )
+    await coalescer.append("still here", message_id="m1")
     await asyncio.wait_for(coalescer.flush(), timeout=5.0)
     assert len(client.posts) > posts_before
+
+
+@pytest.mark.asyncio
+async def test_delta_coalescer_restarts_an_unexpectedly_stopped_worker() -> None:
+    """A dead worker drops its stale queue before later streaming restarts."""
+    client = _RecordingClient()
+    coalescer = _coalescer(client)
+    coalescer._ensure_worker()
+    worker = coalescer._worker_task
+    assert worker is not None
+
+    worker.cancel()
+    await asyncio.gather(worker, return_exceptions=True)
+    stale = fwd._DeltaChunk(message_id="old", tool_call_id=None, delta="stale")
+    coalescer._queue.put_nowait(stale)
+    coalescer._queued_chars = len(stale.delta)
+    await coalescer.flush()
+    await coalescer.append("recovered", message_id="m1")
+    await coalescer.flush()
+    await coalescer.close()
+
+    assert [post[1]["data"]["delta"] for post in client.posts] == ["recovered"]
 
 
 @pytest.mark.asyncio
@@ -3173,30 +3197,57 @@ async def test_delta_coalescer_preserves_mixed_stream_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delta_coalescer_timeout_preserves_backlog_until_post_recovers(
+async def test_delta_coalescer_does_not_drop_healthy_burst_at_queue_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A timeout keeps queued deltas and later flushes ordered behind the slow POST."""
+    """A ready worker gets a chance to drain before the queue sheds output."""
+    monkeypatch.setattr(fwd, "_DELTA_QUEUE_CHAR_LIMIT", 10)
+    client = _RecordingClient()
+    coalescer = fwd._OutputTextDeltaCoalescer(
+        client,
+        "conv_x",
+        flush_interval_seconds=60.0,
+        flush_char_threshold=100,
+    )
 
-    class _HangingFirstClient:
-        """Hold the first POST until the test releases the simulated stall."""
+    await coalescer.append("first!", message_id="m1")
+    await coalescer.append("second", message_id="m1")
+    await coalescer.flush()
+    await coalescer.close()
+
+    assert [post[1]["data"]["delta"] for post in client.posts] == ["first!second"]
+
+
+@pytest.mark.asyncio
+async def test_delta_coalescer_overflow_drops_backlog_before_durable_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow relay sheds queued previews but preserves the completion boundary."""
+
+    class _SlowFirstClient(_RecordingClient):
+        """Hold the first delta POST while the queue crosses its byte budget."""
 
         def __init__(self) -> None:
+            super().__init__()
             self.entered = asyncio.Event()
             self.release = asyncio.Event()
-            self.posts: list[tuple[str, dict]] = []
             self.calls = 0
 
-        async def post(self, url: str, *, json: dict) -> httpx.Response:
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict,
+            timeout: float | None = None,
+        ) -> httpx.Response:
             self.calls += 1
             if self.calls == 1:
                 self.entered.set()
                 await self.release.wait()
-            self.posts.append((url, json))
-            return httpx.Response(200, request=httpx.Request("POST", url))
+            return await super().post(url, json=json, timeout=timeout)
 
-    monkeypatch.setattr(fwd, "_DELTA_MARKER_TIMEOUT_SECONDS", 0.05)
-    client = _HangingFirstClient()
+    monkeypatch.setattr(fwd, "_DELTA_QUEUE_CHAR_LIMIT", 19)
+    client = _SlowFirstClient()
     coalescer = fwd._OutputTextDeltaCoalescer(
         client,
         "conv_x",
@@ -3206,17 +3257,31 @@ async def test_delta_coalescer_timeout_preserves_backlog_until_post_recovers(
 
     await coalescer.append("stale", message_id="old")
     await asyncio.wait_for(client.entered.wait(), timeout=5.0)
-    await coalescer.flush()
+    await coalescer.append("queued stale", message_id="old")
+    await coalescer.append("overflow", message_id="old")
+    completed = asyncio.create_task(
+        fwd._handle_completed_event(
+            client,  # type: ignore[arg-type]
+            session_id="conv_x",
+            params={
+                "threadId": "thread_1",
+                "turnId": "turn_1",
+                "item": {"id": "item_1", "type": "agentMessage", "text": "final answer"},
+            },
+            delta_coalescer=coalescer,
+            forwarder_state=None,
+        )
+    )
+    await asyncio.sleep(0)
+    assert not completed.done()
+    client.release.set()
+    await asyncio.wait_for(completed, timeout=5.0)
 
     await coalescer.append("fresh", message_id="new")
-    later_flush = asyncio.create_task(coalescer.flush())
-    await asyncio.sleep(0.01)
-    assert not later_flush.done()
-    client.release.set()
-    await later_flush
+    await coalescer.flush()
     await coalescer.close()
 
-    assert client.calls == 2
+    assert client.calls == 3
     assert client.posts == [
         (
             "/v1/sessions/conv_x/events",
@@ -3233,6 +3298,21 @@ async def test_delta_coalescer_timeout_preserves_backlog_until_post_recovers(
         (
             "/v1/sessions/conv_x/events",
             {
+                "type": "external_conversation_item",
+                "data": {
+                    "item_type": "message",
+                    "item_data": {
+                        "role": "assistant",
+                        "agent": "codex-native-ui",
+                        "content": [{"type": "output_text", "text": "final answer"}],
+                    },
+                    "response_id": "codex_turn_1",
+                },
+            },
+        ),
+        (
+            "/v1/sessions/conv_x/events",
+            {
                 "type": "external_output_text_delta",
                 "data": {
                     "delta": "fresh",
@@ -3243,6 +3323,93 @@ async def test_delta_coalescer_timeout_preserves_backlog_until_post_recovers(
             },
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_delta_coalescer_sheds_small_slow_backlog_before_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sub-limit backlog cannot continue posting after the durable item."""
+
+    class _SlowDeltaClient(_RecordingClient):
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict,
+            timeout: float | None = None,
+        ) -> httpx.Response:
+            if json["type"] == "external_output_text_delta":
+                await asyncio.sleep(0.04)
+            return await super().post(url, json=json, timeout=timeout)
+
+    monkeypatch.setattr(fwd, "_DELTA_FLUSH_GRACE_SECONDS", 0.02)
+    monkeypatch.setattr(fwd, "_DELTA_MARKER_TIMEOUT_SECONDS", 0.1)
+    client = _SlowDeltaClient()
+    coalescer = fwd._OutputTextDeltaCoalescer(
+        client,
+        "conv_x",
+        flush_interval_seconds=60.0,
+        flush_char_threshold=5,
+    )
+
+    await coalescer.append("first", message_id="old")
+    await asyncio.sleep(0)
+    await coalescer.append("second", message_id="old")
+    await fwd._handle_completed_event(
+        client,  # type: ignore[arg-type]
+        session_id="conv_x",
+        params={
+            "threadId": "thread_1",
+            "turnId": "turn_1",
+            "item": {"id": "item_1", "type": "agentMessage", "text": "final answer"},
+        },
+        delta_coalescer=coalescer,
+        forwarder_state=None,
+    )
+    await asyncio.sleep(0.05)
+    await coalescer.close()
+
+    assert [post[1]["type"] for post in client.posts] == [
+        "external_output_text_delta",
+        "external_conversation_item",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_transient_delta_post_uses_one_short_attempt() -> None:
+    """Lossy previews fail fast instead of retrying behind durable events."""
+
+    class _FailingClient:
+        def __init__(self) -> None:
+            self.timeouts: list[float | None] = []
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict,
+            timeout: float | None = None,
+        ) -> httpx.Response:
+            self.timeouts.append(timeout)
+            return httpx.Response(503, request=httpx.Request("POST", url))
+
+    fwd._reset_forward_health()
+    try:
+        client = _FailingClient()
+
+        await fwd._post_output_text_delta(
+            client,  # type: ignore[arg-type]
+            "conv_x",
+            "preview",
+            message_id="m1",
+            index=0,
+            final=False,
+        )
+
+        assert client.timeouts == [fwd._DELTA_POST_TIMEOUT_SECONDS]
+    finally:
+        fwd._reset_forward_health()
 
 
 def test_default_collaboration_mode_refuses_when_developer_instructions_never_confirmed() -> None:
