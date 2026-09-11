@@ -1971,6 +1971,22 @@ def test_subscribe_until_ready_replays_completed_turn_status(
                     "id": "thread_123",
                     "turns": [
                         {
+                            "id": "turn_122",
+                            "status": "completed",
+                            "items": [
+                                {
+                                    "type": "userMessage",
+                                    "id": "item_old_user",
+                                    "content": [{"type": "text", "text": "already synced"}],
+                                },
+                                {
+                                    "type": "agentMessage",
+                                    "id": "item_old_agent",
+                                    "text": "already synced reply",
+                                },
+                            ],
+                        },
+                        {
                             "id": "turn_123",
                             "status": "completed",
                             "items": [
@@ -1985,7 +2001,7 @@ def test_subscribe_until_ready_replays_completed_turn_status(
                                     "text": "reply",
                                 },
                             ],
-                        }
+                        },
                     ],
                 }
             }
@@ -2025,6 +2041,7 @@ def test_subscribe_until_ready_replays_completed_turn_status(
 
     asyncio.run(run())
 
+    assert fake_client.requests == [("thread/resume", {"threadId": "thread_123"})]
     assert [payload["type"] for payload in posted] == [
         "external_conversation_item",
         "external_conversation_item",
@@ -2935,6 +2952,7 @@ def test_forwarder_persists_interrupted_codex_partial_agent_message(tmp_path: Pa
                     "content": [{"type": "output_text", "text": "partial answer"}],
                 },
                 "response_id": "codex_turn_123",
+                "source_id": "thread_123:turn_123:interrupted-partial",
             },
         },
         {
@@ -4004,6 +4022,8 @@ def test_forwarder_keeps_streaming_when_native_tui_answers_codex_elicitation(
                     "content": [{"type": "output_text", "text": "after approval"}],
                 },
                 "response_id": "codex_turn_123",
+                "message_id": "codex:thread_123:turn_123:agentMessage:item_agent",
+                "source_id": "thread_123:turn_123:item_agent",
             },
         },
     ]
@@ -5818,6 +5838,7 @@ def test_forwarder_posts_codex_user_and_agent_messages(tmp_path: Path) -> None:
                     "content": [{"type": "input_text", "text": "hello codex"}],
                 },
                 "response_id": "codex_turn_123",
+                "source_id": "thread_123:turn_123:item_user",
             },
         },
         {
@@ -5830,6 +5851,8 @@ def test_forwarder_posts_codex_user_and_agent_messages(tmp_path: Path) -> None:
                     "content": [{"type": "output_text", "text": "hello from codex"}],
                 },
                 "response_id": "codex_turn_123",
+                "message_id": "codex:thread_123:turn_123:agentMessage:item_agent",
+                "source_id": "thread_123:turn_123:item_agent",
             },
         },
     ]
@@ -6132,6 +6155,8 @@ def test_forwarder_posts_completed_codex_plan_item() -> None:
                     ],
                 },
                 "response_id": "codex_turn_123",
+                "message_id": "codex:thread_123:turn_123:plan:plan_123",
+                "source_id": "thread_123:turn_123:plan_123",
             },
         }
     ]
@@ -6232,6 +6257,7 @@ def test_forwarder_posts_codex_command_execution_tool_call() -> None:
                     "call_id": "call_abc123",
                 },
                 "response_id": "codex_turn_123",
+                "source_id": "thread_123:turn_123:call_abc123:call",
             },
         },
         {
@@ -6243,6 +6269,7 @@ def test_forwarder_posts_codex_command_execution_tool_call() -> None:
                     "output": "hello world\n",
                 },
                 "response_id": "codex_turn_123",
+                "source_id": "thread_123:turn_123:call_abc123:output",
             },
         },
     ]
@@ -6356,6 +6383,7 @@ def test_forwarder_streams_codex_command_output_before_completed_item(tmp_path: 
             "output": "collecting tests...\n1 passed\n",
         },
         "response_id": "codex_turn_123",
+        "source_id": "thread_123:turn_123:call_abc123:output",
     }
 
 
@@ -6535,6 +6563,7 @@ def test_forwarder_posts_codex_image_view_tool_call() -> None:
                     "call_id": "img_view_1",
                 },
                 "response_id": "codex_turn_123",
+                "source_id": "thread_123:turn_123:img_view_1:call",
             },
         },
         {
@@ -6546,6 +6575,7 @@ def test_forwarder_posts_codex_image_view_tool_call() -> None:
                     "output": "/repo/screenshot.png",
                 },
                 "response_id": "codex_turn_123",
+                "source_id": "thread_123:turn_123:img_view_1:output",
             },
         },
     ]
@@ -6653,6 +6683,7 @@ def test_forwarder_posts_codex_entered_review_mode_marker() -> None:
                     ],
                 },
                 "response_id": "codex_turn_123",
+                "source_id": "thread_123:turn_123:review_1",
             },
         }
     ]
@@ -6688,6 +6719,7 @@ def test_forwarder_posts_codex_exited_review_mode_marker() -> None:
                     "content": [{"type": "output_text", "text": "Exited review mode"}],
                 },
                 "response_id": "codex_turn_123",
+                "source_id": "thread_123:turn_123:review_2",
             },
         }
     ]
@@ -6773,6 +6805,7 @@ def test_forwarder_coalesces_and_flushes_turn_diff(tmp_path: Path) -> None:
                     "call_id": "codex_turn_diff_turn_123",
                 },
                 "response_id": "codex_turn_123",
+                "source_id": "thread_123:turn_123:turn-diff:call",
             },
         },
         {
@@ -6784,6 +6817,7 @@ def test_forwarder_coalesces_and_flushes_turn_diff(tmp_path: Path) -> None:
                     "output": latest_diff,
                 },
                 "response_id": "codex_turn_123",
+                "source_id": "thread_123:turn_123:turn-diff:output",
             },
         },
         {

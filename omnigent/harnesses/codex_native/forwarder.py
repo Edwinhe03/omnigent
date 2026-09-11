@@ -7,7 +7,7 @@ import contextlib
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2385,12 +2385,40 @@ async def _subscribe_until_ready(
     forwarder_state: _CodexForwarderState | None = None,
     ready_signal: asyncio.Event | None = None,
 ) -> None:
+    """Reserve authoritative delivery order while subscribing and replaying."""
+    async with _conversation_item_delivery_scope(session_id):
+        await _subscribe_until_ready_inner(
+            client,
+            ap_client,
+            session_id=session_id,
+            bridge_dir=bridge_dir,
+            thread_id=thread_id,
+            usage_coalescer=usage_coalescer,
+            elicitation_tracker=elicitation_tracker,
+            forwarder_state=forwarder_state,
+            ready_signal=ready_signal,
+        )
+
+
+async def _subscribe_until_ready_inner(
+    client: CodexAppServerClient,
+    ap_client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    bridge_dir: Path,
+    thread_id: str,
+    usage_coalescer: _SessionUsageCoalescer,
+    elicitation_tracker: _CodexElicitationTaskTracker,
+    forwarder_state: _CodexForwarderState | None = None,
+    ready_signal: asyncio.Event | None = None,
+) -> None:
     """
     Subscribe this app-server connection to a Codex thread.
 
-    A resume session's thread already has a persisted rollout, so the
-    first ``thread/resume`` succeeds and any prior message items are
-    replayed immediately.
+    A resume session's thread already has a persisted rollout. Healthy idle
+    reconnects exclude old turns, while an interrupted forwarder replays from
+    the bridge's persisted active turn so completed items observed by Codex but
+    not acknowledged by Omnigent are recovered.
 
     A fresh TUI-created thread, however, has *no* rollout until its first
     turn runs — Codex defers materialization for a new thread, so
@@ -2421,11 +2449,17 @@ async def _subscribe_until_ready(
         signal).
     :returns: None.
     """
+    bridge_state = read_bridge_state(bridge_dir)
+    replay_from_turn_id = (
+        bridge_state.active_turn_id
+        if bridge_state is not None and bridge_state.thread_id == thread_id
+        else None
+    )
     saw_not_ready = False
     while True:
         try:
             params: _JsonObject = {"threadId": thread_id}
-            if not saw_not_ready:
+            if not saw_not_ready and replay_from_turn_id is None:
                 params["excludeTurns"] = True
             response = await client.request("thread/resume", params)
         except asyncio.CancelledError:
@@ -2488,6 +2522,7 @@ async def _subscribe_until_ready(
             usage_coalescer=usage_coalescer,
             elicitation_tracker=elicitation_tracker,
             forwarder_state=forwarder_state,
+            replay_from_turn_id=replay_from_turn_id,
         )
         return
 
@@ -2549,6 +2584,7 @@ async def _replay_resume_response(
     usage_coalescer: _SessionUsageCoalescer,
     elicitation_tracker: _CodexElicitationTaskTracker,
     forwarder_state: _CodexForwarderState | None = None,
+    replay_from_turn_id: str | None = None,
 ) -> None:
     """
     Mirror message items returned by ``thread/resume``.
@@ -2566,6 +2602,8 @@ async def _replay_resume_response(
     :param elicitation_tracker: Background Codex elicitation tracker.
     :param forwarder_state: Optional mutable state for dedup and
         sub-agent registration.
+    :param replay_from_turn_id: Optional first turn to replay after an
+        interrupted forwarder. Earlier acknowledged turns are skipped.
     :returns: None.
     """
     result = response.get("result")
@@ -2579,33 +2617,35 @@ async def _replay_resume_response(
         return
     thread_id = thread.get("id")
     thread_id = thread_id if isinstance(thread_id, str) and thread_id else None
-    for turn in turns:
-        if not isinstance(turn, dict):
-            continue
-        turn_id = _turn_id_from_payload(turn)
-        items = turn.get("items")
-        if not turn_id or not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, dict):
+    replay_turns = _resume_turns_from(turns, replay_from_turn_id)
+    async with _conversation_item_delivery_scope(session_id):
+        for turn in replay_turns:
+            if not isinstance(turn, dict):
                 continue
-            await _handle_event(
-                client,
-                session_id=session_id,
-                bridge_dir=bridge_dir,
-                event={
-                    "method": "item/completed",
-                    "params": {
-                        "threadId": thread_id,
-                        "turnId": turn_id,
-                        "item": item,
+            turn_id = _turn_id_from_payload(turn)
+            items = turn.get("items")
+            if not turn_id or not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                await _handle_event(
+                    client,
+                    session_id=session_id,
+                    bridge_dir=bridge_dir,
+                    event={
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "item": item,
+                        },
                     },
-                },
-                usage_coalescer=usage_coalescer,
-                elicitation_tracker=elicitation_tracker,
-                expected_thread_id=thread_id,
-                forwarder_state=forwarder_state,
-            )
+                    usage_coalescer=usage_coalescer,
+                    elicitation_tracker=elicitation_tracker,
+                    expected_thread_id=thread_id,
+                    forwarder_state=forwarder_state,
+                )
     await _post_resume_terminal_status(
         client,
         session_id=session_id,
@@ -2613,6 +2653,20 @@ async def _replay_resume_response(
         thread_id=thread_id,
         turns=turns,
     )
+
+
+def _resume_turns_from(turns: list[object], replay_from_turn_id: str | None) -> list[object]:
+    """Return the interrupted turn and every later Codex turn."""
+    if replay_from_turn_id is None:
+        return turns
+    for index, turn in enumerate(turns):
+        if isinstance(turn, dict) and _turn_id_from_payload(turn) == replay_from_turn_id:
+            return turns[index:]
+    _logger.warning(
+        "Codex active turn %s missing from resume response; replaying all turns",
+        replay_from_turn_id,
+    )
+    return turns
 
 
 async def _post_resume_terminal_status(
@@ -3342,61 +3396,65 @@ async def _maybe_handle_turn_event(
                 _turn_id_from_payload(params),
             )
             return True
-        if delta_coalescer is not None:
-            await delta_coalescer.flush()
-        error = _terminal_error_from_notification(params)
-        if error is None:
-            _logger.warning("Codex forwarder ignored malformed error notification")
-            return True
-        turn_id = _turn_id_from_payload(params)
-        if forwarder_state is not None and turn_id is not None:
-            if turn_id in forwarder_state.surfaced_terminal_error_turns:
-                _logger.info(
-                    "Codex forwarder ignored duplicate terminal error: turn_id=%s",
-                    turn_id,
-                )
+        async with _conversation_item_delivery_scope(session_id):
+            if delta_coalescer is not None:
+                await delta_coalescer.flush()
+            error = _terminal_error_from_notification(params)
+            if error is None:
+                _logger.warning("Codex forwarder ignored malformed error notification")
                 return True
-            forwarder_state.surfaced_terminal_error_turns.add(turn_id)
-            clear_active_turn_id_if_matches(bridge_dir, turn_id)
-        await _post_turn_status_edge(
-            client,
-            session_id,
-            _CodexTurnStatusEdge(
-                status="failed",
-                turn_id=turn_id,
-                source="error",
-                error=error,
-            ),
-        )
-        await usage_coalescer.flush()
+            turn_id = _turn_id_from_payload(params)
+            if forwarder_state is not None and turn_id is not None:
+                if turn_id in forwarder_state.surfaced_terminal_error_turns:
+                    _logger.info(
+                        "Codex forwarder ignored duplicate terminal error: turn_id=%s",
+                        turn_id,
+                    )
+                    return True
+                forwarder_state.surfaced_terminal_error_turns.add(turn_id)
+                clear_active_turn_id_if_matches(bridge_dir, turn_id)
+            await _post_turn_status_edge(
+                client,
+                session_id,
+                _CodexTurnStatusEdge(
+                    status="failed",
+                    turn_id=turn_id,
+                    source="error",
+                    error=error,
+                ),
+            )
+            await usage_coalescer.flush()
         return True
     if method == "turn/started":
-        if delta_coalescer is not None:
-            await delta_coalescer.flush()
-        await _handle_turn_started(client, session_id, bridge_dir, params)
-        if forwarder_state is not None:
-            # A new turn opens a fresh reasoning block: the next reasoning
-            # delta must emit ``response.reasoning.started`` again.
-            forwarder_state.reasoning_stream_item_id = None
-            # An in-TUI ``/model`` switch writes config.toml (the cost-policy
-            # source of truth) but emits no notification. Re-read it at turn
-            # start so a switch made since the last turn lands ``model_override``
-            # on Omnigent before this turn's first tool call reaches the cost gate.
-            _refresh_model_from_config(bridge_dir, forwarder_state)
-            _refresh_developer_instructions_from_config(bridge_dir, forwarder_state)
-            _refresh_effort_from_config(bridge_dir, forwarder_state)
-            await _sync_model_change(
-                client, session_id=session_id, forwarder_state=forwarder_state
-            )
-            # Only sync once config.toml has revealed an effort: without one the
-            # unseeded baseline would mirror a spurious ``None`` on every session.
-            # A fresh session's first turn/started posts the launch effort itself
-            # (baseline ``None`` → changed) — redundant but harmless, not the
-            # terminal-change path.
-            if forwarder_state.last_config_effort is not None:
-                await _sync_reasoning_effort_change(
+        async with _conversation_item_delivery_scope(session_id):
+            if delta_coalescer is not None:
+                await delta_coalescer.flush()
+            await _handle_turn_started(client, session_id, bridge_dir, params)
+            if forwarder_state is not None:
+                # A new turn opens a fresh reasoning block: the next reasoning
+                # delta must emit ``response.reasoning.started`` again.
+                forwarder_state.reasoning_stream_item_id = None
+                # An in-TUI ``/model`` switch writes config.toml (the cost-policy
+                # source of truth) but emits no notification. Re-read it at turn
+                # start so a switch made since the last turn lands ``model_override``
+                # on Omnigent before this turn's first tool call reaches the cost gate.
+                _refresh_model_from_config(bridge_dir, forwarder_state)
+                _refresh_developer_instructions_from_config(bridge_dir, forwarder_state)
+                _refresh_effort_from_config(bridge_dir, forwarder_state)
+                await _sync_model_change(
                     client, session_id=session_id, forwarder_state=forwarder_state
                 )
+                # Only sync once config.toml has revealed an effort: without one the
+                # unseeded baseline would mirror a spurious ``None`` on every session.
+                # A fresh session's first turn/started posts the launch effort itself
+                # (baseline ``None`` → changed) — redundant but harmless, not the
+                # terminal-change path.
+                if forwarder_state.last_config_effort is not None:
+                    await _sync_reasoning_effort_change(
+                        client,
+                        session_id=session_id,
+                        forwarder_state=forwarder_state,
+                    )
         return True
     if method in {"turn/completed", "turn/failed"}:
         await _handle_terminal_turn_boundary(
@@ -3576,6 +3634,35 @@ async def _handle_completed_event(
 
 
 async def _handle_terminal_turn_boundary(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    bridge_dir: Path,
+    method: str,
+    params: _JsonObject,
+    usage_coalescer: _SessionUsageCoalescer,
+    delta_coalescer: _OutputTextDeltaCoalescer | None,
+    elicitation_tracker: _CodexElicitationTaskTracker,
+    codex_client: CodexAppServerClient | None,
+    forwarder_state: _CodexForwarderState | None,
+) -> None:
+    """Serialize terminal cleanup behind any unfinished authoritative replay."""
+    async with _conversation_item_delivery_scope(session_id):
+        await _handle_terminal_turn_boundary_inner(
+            client,
+            session_id=session_id,
+            bridge_dir=bridge_dir,
+            method=method,
+            params=params,
+            usage_coalescer=usage_coalescer,
+            delta_coalescer=delta_coalescer,
+            elicitation_tracker=elicitation_tracker,
+            codex_client=codex_client,
+            forwarder_state=forwarder_state,
+        )
+
+
+async def _handle_terminal_turn_boundary_inner(
     client: httpx.AsyncClient,
     *,
     session_id: str,
@@ -4771,6 +4858,25 @@ async def _handle_completed_item(
     forwarder_state: _CodexForwarderState | None = None,
     bridge_dir: Path | None = None,
 ) -> None:
+    """Serialize and forward one completed Codex transcript item."""
+    async with _conversation_item_delivery_scope(session_id):
+        await _handle_completed_item_inner(
+            client,
+            session_id,
+            params,
+            forwarder_state=forwarder_state,
+            bridge_dir=bridge_dir,
+        )
+
+
+async def _handle_completed_item_inner(
+    client: httpx.AsyncClient,
+    session_id: str,
+    params: _JsonObject,
+    *,
+    forwarder_state: _CodexForwarderState | None = None,
+    bridge_dir: Path | None = None,
+) -> None:
     """
     Forward one Codex completed item event when it maps to Omnigent history.
 
@@ -5019,27 +5125,28 @@ async def _flush_turn_diff(
     call_id = f"codex_turn_diff_{turn_id}"
     thread_id = _thread_id_from_params(params) or "thread"
     source_id = f"{thread_id}:{turn_id}:turn-diff"
-    await _post_external_item(
-        client,
-        session_id,
-        item_type="function_call",
-        item_data={
-            "agent": _AGENT_NAME,
-            "name": "turn_diff",
-            "arguments": "{}",
-            "call_id": call_id,
-        },
-        response_id=response_id,
-        source_id=f"{source_id}:call",
-    )
-    await _post_external_item(
-        client,
-        session_id,
-        item_type="function_call_output",
-        item_data={"call_id": call_id, "output": diff},
-        response_id=response_id,
-        source_id=f"{source_id}:output",
-    )
+    async with _conversation_item_delivery_scope(session_id):
+        await _post_external_item(
+            client,
+            session_id,
+            item_type="function_call",
+            item_data={
+                "agent": _AGENT_NAME,
+                "name": "turn_diff",
+                "arguments": "{}",
+                "call_id": call_id,
+            },
+            response_id=response_id,
+            source_id=f"{source_id}:call",
+        )
+        await _post_external_item(
+            client,
+            session_id,
+            item_type="function_call_output",
+            item_data={"call_id": call_id, "output": diff},
+            response_id=response_id,
+            source_id=f"{source_id}:output",
+        )
 
 
 async def _handle_collab_item(
@@ -6291,8 +6398,6 @@ async def _post_external_item(
         data["message_id"] = message_id
     if source_id is not None:
         data["source_id"] = _bounded_source_id(source_id)
-    locks = _conversation_item_locks.get()
-    lock = locks.setdefault(session_id, asyncio.Lock()) if locks is not None else None
 
     async def _post() -> httpx.Response | None:
         return await _post_session_event(
@@ -6305,11 +6410,8 @@ async def _post_external_item(
         )
 
     try:
-        if lock is None:
+        async with _conversation_item_delivery_scope(session_id):
             response = await _post()
-        else:
-            async with lock:
-                response = await _post()
     except asyncio.CancelledError:
         if source_id is not None and (dl_dir := _dead_letter_dir.get()) is not None:
             append_dead_letter(
@@ -6889,11 +6991,55 @@ _forward_health = _ForwardHealth()
 
 # Bridge dir for dead-lettering undeliverable durable events; set per-forwarder (#1120).
 _dead_letter_dir: ContextVar[Path | None] = ContextVar("_codex_dead_letter_dir", default=None)
+
+
+class _ReentrantAsyncLock:
+    """Task-reentrant lock for one conversation's authoritative items."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task[object] | None = None
+        self._depth = 0
+
+    async def __aenter__(self) -> None:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("conversation delivery requires an asyncio task")
+        if self._owner is task:
+            self._depth += 1
+            return
+        await self._lock.acquire()
+        self._owner = task
+        self._depth = 1
+
+    async def __aexit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        task = asyncio.current_task()
+        if task is None or self._owner is not task:
+            raise RuntimeError("conversation delivery lock released by non-owner")
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+            self._lock.release()
+
+
 # Per-forwarder session locks keep resume backfill and live completed items in
 # server position order while an older idempotent delivery is retrying.
-_conversation_item_locks: ContextVar[dict[str, asyncio.Lock] | None] = ContextVar(
+_conversation_item_locks: ContextVar[dict[str, _ReentrantAsyncLock] | None] = ContextVar(
     "_codex_conversation_item_locks", default=None
 )
+
+
+@contextlib.asynccontextmanager
+async def _conversation_item_delivery_scope(session_id: str) -> AsyncIterator[None]:
+    """Hold one session's authoritative-item order across nested posts."""
+    locks = _conversation_item_locks.get()
+    if locks is None:
+        yield
+        return
+    lock = locks.setdefault(session_id, _ReentrantAsyncLock())
+    async with lock:
+        yield
+
 
 # Durable event types worth dead-lettering (not ephemeral deltas).
 _DEAD_LETTER_EVENT_TYPES = frozenset({"external_conversation_item", "external_session_usage"})
