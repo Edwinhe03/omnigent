@@ -4853,6 +4853,13 @@ function isLiveProvisionalBlock(b: AnyBlock): boolean {
   return b.ctx.itemId?.startsWith(LIVE_ITEM_PREFIX) ?? false;
 }
 
+/** Suppress future chunks for a provisional preview that is no longer valid. */
+function ignoreLivePreview(block: AnyBlock | undefined, ignoredMessageIds: Set<string>): void {
+  const itemId = block?.ctx.itemId;
+  if (!itemId?.startsWith(LIVE_ITEM_PREFIX)) return;
+  ignoredMessageIds.add(itemId.slice(LIVE_ITEM_PREFIX.length));
+}
+
 /**
  * Build a provisional in-flight assistant-text block for live streaming.
  *
@@ -4997,6 +5004,9 @@ async function* tapLiveDeltas(
   get: Getter,
 ): AsyncIterable<StreamEvent> {
   for await (const ev of events) {
+    if (ev.type === "message_done" && ev.messageId !== undefined) {
+      ignored.add(ev.messageId);
+    }
     if (ev.type === "text_delta" && ev.messageId !== undefined) {
       if (!isConversationDisposed(id) && !ignored.has(ev.messageId)) {
         // A scheduled wake streams its first deltas ahead of the batch
@@ -5128,9 +5138,9 @@ export async function pumpStreamEvents(
   // to the BlockStream reducer. The reducer is intentionally pure
   // (block factory) — session-scoped state lives on the store, not in
   // the reducer's internal state. See migration plan §5.3.
-  // A scheduled wake can stream before its new turn id arrives. Ignore the
-  // rest of that message so it cannot attach to the completed prior turn.
-  const ignoredWakeMessages = new Set<string>();
+  // Ignore the rest of messages whose previews are stale or already replaced
+  // by authoritative items, so late transport delivery cannot recreate them.
+  const ignoredMessages = new Set<string>();
   const events = tapLiveDeltas(
     tapSessionEvents(rawEvents, id, (elicitationId) => {
       // A fast native approval can resolve in the few milliseconds between
@@ -5152,7 +5162,7 @@ export async function pumpStreamEvents(
       };
     }),
     id,
-    ignoredWakeMessages,
+    ignoredMessages,
     set,
     get,
   );
@@ -5240,6 +5250,7 @@ export async function pumpStreamEvents(
       ) {
         const provIdx = get().blocks.findIndex(isLiveProvisionalBlock);
         if (provIdx !== -1) {
+          ignoreLivePreview(get().blocks[provIdx], ignoredMessages);
           flush();
           set((s) => {
             const at = s.blocks.findIndex(isLiveProvisionalBlock);
@@ -5323,6 +5334,7 @@ export async function pumpStreamEvents(
       if (block.type === "text_done" && get().isNativeTerminalSession) {
         const provIdx = get().blocks.findIndex(isLiveProvisionalBlock);
         if (provIdx !== -1) {
+          ignoreLivePreview(get().blocks[provIdx], ignoredMessages);
           // The done item has no message id. Native messages are sequential,
           // so remove the oldest preview and let the committed item follow
           // the normal reducer path.
@@ -5370,6 +5382,7 @@ export async function pumpStreamEvents(
         // after this event, or a stream drop). Normal messages already
         // had their preview replaced when their `text_done` committed, so
         // this is usually a no-op.
+        get().blocks.forEach((candidate) => ignoreLivePreview(candidate, ignoredMessages));
         set((s) => ({
           status: "idle",
           blocks: s.blocks.some(isLiveProvisionalBlock)

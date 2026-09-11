@@ -3307,6 +3307,7 @@ async def test_delta_coalescer_overflow_drops_backlog_before_durable_completion(
                         "content": [{"type": "output_text", "text": "final answer"}],
                     },
                     "response_id": "codex_turn_1",
+                    "message_id": "codex:thread_1:turn_1:agentMessage:item_1",
                 },
             },
         ),

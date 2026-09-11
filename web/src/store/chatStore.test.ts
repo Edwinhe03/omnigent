@@ -10517,8 +10517,14 @@ describe("chatStore — live delta streaming (claude-native)", () => {
   }
 
   /** A finalized assistant message `output_item.done` frame. */
-  function messageDone(itemId: string, responseId: string, text: string): string {
+  function messageDone(
+    itemId: string,
+    responseId: string,
+    text: string,
+    messageId?: string,
+  ): string {
     return sse("response.output_item.done", {
+      ...(messageId !== undefined ? { message_id: messageId } : {}),
       item: {
         type: "message",
         role: "assistant",
@@ -10598,6 +10604,31 @@ describe("chatStore — live delta streaming (claude-native)", () => {
     controller.abort();
   });
 
+  it("drops the first preview chunk when its authoritative item arrived first", async () => {
+    useChatStore.setState({
+      conversationId: "conv_live_late",
+      blocks: [],
+      isNativeTerminalSession: true,
+    });
+    const { sink, controller } = startPump("conv_live_late");
+
+    sink.push(sse("response.created", { id: "resp_l", status: "in_progress", output: [] }));
+    sink.push(messageDone("ci_1", "resp_l", "Hello world", "m1"));
+    await tick();
+
+    sink.push(nativeDelta("m1", 0, "Hello world", true));
+    await tick();
+
+    expect(provisional()).toBeUndefined();
+    const dones = useChatStore
+      .getState()
+      .blocks.filter((b): b is Extract<AnyBlock, { type: "text_done" }> => b.type === "text_done");
+    expect(dones.map((b) => b.ctx.itemId)).toEqual(["ci_1"]);
+    expect(dones[0]!.fullText).toBe("Hello world");
+
+    controller.abort();
+  });
+
   it("gives the provisional the LIVE TURN's response id so it shares that bubble", async () => {
     // `walkBubbles` groups by response id, so a synthetic preview id split
     // one native turn into several fragment bubbles while streaming that
@@ -10669,6 +10700,18 @@ describe("chatStore — live delta streaming (claude-native)", () => {
     expect(dones).toHaveLength(1);
     expect(dones[0]!.ctx.itemId).toBe("ci_1");
     expect(dones[0]!.fullText).toBe("Hello world");
+
+    // A preview POST can time out client-side but still reach the server
+    // after the durable item. It must not recreate a trailing live bubble.
+    sink.push(nativeDelta("m1", 1, " late", true));
+    await tick();
+    expect(provisional()).toBeUndefined();
+    expect(
+      useChatStore
+        .getState()
+        .blocks.filter((b) => b.type === "text_done")
+        .map((b) => b.ctx.itemId),
+    ).toEqual(["ci_1"]);
 
     controller.abort();
   });
@@ -10930,6 +10973,15 @@ describe("chatStore — live delta streaming (claude-native)", () => {
     // Turn ends with no committed item for m1 (interrupt before the
     // partial transcript record was forwarded).
     sink.push(sse("response.completed", { id: "resp_l", status: "completed", output: [] }));
+    await tick();
+    expect(provisional()).toBeUndefined();
+
+    // A late chunk for the interrupted message must stay dropped after the
+    // terminal cleanup rather than reappearing after the completed turn.
+    sink.push(nativeDelta("m1", 1, " stale", true));
+    await tick();
+    expect(provisional()).toBeUndefined();
+
     sink.close();
     await tick();
     await tick();

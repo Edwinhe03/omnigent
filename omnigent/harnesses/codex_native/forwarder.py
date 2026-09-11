@@ -5809,6 +5809,7 @@ async def _post_agent_message(
             "content": [{"type": "output_text", "text": text}],
         },
         response_id=_response_id(params),
+        message_id=_completed_streaming_message_id(params, item, "agentMessage"),
     )
 
 
@@ -5915,6 +5916,7 @@ async def _post_plan_item(
             "content": [{"type": "output_text", "text": text}],
         },
         response_id=_response_id(params),
+        message_id=_completed_streaming_message_id(params, item, "plan"),
     )
 
 
@@ -6208,6 +6210,7 @@ async def _post_external_item(
     item_type: str,
     item_data: _JsonObject,
     response_id: str,
+    message_id: str | None = None,
 ) -> None:
     """
     Post one external conversation item to AP.
@@ -6221,17 +6224,21 @@ async def _post_external_item(
     :param item_type: Conversation item type, e.g. ``"message"``.
     :param item_data: Conversation item payload.
     :param response_id: Response id for the mirrored Codex turn.
+    :param message_id: Optional live-preview stream finalized by this item.
     :returns: None.
     """
+    data: _JsonObject = {
+        "item_type": item_type,
+        "item_data": item_data,
+        "response_id": response_id,
+    }
+    if message_id is not None:
+        data["message_id"] = message_id
     response = await _post_session_event(
         client,
         session_id,
         event_type="external_conversation_item",
-        data={
-            "item_type": item_type,
-            "item_data": item_data,
-            "response_id": response_id,
-        },
+        data=data,
     )
     if response is None:
         _logger.warning("failed to post Codex conversation item")
@@ -7434,6 +7441,17 @@ def _streaming_message_id(params: _JsonObject, item_type: str) -> str | None:
     if item_id is not None:
         parts.append(item_id)
     return ":".join(parts)
+
+
+def _completed_streaming_message_id(
+    params: _JsonObject,
+    item: _JsonObject,
+    item_type: str,
+) -> str | None:
+    """Build the live-preview id finalized by a completed Codex item."""
+    completed_params = dict(params)
+    completed_params["itemId"] = item.get("id")
+    return _streaming_message_id(completed_params, item_type)
 
 
 def _record_partial_text_delta(
