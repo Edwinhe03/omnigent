@@ -100,6 +100,26 @@ def test_prune_retains_entry_when_eligibility_check_fails(
     assert not eligible_dir.exists()
 
 
+def test_prune_retains_entry_claimed_during_eligibility_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new owner claim while retention is checked prevents deletion."""
+    root = tmp_path / "bridge-root"
+    bridge_dir = root / "reclaimed"
+    bridge_dir.mkdir(parents=True)
+    marker = bridge_dir / native_bridge_common.OWNER_PID_FILENAME
+    marker.write_text("111", encoding="utf-8")
+    monkeypatch.setattr("omnigent.inner.terminal._process_alive", lambda pid: pid == 222)
+
+    def _should_prune(_bridge_dir: Path) -> bool:
+        marker.write_text("222", encoding="utf-8")
+        return True
+
+    assert native_bridge_common.prune_orphaned_dirs(root, should_prune=_should_prune) == 0
+    assert bridge_dir.exists()
+
+
 def test_reap_invokes_prune_for_every_native_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     """The dynamic sweep calls each native agent's module-level prune once."""
     agents = (

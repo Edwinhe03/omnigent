@@ -65,9 +65,8 @@ def prune_orphaned_dirs(
     additional eligibility predicate, such as a minimum inactivity period.
     Conservative in the dangerous direction — a reused/foreign pid reads as
     alive and is left.
-    The check-then-rmtree race (a pid reused between the liveness read and
-    the removal) is accepted: it is benign because a live session refreshes
-    its marker every turn, so only genuinely orphaned dirs reach removal.
+    Ownership is checked again immediately before removal so a runner that
+    claims the directory while an eligibility predicate runs is preserved.
     Dirs with no marker (or an unparseable one) are left untouched: they are
     either from an older version or not ours.
 
@@ -103,6 +102,12 @@ def prune_orphaned_dirs(
                 continue
             if not eligible:
                 continue
+        try:
+            current_pid = int(marker.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if current_pid != pid or _process_alive(current_pid):
+            continue
         shutil.rmtree(entry, ignore_errors=True)
         pruned += 1
     return pruned
