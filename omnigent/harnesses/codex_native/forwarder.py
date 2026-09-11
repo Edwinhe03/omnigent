@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 from collections.abc import Callable
@@ -79,7 +80,10 @@ _NO_ROLLOUT_FRAGMENT = "no rollout found for thread id"
 _EMPTY_ROLLOUT_FRAGMENT = "is empty"
 _POST_MAX_ATTEMPTS = 3
 _POST_RETRY_DELAY_SECONDS = 0.1
+_POST_RETRY_MAX_DELAY_SECONDS = 30.0
 _POST_RETRY_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_DURABLE_ITEM_POST_TIMEOUT_SECONDS = 5.0
+_SOURCE_ID_MAX_CHARS = 256
 # Startup dead-letter replay budget (#1579). Bounded so a large dead-letter file
 # or a slow/hung server cannot stall forwarder startup: each re-POST is a single
 # attempt (its natural retry is the next startup) with a short timeout (vs the
@@ -2042,6 +2046,9 @@ async def supervise_forwarder(
     """
     # Bind bridge dir so failed durable-event posts can be dead-lettered (#1120).
     _dead_letter_dir.set(bridge_dir)
+    # Resume backfill and live notifications can post concurrently. Serialize
+    # durable items per AP session so an older retry cannot land after a newer item.
+    _conversation_item_locks.set({})
     if client is None:
         client = client_for_transport(app_server_url, client_name="omnigent-codex-forwarder")
         await client.connect()
@@ -4725,36 +4732,35 @@ def _claim_completed_item(
     params: _JsonObject,
     item: _JsonObject,
     forwarder_state: _CodexForwarderState | None,
-) -> bool:
+) -> str | None:
     """
     Claim one completed Codex transcript item for Omnigent posting.
 
-    Returns ``True`` when the caller should post the item; ``False`` when
-    it was already posted this connection (dedup gate). Also advances the
+    Returns the stable source id when the caller should post the item; ``None``
+    when it was already posted this connection (dedup gate). Also advances the
     anonymous-item counter on a successful claim so the next anonymous
     item in the same (thread, turn) gets a fresh key.
 
-    When ``forwarder_state`` is ``None``, dedup is disabled and the
-    function always returns ``True`` (used in tests that bypass
-    ``supervise_forwarder``).
+    When ``forwarder_state`` is ``None``, dedup is disabled and the function
+    derives a source id directly (used in tests that bypass ``supervise_forwarder``).
 
     :param params: Codex ``item/completed`` params.
     :param item: Codex item payload.
     :param forwarder_state: Optional mutable state holding synced-item
         keys and anonymous-item counters.
-    :returns: ``True`` when the item should be posted to AP.
+    :returns: Stable source id when the item should be posted to AP, otherwise ``None``.
     """
     if forwarder_state is None:
-        return True
+        return _source_id(params, item)
     item_key, is_anon = _completed_item_key(params, item, forwarder_state)
     if not forwarder_state.claim_item_key(item_key):
-        return False
+        return None
     if is_anon:
         thread_id = _thread_id_from_params(params) or "thread"
         turn_id = params.get("turnId")
         turn_id = turn_id if isinstance(turn_id, str) and turn_id else "turn"
         forwarder_state.advance_anon_counter(thread_id, turn_id)
-    return True
+    return item_key
 
 
 async def _handle_completed_item(
@@ -4829,11 +4835,12 @@ async def _handle_completed_item(
                 if forwarder_state is not None:
                     forwarder_state.compaction_item_persisted = True
         return
-    if not _claim_completed_item(params, item, forwarder_state):
+    source_id = _claim_completed_item(params, item, forwarder_state)
+    if source_id is None:
         return
     if item_type == "userMessage":
-        await _post_user_message(client, session_id, params, item)
-        if forwarder_state is not None:
+        posted = await _post_user_message(client, session_id, params, item, source_id=source_id)
+        if posted and forwarder_state is not None:
             turn_id = _turn_id_from_payload(params)
             if turn_id:
                 forwarder_state.note_user_message_posted(turn_id)
@@ -4849,13 +4856,13 @@ async def _handle_completed_item(
         # bubbles. Recover and post the turn's user message first so it
         # always takes the earlier position.
         await _ensure_user_message_posted(client, session_id, params, forwarder_state)
-        await _post_agent_message(client, session_id, params, item)
+        await _post_agent_message(client, session_id, params, item, source_id=source_id)
         return
     if item_type == "plan":
-        await _post_plan_item(client, session_id, params, item)
+        await _post_plan_item(client, session_id, params, item, source_id=source_id)
         return
     if item_type in _REVIEW_MODE_ITEM_TYPES:
-        await _post_review_mode_marker(client, session_id, params, item)
+        await _post_review_mode_marker(client, session_id, params, item, source_id=source_id)
         return
     if item_type in _TOOL_ITEM_TYPES:
         await _post_tool_item(
@@ -4864,6 +4871,7 @@ async def _handle_completed_item(
             params,
             item,
             forwarder_state=forwarder_state,
+            source_id=source_id,
         )
 
 
@@ -4953,6 +4961,8 @@ async def _post_interrupted_partial_agent_message(
     :param text: Partial assistant text, e.g. ``"The answer is"``.
     :returns: None.
     """
+    thread_id = _thread_id_from_params(params) or "thread"
+    turn_id = _turn_id_from_payload(params) or "turn"
     await _post_external_item(
         client,
         session_id,
@@ -4964,6 +4974,7 @@ async def _post_interrupted_partial_agent_message(
             "content": [{"type": "output_text", "text": text}],
         },
         response_id=_response_id(params),
+        source_id=f"{thread_id}:{turn_id}:interrupted-partial",
     )
 
 
@@ -5006,6 +5017,8 @@ async def _flush_turn_diff(
         return
     response_id = _response_id(_params_with_turn_id(params, turn_id))
     call_id = f"codex_turn_diff_{turn_id}"
+    thread_id = _thread_id_from_params(params) or "thread"
+    source_id = f"{thread_id}:{turn_id}:turn-diff"
     await _post_external_item(
         client,
         session_id,
@@ -5017,6 +5030,7 @@ async def _flush_turn_diff(
             "call_id": call_id,
         },
         response_id=response_id,
+        source_id=f"{source_id}:call",
     )
     await _post_external_item(
         client,
@@ -5024,6 +5038,7 @@ async def _flush_turn_diff(
         item_type="function_call_output",
         item_data={"call_id": call_id, "output": diff},
         response_id=response_id,
+        source_id=f"{source_id}:output",
     )
 
 
@@ -5695,10 +5710,17 @@ async def _ensure_user_message_posted(
         "turnId": turn_id,
         "item": user_item,
     }
-    if not _claim_completed_item(recovered_params, user_item, forwarder_state):
+    source_id = _claim_completed_item(recovered_params, user_item, forwarder_state)
+    if source_id is None:
         return
-    await _post_user_message(client, session_id, recovered_params, user_item)
-    forwarder_state.note_user_message_posted(turn_id)
+    if await _post_user_message(
+        client,
+        session_id,
+        recovered_params,
+        user_item,
+        source_id=source_id,
+    ):
+        forwarder_state.note_user_message_posted(turn_id)
 
 
 def _find_turn_user_message(response: CodexMessage, turn_id: str) -> _JsonObject | None:
@@ -5737,7 +5759,9 @@ async def _post_user_message(
     session_id: str,
     params: _JsonObject,
     item: _JsonObject,
-) -> None:
+    *,
+    source_id: str | None = None,
+) -> bool:
     """
     Persist a Codex user message observed from the TUI.
 
@@ -5745,7 +5769,8 @@ async def _post_user_message(
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param params: Codex notification params.
     :param item: Codex ``userMessage`` item.
-    :returns: None.
+    :param source_id: Stable native item id used for server-side deduplication.
+    :returns: Whether the item was accepted by the server.
     """
     text = _user_message_text(item)
     # An image/file-only message has no text but must still be posted: the
@@ -5757,7 +5782,7 @@ async def _post_user_message(
     # message (no text, no file block) is skipped.
     has_file_block = _user_message_has_file_content(item)
     if not text and not has_file_block:
-        return
+        return False
     # Text-only / text+image post the text; image-only posts empty content and
     # relies on the server-side pending fold to supply the image block.
     content: list[_JsonObject] = [{"type": "input_text", "text": text}] if text else []
@@ -5772,12 +5797,13 @@ async def _post_user_message(
             session_id,
             _source_id(params, item),
         )
-    await _post_external_item(
+    return await _post_external_item(
         client,
         session_id,
         item_type="message",
         item_data=item_data,
         response_id=_response_id(params),
+        source_id=source_id or _source_id(params, item),
     )
 
 
@@ -5786,7 +5812,9 @@ async def _post_agent_message(
     session_id: str,
     params: _JsonObject,
     item: _JsonObject,
-) -> None:
+    *,
+    source_id: str | None = None,
+) -> bool:
     """
     Persist a Codex assistant message observed from the TUI/app-server.
 
@@ -5794,12 +5822,13 @@ async def _post_agent_message(
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param params: Codex notification params.
     :param item: Codex ``agentMessage`` item.
-    :returns: None.
+    :param source_id: Stable native item id used for server-side deduplication.
+    :returns: Whether the item was accepted by the server.
     """
     text = item.get("text")
     if not isinstance(text, str) or not text:
-        return
-    await _post_external_item(
+        return False
+    return await _post_external_item(
         client,
         session_id,
         item_type="message",
@@ -5810,6 +5839,7 @@ async def _post_agent_message(
         },
         response_id=_response_id(params),
         message_id=_completed_streaming_message_id(params, item, "agentMessage"),
+        source_id=source_id or _source_id(params, item),
     )
 
 
@@ -5818,6 +5848,8 @@ async def _post_tool_call_item(
     session_id: str,
     params: _JsonObject,
     item: _JsonObject,
+    *,
+    source_id: str | None = None,
 ) -> str | None:
     """Persist the function-call half of a Codex built-in tool item."""
     tool_call = _codex_tool_call_from_item(item)
@@ -5831,7 +5863,8 @@ async def _post_tool_call_item(
             tool_call.name,
         )
         return None
-    await _post_external_item(
+    source_id = source_id or _source_id(params, item)
+    posted = await _post_external_item(
         client,
         session_id,
         item_type="function_call",
@@ -5842,8 +5875,9 @@ async def _post_tool_call_item(
             "call_id": tool_call.call_id,
         },
         response_id=_response_id(params),
+        source_id=f"{source_id}:call",
     )
-    return tool_call.call_id
+    return tool_call.call_id if posted else None
 
 
 async def _post_tool_item(
@@ -5853,6 +5887,7 @@ async def _post_tool_item(
     item: _JsonObject,
     *,
     forwarder_state: _CodexForwarderState | None,
+    source_id: str,
 ) -> None:
     """
     Mirror one completed Codex built-in tool call into Omnigent history.
@@ -5877,7 +5912,16 @@ async def _post_tool_item(
     if tool_call is None:
         return
     if forwarder_state is None or not forwarder_state.take_posted_tool_call(tool_call.call_id):
-        if await _post_tool_call_item(client, session_id, params, item) is None:
+        if (
+            await _post_tool_call_item(
+                client,
+                session_id,
+                params,
+                item,
+                source_id=source_id,
+            )
+            is None
+        ):
             return
     await _post_external_item(
         client,
@@ -5885,6 +5929,7 @@ async def _post_tool_item(
         item_type="function_call_output",
         item_data={"call_id": tool_call.call_id, "output": tool_call.output},
         response_id=_response_id(params),
+        source_id=f"{source_id}:output",
     )
 
 
@@ -5893,7 +5938,9 @@ async def _post_plan_item(
     session_id: str,
     params: _JsonObject,
     item: _JsonObject,
-) -> None:
+    *,
+    source_id: str | None = None,
+) -> bool:
     """
     Persist one completed Codex plan item as assistant text.
 
@@ -5901,12 +5948,13 @@ async def _post_plan_item(
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param params: Codex ``item/completed`` params.
     :param item: Codex ``plan`` thread item.
-    :returns: None.
+    :param source_id: Stable native item id used for server-side deduplication.
+    :returns: Whether the item was accepted by the server.
     """
     text = item.get("text")
     if not isinstance(text, str) or not text:
-        return
-    await _post_external_item(
+        return False
+    return await _post_external_item(
         client,
         session_id,
         item_type="message",
@@ -5917,6 +5965,7 @@ async def _post_plan_item(
         },
         response_id=_response_id(params),
         message_id=_completed_streaming_message_id(params, item, "plan"),
+        source_id=source_id or _source_id(params, item),
     )
 
 
@@ -5925,7 +5974,9 @@ async def _post_review_mode_marker(
     session_id: str,
     params: _JsonObject,
     item: _JsonObject,
-) -> None:
+    *,
+    source_id: str | None = None,
+) -> bool:
     """
     Mirror a Codex review-mode enter/exit transition into Omnigent history.
 
@@ -5943,7 +5994,8 @@ async def _post_review_mode_marker(
     :param item: Codex ``enteredReviewMode`` / ``exitedReviewMode`` item,
         e.g. ``{"type": "enteredReviewMode", "id": "rev_1",
         "review": "review the auth changes"}``.
-    :returns: None.
+    :param source_id: Stable native item id used for server-side deduplication.
+    :returns: Whether the item was accepted by the server.
     """
     entered = item.get("type") == "enteredReviewMode"
     header = "Entered review mode" if entered else "Exited review mode"
@@ -5952,7 +6004,7 @@ async def _post_review_mode_marker(
         text = f"{header}: {review.strip()}"
     else:
         text = header
-    await _post_external_item(
+    return await _post_external_item(
         client,
         session_id,
         item_type="message",
@@ -5962,6 +6014,7 @@ async def _post_review_mode_marker(
             "content": [{"type": "output_text", "text": text}],
         },
         response_id=_response_id(params),
+        source_id=source_id or _source_id(params, item),
     )
 
 
@@ -6211,13 +6264,14 @@ async def _post_external_item(
     item_data: _JsonObject,
     response_id: str,
     message_id: str | None = None,
-) -> None:
+    source_id: str | None = None,
+) -> bool:
     """
     Post one external conversation item to AP.
 
-    The forwarder does not send a dedup key to the server — items are
-    persisted with a random primary key. Avoiding re-posts on resume is
-    the producer's own responsibility.
+    Completed Codex items carry a stable ``source_id`` so the server derives
+    an idempotent item id. Their transient delivery retries can therefore
+    continue until recovery without creating duplicate transcript entries.
 
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
@@ -6225,7 +6279,8 @@ async def _post_external_item(
     :param item_data: Conversation item payload.
     :param response_id: Response id for the mirrored Codex turn.
     :param message_id: Optional live-preview stream finalized by this item.
-    :returns: None.
+    :param source_id: Stable native source id for server-side idempotency.
+    :returns: Whether the item was accepted by the server.
     """
     data: _JsonObject = {
         "item_type": item_type,
@@ -6234,21 +6289,49 @@ async def _post_external_item(
     }
     if message_id is not None:
         data["message_id"] = message_id
-    response = await _post_session_event(
-        client,
-        session_id,
-        event_type="external_conversation_item",
-        data=data,
-    )
+    if source_id is not None:
+        data["source_id"] = _bounded_source_id(source_id)
+    locks = _conversation_item_locks.get()
+    lock = locks.setdefault(session_id, asyncio.Lock()) if locks is not None else None
+
+    async def _post() -> httpx.Response | None:
+        return await _post_session_event(
+            client,
+            session_id,
+            event_type="external_conversation_item",
+            data=data,
+            max_attempts=None if source_id is not None else _POST_MAX_ATTEMPTS,
+            timeout=_DURABLE_ITEM_POST_TIMEOUT_SECONDS if source_id is not None else None,
+        )
+
+    try:
+        if lock is None:
+            response = await _post()
+        else:
+            async with lock:
+                response = await _post()
+    except asyncio.CancelledError:
+        if source_id is not None and (dl_dir := _dead_letter_dir.get()) is not None:
+            append_dead_letter(
+                dl_dir,
+                session_id=session_id,
+                event_type="external_conversation_item",
+                payload=data,
+                reason="delivery interrupted before acknowledgement",
+                delivered_ambiguous=True,
+            )
+        raise
     if response is None:
         _logger.warning("failed to post Codex conversation item")
-        return
+        return False
     if response.status_code >= 400:
         _logger.warning(
             "failed to post Codex conversation item: status=%s body=%s",
             response.status_code,
             response.text[:1000],
         )
+        return False
+    return True
 
 
 async def _post_status(
@@ -6784,11 +6867,9 @@ class _ForwardHealth:
     """
     Process-level health of Omnigent session-event forwarding (#1120).
 
-    Network failures (connect timeouts, 503s, resets) make
-    ``_post_session_event`` drop transcript/usage events after its bounded
-    retries, previously visible only as scattered per-item warnings. This
-    tracks consecutive permanent failures so a sustained outage escalates
-    to a single loud signal instead of staying effectively silent.
+    Non-idempotent or permanently rejected events can still fail after bounded
+    retries. This tracks consecutive terminal failures so a sustained problem
+    escalates to one loud signal instead of scattered per-event warnings.
 
     :param consecutive_failures: Permanent post failures since the last
         success.
@@ -6808,6 +6889,11 @@ _forward_health = _ForwardHealth()
 
 # Bridge dir for dead-lettering undeliverable durable events; set per-forwarder (#1120).
 _dead_letter_dir: ContextVar[Path | None] = ContextVar("_codex_dead_letter_dir", default=None)
+# Per-forwarder session locks keep resume backfill and live completed items in
+# server position order while an older idempotent delivery is retrying.
+_conversation_item_locks: ContextVar[dict[str, asyncio.Lock] | None] = ContextVar(
+    "_codex_conversation_item_locks", default=None
+)
 
 # Durable event types worth dead-lettering (not ephemeral deltas).
 _DEAD_LETTER_EVENT_TYPES = frozenset({"external_conversation_item", "external_session_usage"})
@@ -6953,7 +7039,7 @@ async def _post_session_event(
     *,
     event_type: str,
     data: _JsonObject,
-    max_attempts: int = _POST_MAX_ATTEMPTS,
+    max_attempts: int | None = _POST_MAX_ATTEMPTS,
     timeout: float | None = None,
 ) -> httpx.Response | None:
     """
@@ -6971,7 +7057,8 @@ async def _post_session_event(
     :param event_type: Session event type, e.g.
         ``"external_conversation_item"``.
     :param data: Event data payload, e.g. ``{"status": "running"}``.
-    :param max_attempts: Maximum POST attempts, e.g. ``1`` for transient deltas.
+    :param max_attempts: Maximum POST attempts, or ``None`` to retry transient
+        failures until recovery for an idempotent durable item.
     :param timeout: Optional per-request timeout overriding the client default.
     :returns: The final HTTP response, or ``None`` (see
         :func:`_post_session_event_inner`).
@@ -7017,7 +7104,7 @@ async def _post_session_event_inner(
     *,
     event_type: str,
     data: _JsonObject,
-    max_attempts: int = _POST_MAX_ATTEMPTS,
+    max_attempts: int | None = _POST_MAX_ATTEMPTS,
     timeout: float | None = None,
 ) -> _PostResult:
     """
@@ -7029,34 +7116,42 @@ async def _post_session_event_inner(
         ``"external_conversation_item"``.
     :param data: Event data payload, e.g.
         ``{"status": "running"}``.
-    :param max_attempts: Maximum POST attempts before giving up, e.g. ``3``.
+    :param max_attempts: Maximum POST attempts before giving up, e.g. ``3``;
+        ``None`` retries transient failures indefinitely and requires an
+        idempotent event payload.
         Startup dead-letter replay passes ``1`` — its natural retry cadence is
         the next startup, so an in-call retry loop only adds latency (#1579).
     :param timeout: Optional per-request timeout in seconds overriding the
         client default, e.g. ``5.0``. Replay passes a short value so a hung
         server fails fast instead of stalling startup on the 30s client default.
-    :returns: A :class:`_PostResult` carrying the final response, or — when no
-        response was seen — whether the POST was abandoned after an ambiguous
-        transport failure (``external_conversation_item`` only; the item may
-        already be committed, so retrying risks a duplicate) versus a
-        proven-undelivered transport failure after all retries.
+    :returns: A :class:`_PostResult` carrying the final response, or — for a
+        legacy conversation item without ``source_id`` — whether the POST was
+        abandoned after an ambiguous transport failure versus a proven-
+        undelivered transport failure after all retries.
     """
+    idempotent = _session_event_is_idempotent(event_type, data)
+    if max_attempts is None and not idempotent:
+        raise ValueError("unbounded session-event retries require an idempotent source_id")
     url = f"/v1/sessions/{url_component(session_id)}/events"
     payload = {"type": event_type, "data": data}
-    for attempt in range(1, max_attempts + 1):
+    attempt = 0
+    while max_attempts is None or attempt < max_attempts:
+        attempt += 1
         try:
             if timeout is None:
                 response = await client.post(url, json=payload)
             else:
                 response = await client.post(url, json=payload, timeout=timeout)
         except httpx.HTTPError as exc:
-            # Conversation items persist with a random primary key and no
-            # server-side dedup, so an ambiguous failure (request sent,
-            # response lost — the server may have committed it) must not
-            # be retried: a re-post would duplicate the item.
-            # Other event types are idempotent / transient, so retrying
-            # them on the same errors is safe and preserves delivery.
-            if event_type == "external_conversation_item" and post_may_have_been_delivered(exc):
+            # Legacy conversation items without a source id are not
+            # idempotent, so an ambiguous response-loss failure must not be
+            # retried. Completed Codex items carry a stable source id and are
+            # safe to retry until the relay recovers.
+            if (
+                event_type == "external_conversation_item"
+                and not idempotent
+                and post_may_have_been_delivered(exc)
+            ):
                 _logger.warning(
                     "skipping Codex session event after an ambiguous transport "
                     "failure (may already be committed); not retrying to avoid "
@@ -7072,6 +7167,7 @@ async def _post_session_event_inner(
             if _is_final_post_attempt(attempt, max_attempts):
                 _log_post_transport_failure(event_type, exc, max_attempts)
                 return _PostResult(response=None, transport_error=type(exc).__name__)
+            _log_unbounded_post_retry(event_type, session_id, attempt, exc=exc)
             await _sleep(_post_retry_delay(attempt))
             continue
         # An HTTP response (no transport error) proves the server is reachable,
@@ -7081,17 +7177,21 @@ async def _post_session_event_inner(
         note_native_post_success()
         if _post_response_is_final(response, attempt, max_attempts):
             return _PostResult(response=response)
+        _log_unbounded_post_retry(event_type, session_id, attempt, response=response)
         await _sleep(_post_retry_delay(attempt))
     return _PostResult(response=None)
 
 
-def _post_response_is_final(response: httpx.Response, attempt: int, max_attempts: int) -> bool:
+def _post_response_is_final(
+    response: httpx.Response, attempt: int, max_attempts: int | None
+) -> bool:
     """
     Return whether a session-event POST response should stop retries.
 
     :param response: HTTP response from AP.
     :param attempt: One-based attempt number, e.g. ``1``.
-    :param max_attempts: Maximum POST attempts allowed, e.g. ``3``.
+    :param max_attempts: Maximum POST attempts allowed, or ``None`` for
+        indefinite transient retries.
     :returns: ``True`` when the caller should return ``response``.
     """
     if response.status_code < 400:
@@ -7101,18 +7201,21 @@ def _post_response_is_final(response: httpx.Response, attempt: int, max_attempts
     return _is_final_post_attempt(attempt, max_attempts)
 
 
-def _is_final_post_attempt(attempt: int, max_attempts: int) -> bool:
+def _is_final_post_attempt(attempt: int, max_attempts: int | None) -> bool:
     """
     Return whether an Omnigent event POST attempt is the final try.
 
     :param attempt: One-based attempt number, e.g. ``3``.
-    :param max_attempts: Maximum POST attempts allowed, e.g. ``3``.
+    :param max_attempts: Maximum POST attempts allowed, or ``None`` for
+        indefinite transient retries.
     :returns: ``True`` when no further retry is allowed.
     """
-    return attempt >= max_attempts
+    return max_attempts is not None and attempt >= max_attempts
 
 
-def _log_post_transport_failure(event_type: str, exc: httpx.HTTPError, max_attempts: int) -> None:
+def _log_post_transport_failure(
+    event_type: str, exc: httpx.HTTPError, max_attempts: int | None
+) -> None:
     """
     Log an exhausted Omnigent session-event transport failure.
 
@@ -7133,6 +7236,38 @@ def _log_post_transport_failure(event_type: str, exc: httpx.HTTPError, max_attem
     # attaches this cause to the failure reason instead of a generic
     # "wedged LLM" message.
     record_native_post_failure(event_type, exc)
+
+
+def _session_event_is_idempotent(event_type: str, data: _JsonObject) -> bool:
+    """Return whether retrying this event cannot append a duplicate item."""
+    source_id = data.get("source_id")
+    return (
+        event_type == "external_conversation_item"
+        and isinstance(source_id, str)
+        and bool(source_id.strip())
+    )
+
+
+def _log_unbounded_post_retry(
+    event_type: str,
+    session_id: str,
+    attempt: int,
+    *,
+    exc: httpx.HTTPError | None = None,
+    response: httpx.Response | None = None,
+) -> None:
+    """Log sparse progress for a durable event retrying until recovery."""
+    if attempt != 1 and attempt % 10 != 0:
+        return
+    _logger.warning(
+        "retrying idempotent Codex session event until delivery: "
+        "session=%s type=%s attempt=%s http_status=%s error=%s",
+        session_id,
+        event_type,
+        attempt,
+        response.status_code if response is not None else None,
+        type(exc).__name__ if exc is not None else None,
+    )
 
 
 def _log_failed_session_event_post(
@@ -7177,7 +7312,8 @@ def _post_retry_delay(attempt: int) -> float:
     :param attempt: One-based failed attempt number, e.g. ``1``.
     :returns: Delay in seconds before the next attempt.
     """
-    return _POST_RETRY_DELAY_SECONDS * attempt
+    exponent = min(max(0, attempt - 1), 32)
+    return min(_POST_RETRY_DELAY_SECONDS * (2**exponent), _POST_RETRY_MAX_DELAY_SECONDS)
 
 
 def _turn_id_from_payload(payload: object) -> str | None:
@@ -7666,19 +7802,29 @@ def _source_id(params: _JsonObject, item: _JsonObject) -> str:
     """
     Build a stable per-record label for one Codex item.
 
-    Only used for debug-log correlation — it is not sent to the server
-    and is not a dedup key (the server persists external items with a
-    random primary key).
+    Sent as the external item's ``source_id`` so the server derives a stable
+    primary key. It is also used for debug-log correlation.
 
     :param params: Codex notification params.
     :param item: Codex item payload.
-    :returns: Record label, e.g. ``"turn_abc:item_xyz"``.
+    :returns: Record label, e.g. ``"thread_abc:turn_abc:item_xyz"``.
     """
+    thread_id = _thread_id_from_params(params)
     turn_id = params.get("turnId")
     item_id = item.get("id")
-    left = turn_id if isinstance(turn_id, str) and turn_id else "thread"
-    right = item_id if isinstance(item_id, str) and item_id else "item"
-    return f"{left}:{right}"
+    thread = thread_id if isinstance(thread_id, str) and thread_id else "thread"
+    turn = turn_id if isinstance(turn_id, str) and turn_id else "turn"
+    native_item = item_id if isinstance(item_id, str) and item_id else "item"
+    return f"{thread}:{turn}:{native_item}"
+
+
+def _bounded_source_id(source_id: str) -> str:
+    """Keep a stable source id within the Sessions API limit."""
+    stripped = source_id.strip()
+    if len(stripped) <= _SOURCE_ID_MAX_CHARS:
+        return stripped
+    digest = hashlib.sha256(stripped.encode("utf-8")).hexdigest()
+    return f"codex:{digest}"
 
 
 def _completed_item_key(

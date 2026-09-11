@@ -2136,6 +2136,27 @@ class _RaisingPostClient:
         raise self._exc
 
 
+class _SequencedPostClient:
+    """Return or raise configured POST outcomes in order."""
+
+    def __init__(self, outcomes: list[httpx.Response | httpx.HTTPError]) -> None:
+        self._outcomes = outcomes
+        self.calls: list[tuple[str, object, float | None]] = []
+
+    async def post(
+        self,
+        url: str,
+        *,
+        json: object,
+        timeout: float | None = None,
+    ) -> httpx.Response:
+        self.calls.append((url, json, timeout))
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, httpx.HTTPError):
+            raise outcome
+        return outcome
+
+
 @pytest.mark.asyncio
 async def test_post_session_event_inner_classifies_ambiguous_skip() -> None:
     """
@@ -2158,6 +2179,172 @@ async def test_post_session_event_inner_classifies_ambiguous_skip() -> None:
     assert result.transport_error == "ReadTimeout"
     # Ambiguous items are abandoned immediately — no retries.
     assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_idempotent_conversation_item_retries_ambiguous_failure_until_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stable source id makes response-loss retries duplicate-safe."""
+    monkeypatch.setattr(fwd, "_sleep", AsyncMock())
+    request = httpx.Request("POST", "http://test")
+    client = _SequencedPostClient(
+        [
+            httpx.ReadTimeout("response lost", request=request),
+            httpx.Response(503, request=request),
+            httpx.Response(202, request=request),
+        ]
+    )
+    data = {
+        "item_type": "message",
+        "item_data": {"role": "assistant"},
+        "source_id": "thread_1:turn_1:item_1",
+    }
+
+    result = await fwd._post_session_event_inner(
+        client,  # type: ignore[arg-type]
+        "conv_codex1",
+        event_type="external_conversation_item",
+        data=data,
+        max_attempts=None,
+        timeout=5.0,
+    )
+
+    assert result.response is not None
+    assert result.response.status_code == 202
+    assert [call[1] for call in client.calls] == [
+        {"type": "external_conversation_item", "data": data},
+    ] * 3
+    assert [call[2] for call in client.calls] == [5.0, 5.0, 5.0]
+
+
+@pytest.mark.asyncio
+async def test_idempotent_conversation_item_bounds_long_source_id() -> None:
+    """Long native ids are hashed into the server's source-id limit."""
+    client = _RecordingClient()
+
+    posted = await fwd._post_external_item(
+        client,  # type: ignore[arg-type]
+        "conv_x",
+        item_type="message",
+        item_data={"role": "assistant", "content": []},
+        response_id="codex_turn_1",
+        source_id="source:" + ("x" * 300),
+    )
+
+    assert posted is True
+    source_id = client.posts[0][1]["data"]["source_id"]
+    assert isinstance(source_id, str)
+    assert source_id.startswith("codex:")
+    assert len(source_id) <= 256
+
+
+@pytest.mark.asyncio
+async def test_idempotent_conversation_items_keep_order_while_older_post_is_slow() -> None:
+    """Concurrent resume/live delivery cannot let a newer item overtake an older one."""
+
+    class _BlockingFirstPostClient(_RecordingClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict,
+            timeout: float | None = None,
+        ) -> httpx.Response:
+            if not self.posts:
+                self.entered.set()
+                await self.release.wait()
+            return await super().post(url, json=json, timeout=timeout)
+
+    client = _BlockingFirstPostClient()
+    token = fwd._conversation_item_locks.set({})
+    try:
+        older = asyncio.create_task(
+            fwd._post_external_item(
+                client,  # type: ignore[arg-type]
+                "conv_x",
+                item_type="message",
+                item_data={"role": "assistant", "content": []},
+                response_id="codex_turn_1",
+                source_id="thread_1:turn_1:item_1",
+            )
+        )
+        await asyncio.wait_for(client.entered.wait(), timeout=5.0)
+        newer = asyncio.create_task(
+            fwd._post_external_item(
+                client,  # type: ignore[arg-type]
+                "conv_x",
+                item_type="message",
+                item_data={"role": "assistant", "content": []},
+                response_id="codex_turn_2",
+                source_id="thread_1:turn_2:item_2",
+            )
+        )
+        await asyncio.sleep(0)
+        assert client.posts == []
+
+        client.release.set()
+        assert await asyncio.gather(older, newer) == [True, True]
+    finally:
+        fwd._conversation_item_locks.reset(token)
+
+    assert [body["data"]["source_id"] for _url, body in client.posts] == [
+        "thread_1:turn_1:item_1",
+        "thread_1:turn_2:item_2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_idempotent_item_is_dead_lettered_for_safe_replay(tmp_path: Path) -> None:
+    """Shutdown during an in-flight completion keeps a replayable disk record."""
+
+    class _BlockingPostClient:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict,
+            timeout: float | None = None,
+        ) -> httpx.Response:
+            self.entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    client = _BlockingPostClient()
+    dead_letter_token = fwd._dead_letter_dir.set(tmp_path)
+    locks_token = fwd._conversation_item_locks.set({})
+    try:
+        task = asyncio.create_task(
+            fwd._post_external_item(
+                client,  # type: ignore[arg-type]
+                "conv_x",
+                item_type="message",
+                item_data={"role": "assistant", "content": []},
+                response_id="codex_turn_1",
+                source_id="thread_1:turn_1:item_1",
+            )
+        )
+        await asyncio.wait_for(client.entered.wait(), timeout=5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        fwd._conversation_item_locks.reset(locks_token)
+        fwd._dead_letter_dir.reset(dead_letter_token)
+
+    import json as _json
+
+    record = _json.loads((tmp_path / "dead_letter.jsonl").read_text().splitlines()[0])
+    assert record["delivered_ambiguous"] is True
+    assert record["payload"]["source_id"] == "thread_1:turn_1:item_1"
 
 
 @pytest.mark.asyncio
@@ -3308,6 +3495,7 @@ async def test_delta_coalescer_overflow_drops_backlog_before_durable_completion(
                     },
                     "response_id": "codex_turn_1",
                     "message_id": "codex:thread_1:turn_1:agentMessage:item_1",
+                    "source_id": "thread_1:turn_1:item_1",
                 },
             },
         ),
