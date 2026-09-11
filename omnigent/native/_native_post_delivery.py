@@ -20,6 +20,7 @@ import contextlib
 import json
 import logging
 import time
+import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
@@ -449,6 +450,8 @@ async def replay_dead_letters(
     logger_name: str | None = None,
     max_records: int | None = None,
     deadline_seconds: float | None = None,
+    record_filter: Callable[[dict[str, object]], bool] | None = None,
+    one_shot: bool = False,
 ) -> int:
     """
     Re-POST proven-undelivered dead-lettered forwards on forwarder startup (#1579).
@@ -460,14 +463,18 @@ async def replay_dead_letters(
     with its classification refreshed from the latest attempt so a record that
     now fails ambiguously (or is permanently rejected) is never auto-replayed
     again. Ambiguous and permanent-4xx records are left untouched as a forensic
-    record.
+    record. Callers may select a subset with ``record_filter``.
 
     Bounded so a large dead-letter file or a slow/hung server cannot stall
     startup: at most ``max_records`` records are re-POSTed and the whole drain
     is abandoned once ``deadline_seconds`` elapses. Records left over by either
     bound are retained unchanged (deferred to a later startup) and logged — never
-    silently dropped. The remaining latency lever, a short per-POST timeout and a
-    single attempt, is the caller's responsibility (via ``repost``).
+    silently dropped. With ``one_shot=True``, selected replayable records are
+    removed before network I/O; failures and records outside the budget are not
+    retried on a later startup. This is useful when a later retry could append an
+    old transcript item after newer live items. The remaining latency lever, a
+    short per-POST timeout and a single attempt, is the caller's responsibility
+    (via ``repost``).
 
     Intended to run once at startup, before live forwarding begins, so no other
     writer races the dead-letter files for this ``bridge_dir``.
@@ -487,6 +494,10 @@ async def replay_dead_letters(
     :param deadline_seconds: Wall-clock budget for the whole drain, e.g.
         ``30.0``; ``None`` for no deadline. Once exceeded, the remaining
         replayable records are deferred to a later startup.
+    :param record_filter: Optional predicate selecting structured records for
+        this drain. Unselected records remain untouched and consume no budget.
+    :param one_shot: Remove selected replayable records before attempting them,
+        so failures and deferred records cannot be retried after live traffic.
     :returns: The number of records successfully replayed (and removed).
     """
     log = logging.getLogger(logger_name) if logger_name else _logger
@@ -502,13 +513,88 @@ async def replay_dead_letters(
             continue
         loaded.append((path, entries))
         if any(
-            _dead_letter_record_replayable(entry, retryable_status_codes=retryable_status_codes)
+            isinstance(entry, dict)
+            and (record_filter is None or record_filter(entry))
+            and _dead_letter_record_replayable(
+                entry, retryable_status_codes=retryable_status_codes
+            )
             for entry in entries
         ):
             any_replayable = True
     if not any_replayable:
         # Nothing recoverable — leave the forensic files untouched.
         return 0
+
+    def _selected(entry: object) -> bool:
+        return (
+            isinstance(entry, dict)
+            and (record_filter is None or record_filter(entry))
+            and _dead_letter_record_replayable(
+                entry, retryable_status_codes=retryable_status_codes
+            )
+        )
+
+    if one_shot:
+        pending: list[dict[str, object]] = []
+        sealed: list[tuple[Path, Path, list[object]]] = []
+        try:
+            for path, entries in loaded:
+                retained: list[object] = []
+                for entry in entries:
+                    if _selected(entry):
+                        assert isinstance(entry, dict)
+                        pending.append(entry)
+                    else:
+                        retained.append(entry)
+                if len(retained) != len(entries):
+                    snapshot = path.with_name(f".{path.name}.{uuid.uuid4().hex}.sealed")
+                    path.replace(snapshot)
+                    sealed.append((path, snapshot, retained))
+        except Exception:
+            for path, snapshot, _retained in reversed(sealed):
+                with contextlib.suppress(Exception):
+                    snapshot.replace(path)
+            raise
+
+        try:
+            for path, _snapshot, retained in sealed:
+                _rewrite_dead_letter_entries(path, retained)
+        except Exception:
+            for path, _snapshot, _retained in sealed:
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+            for path, snapshot, _retained in sealed:
+                with contextlib.suppress(Exception):
+                    snapshot.replace(path)
+            raise
+
+        for _path, snapshot, _retained in sealed:
+            with contextlib.suppress(FileNotFoundError):
+                snapshot.unlink()
+
+        replayed = 0
+        deadline = time.monotonic() + deadline_seconds if deadline_seconds is not None else None
+        for attempted, entry in enumerate(pending):
+            over_records = max_records is not None and attempted >= max_records
+            over_deadline = deadline is not None and time.monotonic() >= deadline
+            if over_records or over_deadline:
+                break
+            result = await repost(entry)
+            if result.delivered:
+                replayed += 1
+        discarded = len(pending) - replayed
+        if replayed:
+            log.info(
+                "replayed %d proven-undelivered dead-lettered forward(s) on startup",
+                replayed,
+            )
+        if discarded:
+            log.warning(
+                "discarded %d one-shot dead-lettered forward(s) after bounded "
+                "startup recovery; they will not be retried out of order",
+                discarded,
+            )
+        return replayed
 
     replayed = 0
     attempted = 0
@@ -521,10 +607,8 @@ async def replay_dead_letters(
         retained: list[object] = []
         changed = False
         for entry in entries:
-            if not _dead_letter_record_replayable(
-                entry, retryable_status_codes=retryable_status_codes
-            ):
-                # Forensic record (ambiguous / permanent-4xx / malformed) — keep as is.
+            if not _selected(entry):
+                # Unselected or unsafe forensic record — keep as is.
                 retained.append(entry)
                 continue
             if stop:

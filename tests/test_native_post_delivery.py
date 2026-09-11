@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from omnigent.native import _native_post_delivery as native_delivery
 from omnigent.native._native_post_delivery import (
     _DEAD_LETTER_BACKUP_FILE,
     _DEAD_LETTER_FILE,
@@ -532,6 +533,167 @@ async def test_replay_respects_deadline(tmp_path: Path) -> None:
     assert called is False
     # Nothing changed, so the file is left byte-identical for the next startup.
     assert current.read_bytes() == before
+
+
+async def test_one_shot_replay_removes_failures_and_deferred_records(tmp_path: Path) -> None:
+    """One-shot recovery cannot leave an old record for a later out-of-order retry."""
+    current = tmp_path / _DEAD_LETTER_FILE
+    _write_records(
+        current,
+        [
+            _dead_letter_record(payload={"n": 0}),
+            _dead_letter_record(payload={"n": 1}),
+            _dead_letter_record(payload={"n": 2}),
+            _dead_letter_record(payload={"n": 3}, delivered_ambiguous=True),
+        ],
+    )
+    seen: list[int] = []
+
+    async def repost(record: dict[str, object]) -> RepostResult:
+        item = record["payload"]["n"]  # type: ignore[index]
+        seen.append(item)
+        return RepostResult(delivered=item == 0)
+
+    replayed = await replay_dead_letters(
+        tmp_path,
+        repost=repost,
+        retryable_status_codes=_RETRYABLE,
+        max_records=2,
+        one_shot=True,
+    )
+
+    assert replayed == 1
+    assert seen == [0, 1]
+    retained = _read_records(current)
+    assert [record["payload"]["n"] for record in retained] == [3]
+
+
+async def test_one_shot_replay_does_not_post_when_local_sealing_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local rewrite failure aborts recovery before any network request."""
+    current = tmp_path / _DEAD_LETTER_FILE
+    _write_records(
+        current,
+        [
+            _dead_letter_record(payload={"n": 0}),
+            _dead_letter_record(payload={"n": 1}, delivered_ambiguous=True),
+        ],
+    )
+    before = current.read_bytes()
+
+    def fail_rewrite(_path: Path, _entries: list[object]) -> None:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(native_delivery, "_rewrite_dead_letter_entries", fail_rewrite)
+    repost_called = False
+
+    async def unexpected_repost(record: dict[str, object]) -> RepostResult:
+        nonlocal repost_called
+        del record
+        repost_called = True
+        raise AssertionError("network replay must not start before local sealing succeeds")
+
+    with pytest.raises(OSError, match="read-only filesystem"):
+        await native_delivery.replay_dead_letters(
+            tmp_path,
+            repost=unexpected_repost,
+            retryable_status_codes=_RETRYABLE,
+            one_shot=True,
+        )
+
+    assert repost_called is False
+    assert current.read_bytes() == before
+    assert list(tmp_path.glob(f".{_DEAD_LETTER_FILE}.*.sealed")) == []
+
+
+async def test_one_shot_replay_restores_all_files_after_partial_rewrite_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed second rewrite restores both dead-letter files before any POST."""
+    backup = tmp_path / _DEAD_LETTER_BACKUP_FILE
+    current = tmp_path / _DEAD_LETTER_FILE
+    _write_records(
+        backup,
+        [
+            _dead_letter_record(payload={"n": 0}),
+            _dead_letter_record(payload={"n": 1}, delivered_ambiguous=True),
+        ],
+    )
+    _write_records(
+        current,
+        [
+            _dead_letter_record(payload={"n": 2}),
+            _dead_letter_record(payload={"n": 3}, delivered_ambiguous=True),
+        ],
+    )
+    backup_before = backup.read_bytes()
+    current_before = current.read_bytes()
+    real_rewrite = native_delivery._rewrite_dead_letter_entries
+    rewrites = 0
+
+    def fail_second_rewrite(path: Path, entries: list[object]) -> None:
+        nonlocal rewrites
+        rewrites += 1
+        if rewrites == 2:
+            raise OSError("disk full")
+        real_rewrite(path, entries)
+
+    monkeypatch.setattr(native_delivery, "_rewrite_dead_letter_entries", fail_second_rewrite)
+    repost_called = False
+
+    async def unexpected_repost(record: dict[str, object]) -> RepostResult:
+        nonlocal repost_called
+        del record
+        repost_called = True
+        raise AssertionError("network replay must not start before all rewrites succeed")
+
+    with pytest.raises(OSError, match="disk full"):
+        await native_delivery.replay_dead_letters(
+            tmp_path,
+            repost=unexpected_repost,
+            retryable_status_codes=_RETRYABLE,
+            one_shot=True,
+        )
+
+    assert repost_called is False
+    assert backup.read_bytes() == backup_before
+    assert current.read_bytes() == current_before
+    assert list(tmp_path.glob("*.sealed")) == []
+
+
+async def test_replay_filter_skips_unselected_records_without_consuming_budget(
+    tmp_path: Path,
+) -> None:
+    """Filtered records remain forensic and do not consume the replay cap."""
+    current = tmp_path / _DEAD_LETTER_FILE
+    _write_records(
+        current,
+        [
+            _dead_letter_record(session_id="conv_other", payload={"n": 0}),
+            _dead_letter_record(session_id="conv_target", payload={"n": 1}),
+        ],
+    )
+    seen: list[int] = []
+
+    async def repost(record: dict[str, object]) -> RepostResult:
+        seen.append(record["payload"]["n"])  # type: ignore[index]
+        return RepostResult(delivered=True)
+
+    replayed = await replay_dead_letters(
+        tmp_path,
+        repost=repost,
+        retryable_status_codes=_RETRYABLE,
+        max_records=1,
+        record_filter=lambda record: record.get("session_id") == "conv_target",
+    )
+
+    assert replayed == 1
+    assert seen == [1]
+    retained = _read_records(current)
+    assert [record["payload"]["n"] for record in retained] == [0]
 
 
 async def test_replay_preserves_malformed_lines(tmp_path: Path) -> None:

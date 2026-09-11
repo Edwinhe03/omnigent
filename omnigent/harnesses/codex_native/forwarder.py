@@ -85,14 +85,16 @@ _POST_RETRY_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _DURABLE_ITEM_POST_TIMEOUT_SECONDS = 5.0
 _SOURCE_ID_MAX_CHARS = 256
 # Startup dead-letter replay budget (#1579). Bounded so a large dead-letter file
-# or a slow/hung server cannot stall forwarder startup: each re-POST is a single
-# attempt (its natural retry is the next startup) with a short timeout (vs the
-# 30s live client default) so a hung server fails fast; at most
-# ``_REPLAY_MAX_RECORDS`` are sent and the whole drain is abandoned after
-# ``_REPLAY_DEADLINE_SECONDS``. Leftovers are deferred to a later startup.
+# or a slow/hung server cannot stall recovery: each re-POST is one short attempt,
+# at most ``_REPLAY_MAX_RECORDS`` are sent, and the drain stops after
+# ``_REPLAY_DEADLINE_SECONDS``. Selected Codex transcript records are one-shot;
+# failures and leftovers are not retried after newer live items can arrive.
 _REPLAY_MAX_RECORDS = 500
 _REPLAY_POST_TIMEOUT_SECONDS = 5.0
 _REPLAY_DEADLINE_SECONDS = 30.0
+_REPLAY_SAFE_TRANSPORT_ERRORS = frozenset(
+    {"ConnectError", "ConnectTimeout", "PoolTimeout", "RequestError"}
+)
 _DELTA_FLUSH_INTERVAL_SECONDS = 0.05
 _DELTA_FLUSH_CHAR_THRESHOLD = 8 * 1024
 # Transient output can be discarded because completed items are persisted
@@ -2049,6 +2051,10 @@ async def supervise_forwarder(
     # Resume backfill and live notifications can post concurrently. Serialize
     # durable items per AP session so an older retry cannot land after a newer item.
     _conversation_item_locks.set({})
+    await discard_codex_transcript_dead_letters_before_live(
+        bridge_dir=bridge_dir,
+        session_id=session_id,
+    )
     if client is None:
         client = client_for_transport(app_server_url, client_name="omnigent-codex-forwarder")
         await client.connect()
@@ -2061,11 +2067,6 @@ async def supervise_forwarder(
         timeout=httpx.Timeout(30.0),
         transport=ap_transport,
     ) as ap_client:
-        # Recover proven-undelivered dead-lettered forwards now that the
-        # server may be reachable again (host/server returned after an
-        # outage or restart). Runs before live forwarding begins, so no
-        # other writer races the dead-letter files (#1579).
-        await _replay_dead_letters_on_startup(ap_client, bridge_dir)
         # Synthesize the thread's MCP startup round (see the comment on
         # _CODEX_MCP_STARTUP_STATUS_METHOD): the fresh-launch forwarder
         # starts right at thread creation, which is when codex boots its
@@ -6398,6 +6399,7 @@ async def _post_external_item(
         data["message_id"] = message_id
     if source_id is not None:
         data["source_id"] = _bounded_source_id(source_id)
+    attempt_state = _PostAttemptState()
 
     async def _post() -> httpx.Response | None:
         return await _post_session_event(
@@ -6407,20 +6409,31 @@ async def _post_external_item(
             data=data,
             max_attempts=None if source_id is not None else _POST_MAX_ATTEMPTS,
             timeout=_DURABLE_ITEM_POST_TIMEOUT_SECONDS if source_id is not None else None,
+            attempt_state=attempt_state,
         )
 
     try:
         async with _conversation_item_delivery_scope(session_id):
             response = await _post()
     except asyncio.CancelledError:
-        if source_id is not None and (dl_dir := _dead_letter_dir.get()) is not None:
+        if (
+            attempt_state.started
+            and source_id is not None
+            and (dl_dir := _dead_letter_dir.get()) is not None
+        ):
             append_dead_letter(
                 dl_dir,
                 session_id=session_id,
                 event_type="external_conversation_item",
                 payload=data,
-                reason="delivery interrupted before acknowledgement",
-                delivered_ambiguous=True,
+                reason=(
+                    "delivery interrupted after a proven-undelivered attempt"
+                    if attempt_state.proven_undelivered
+                    else "delivery interrupted before acknowledgement"
+                ),
+                delivered_ambiguous=not attempt_state.proven_undelivered,
+                http_status=attempt_state.http_status,
+                transport_error=attempt_state.transport_error,
             )
         raise
     if response is None:
@@ -7093,65 +7106,105 @@ def _note_forward_failure(event_type: str) -> None:
         _forward_health.degraded_logged = True
 
 
-async def _replay_dead_letters_on_startup(
+async def recover_codex_transcript_dead_letters_before_resume(
     ap_client: httpx.AsyncClient,
+    *,
     bridge_dir: Path,
+    session_id: str,
 ) -> None:
-    """
-    Re-POST proven-undelivered dead-lettered forwards on forwarder startup (#1579).
+    """Run bounded one-shot transcript recovery before cold resume."""
+    await replay_dead_letters(
+        bridge_dir,
+        repost=lambda record: _repost_codex_dead_letter(ap_client, record),
+        retryable_status_codes=_POST_RETRY_STATUS_CODES,
+        logger_name=__name__,
+        max_records=_REPLAY_MAX_RECORDS,
+        deadline_seconds=_REPLAY_DEADLINE_SECONDS,
+        record_filter=lambda record: _codex_dead_letter_safe_to_replay(
+            record,
+            session_id=session_id,
+        ),
+        one_shot=True,
+    )
 
-    Best-effort recovery for the realistic case — the host/server returned after
-    an outage or a restart. Delegates to the shared
-    :func:`replay_dead_letters` drain, supplying a re-POST that routes each
-    record to its recorded session via :func:`_post_session_event_inner` (the
-    inner so a re-failure does not double dead-letter through the wrapper).
-    Never raises: a replay failure must not block live forwarding.
 
-    :param ap_client: HTTP client for Omnigent event posts.
-    :param bridge_dir: Native Codex bridge directory holding the dead-letter files.
-    :returns: None.
-    """
+async def discard_codex_transcript_dead_letters_before_live(
+    *,
+    bridge_dir: Path,
+    session_id: str,
+) -> None:
+    """Seal stale recoverable transcript records before live forwarding."""
 
-    async def _repost(record: dict[str, object]) -> RepostResult:
-        session_id = record["session_id"]
-        event_type = record["event_type"]
-        payload = record["payload"]
-        assert isinstance(session_id, str)
-        assert isinstance(event_type, str)
-        assert isinstance(payload, dict)
-        result = await _post_session_event_inner(
-            ap_client,
-            session_id,
-            event_type=event_type,
-            data=payload,
-            max_attempts=1,
-            timeout=_REPLAY_POST_TIMEOUT_SECONDS,
-        )
-        response = result.response
-        if response is None:
-            return RepostResult(
-                delivered=False,
-                delivered_ambiguous=result.delivered_ambiguous,
-                http_status=None,
-            )
-        delivered = response.status_code < 400
+    async def _unexpected_repost(_record: dict[str, object]) -> RepostResult:
+        raise AssertionError("fresh-start dead-letter sealing must not perform network replay")
+
+    await replay_dead_letters(
+        bridge_dir,
+        repost=_unexpected_repost,
+        retryable_status_codes=_POST_RETRY_STATUS_CODES,
+        logger_name=__name__,
+        max_records=0,
+        record_filter=lambda record: _codex_dead_letter_safe_to_replay(
+            record,
+            session_id=session_id,
+        ),
+        one_shot=True,
+    )
+
+
+def _codex_dead_letter_safe_to_replay(
+    record: dict[str, object],
+    *,
+    session_id: str,
+) -> bool:
+    """Select proven-undelivered, idempotent transcript records for one session."""
+    if record.get("session_id") != session_id:
+        return False
+    if record.get("event_type") != "external_conversation_item":
+        return False
+    if record.get("delivered_ambiguous") is not False:
+        return False
+    if record.get("http_status") is not None:
+        return False
+    if record.get("transport_error") not in _REPLAY_SAFE_TRANSPORT_ERRORS:
+        return False
+    payload = record.get("payload")
+    source_id = payload.get("source_id") if isinstance(payload, dict) else None
+    return isinstance(source_id, str) and bool(source_id.strip())
+
+
+async def _repost_codex_dead_letter(
+    ap_client: httpx.AsyncClient,
+    record: dict[str, object],
+) -> RepostResult:
+    """Re-POST one selected Codex dead letter with a bounded attempt."""
+    session_id = record["session_id"]
+    event_type = record["event_type"]
+    payload = record["payload"]
+    assert isinstance(session_id, str)
+    assert isinstance(event_type, str)
+    assert isinstance(payload, dict)
+    result = await _post_session_event_inner(
+        ap_client,
+        session_id,
+        event_type=event_type,
+        data=payload,
+        max_attempts=1,
+        timeout=_REPLAY_POST_TIMEOUT_SECONDS,
+    )
+    response = result.response
+    if response is None:
         return RepostResult(
-            delivered=delivered,
-            delivered_ambiguous=False,
-            http_status=None if delivered else response.status_code,
+            delivered=False,
+            delivered_ambiguous=result.delivered_ambiguous,
+            http_status=None,
         )
-
-    try:
-        await replay_dead_letters(
-            bridge_dir,
-            repost=_repost,
-            retryable_status_codes=_POST_RETRY_STATUS_CODES,
-            logger_name=__name__,
-            max_records=_REPLAY_MAX_RECORDS,
-            deadline_seconds=_REPLAY_DEADLINE_SECONDS,
-        )
-    except Exception:  # noqa: BLE001 - replay must never block forwarder startup.
-        _logger.warning("Codex forwarder dead-letter replay failed", exc_info=True)
+    delivered = response.status_code < 400
+    return RepostResult(
+        delivered=delivered,
+        delivered_ambiguous=False,
+        http_status=None if delivered else response.status_code,
+    )
 
 
 @dataclass(frozen=True)
@@ -7179,6 +7232,17 @@ class _PostResult:
     transport_error: str | None = None
 
 
+@dataclass
+class _PostAttemptState:
+    """Latest durable POST disposition, used if delivery is cancelled."""
+
+    started: bool = False
+    proven_undelivered: bool = False
+    may_have_been_delivered: bool = False
+    http_status: int | None = None
+    transport_error: str | None = None
+
+
 async def _post_session_event(
     client: httpx.AsyncClient,
     session_id: str,
@@ -7187,6 +7251,7 @@ async def _post_session_event(
     data: _JsonObject,
     max_attempts: int | None = _POST_MAX_ATTEMPTS,
     timeout: float | None = None,
+    attempt_state: _PostAttemptState | None = None,
 ) -> httpx.Response | None:
     """
     Post one Omnigent session event, tracking forward-sync health (#1120).
@@ -7206,6 +7271,8 @@ async def _post_session_event(
     :param max_attempts: Maximum POST attempts, or ``None`` to retry transient
         failures until recovery for an idempotent durable item.
     :param timeout: Optional per-request timeout overriding the client default.
+    :param attempt_state: Optional mutable delivery state used to classify a
+        cancellation of an idempotent completed item.
     :returns: The final HTTP response, or ``None`` (see
         :func:`_post_session_event_inner`).
     """
@@ -7216,6 +7283,7 @@ async def _post_session_event(
         data=data,
         max_attempts=max_attempts,
         timeout=timeout,
+        attempt_state=attempt_state,
     )
     response = result.response
     if response is not None and response.status_code < 400:
@@ -7252,6 +7320,7 @@ async def _post_session_event_inner(
     data: _JsonObject,
     max_attempts: int | None = _POST_MAX_ATTEMPTS,
     timeout: float | None = None,
+    attempt_state: _PostAttemptState | None = None,
 ) -> _PostResult:
     """
     Post one Omnigent session event with bounded transient retries.
@@ -7265,11 +7334,13 @@ async def _post_session_event_inner(
     :param max_attempts: Maximum POST attempts before giving up, e.g. ``3``;
         ``None`` retries transient failures indefinitely and requires an
         idempotent event payload.
-        Startup dead-letter replay passes ``1`` — its natural retry cadence is
-        the next startup, so an in-call retry loop only adds latency (#1579).
+        Startup dead-letter replay passes ``1`` so recovery remains bounded;
+        selected Codex transcript records are not retried after startup.
     :param timeout: Optional per-request timeout in seconds overriding the
         client default, e.g. ``5.0``. Replay passes a short value so a hung
         server fails fast instead of stalling startup on the 30s client default.
+    :param attempt_state: Optional mutable delivery state updated before each
+        POST and after each proven or ambiguous failure.
     :returns: A :class:`_PostResult` carrying the final response, or — for a
         legacy conversation item without ``source_id`` — whether the POST was
         abandoned after an ambiguous transport failure versus a proven-
@@ -7283,12 +7354,22 @@ async def _post_session_event_inner(
     attempt = 0
     while max_attempts is None or attempt < max_attempts:
         attempt += 1
+        if attempt_state is not None:
+            attempt_state.started = True
+            attempt_state.proven_undelivered = False
+            attempt_state.http_status = None
+            attempt_state.transport_error = None
         try:
             if timeout is None:
                 response = await client.post(url, json=payload)
             else:
                 response = await client.post(url, json=payload, timeout=timeout)
         except httpx.HTTPError as exc:
+            delivered_ambiguous = post_may_have_been_delivered(exc)
+            if attempt_state is not None:
+                attempt_state.may_have_been_delivered |= delivered_ambiguous
+                attempt_state.proven_undelivered = not attempt_state.may_have_been_delivered
+                attempt_state.transport_error = type(exc).__name__
             # Legacy conversation items without a source id are not
             # idempotent, so an ambiguous response-loss failure must not be
             # retried. Completed Codex items carry a stable source id and are
@@ -7296,7 +7377,7 @@ async def _post_session_event_inner(
             if (
                 event_type == "external_conversation_item"
                 and not idempotent
-                and post_may_have_been_delivered(exc)
+                and delivered_ambiguous
             ):
                 _logger.warning(
                     "skipping Codex session event after an ambiguous transport "
@@ -7321,6 +7402,10 @@ async def _post_session_event_inner(
         # connection could have an old failure misattributed to a later,
         # unrelated idle-watchdog stall.
         note_native_post_success()
+        if attempt_state is not None and response.status_code >= 400:
+            attempt_state.may_have_been_delivered = True
+            attempt_state.proven_undelivered = False
+            attempt_state.http_status = response.status_code
         if _post_response_is_final(response, attempt, max_attempts):
             return _PostResult(response=response)
         _log_unbounded_post_retry(event_type, session_id, attempt, response=response)

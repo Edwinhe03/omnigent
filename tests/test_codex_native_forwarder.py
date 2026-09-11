@@ -2018,7 +2018,9 @@ async def test_post_session_event_dead_letters_durable_event_on_permanent_failur
 
     fwd._reset_forward_health()
 
-    async def _failing_inner(client, session_id, *, event_type, data, max_attempts, timeout):
+    async def _failing_inner(
+        client, session_id, *, event_type, data, max_attempts, timeout, attempt_state=None
+    ):
         return fwd._PostResult(
             response=httpx.Response(500, request=httpx.Request("POST", "http://test"))
         )
@@ -2058,7 +2060,9 @@ async def test_post_session_event_does_not_dead_letter_ephemeral_event(
     """
     fwd._reset_forward_health()
 
-    async def _failing_inner(client, session_id, *, event_type, data, max_attempts, timeout):
+    async def _failing_inner(
+        client, session_id, *, event_type, data, max_attempts, timeout, attempt_state=None
+    ):
         return fwd._PostResult(
             response=httpx.Response(500, request=httpx.Request("POST", "http://test"))
         )
@@ -2096,7 +2100,9 @@ async def test_post_session_event_dead_letters_usage_on_permanent_failure(
 
     fwd._reset_forward_health()
 
-    async def _failing_inner(client, session_id, *, event_type, data, max_attempts, timeout):
+    async def _failing_inner(
+        client, session_id, *, event_type, data, max_attempts, timeout, attempt_state=None
+    ):
         return fwd._PostResult(
             response=httpx.Response(500, request=httpx.Request("POST", "http://test"))
         )
@@ -2639,8 +2645,10 @@ async def test_turn_started_waits_for_replay_before_replacing_active_turn(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_cancelled_idempotent_item_is_dead_lettered_for_safe_replay(tmp_path: Path) -> None:
-    """Shutdown during an in-flight completion keeps a replayable disk record."""
+async def test_cancelled_inflight_idempotent_item_is_dead_lettered_as_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """Shutdown during an in-flight completion keeps a forensic disk record."""
 
     class _BlockingPostClient:
         def __init__(self) -> None:
@@ -2687,6 +2695,211 @@ async def test_cancelled_idempotent_item_is_dead_lettered_for_safe_replay(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_cancelled_idempotent_item_in_retry_delay_is_proven_undelivered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after a connect failure creates a replay-eligible record."""
+    retry_delay_started = asyncio.Event()
+
+    class _ConnectFailureClient:
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict,
+            timeout: float | None = None,
+        ) -> httpx.Response:
+            del json, timeout
+            raise httpx.ConnectError("refused", request=httpx.Request("POST", url))
+
+    async def _block_retry_delay(_seconds: float) -> None:
+        retry_delay_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fwd, "_sleep", _block_retry_delay)
+    dead_letter_token = fwd._dead_letter_dir.set(tmp_path)
+    locks_token = fwd._conversation_item_locks.set({})
+    try:
+        task = asyncio.create_task(
+            fwd._post_external_item(
+                _ConnectFailureClient(),  # type: ignore[arg-type]
+                "conv_x",
+                item_type="message",
+                item_data={"role": "assistant", "content": []},
+                response_id="codex_turn_1",
+                source_id="thread_1:turn_1:item_1",
+            )
+        )
+        await asyncio.wait_for(retry_delay_started.wait(), timeout=5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        fwd._conversation_item_locks.reset(locks_token)
+        fwd._dead_letter_dir.reset(dead_letter_token)
+
+    import json as _json
+
+    record = _json.loads((tmp_path / "dead_letter.jsonl").read_text().splitlines()[0])
+    assert record["delivered_ambiguous"] is False
+    assert record["http_status"] is None
+    assert record["transport_error"] == "ConnectError"
+    assert record["payload"]["source_id"] == "thread_1:turn_1:item_1"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_item_stays_ambiguous_after_later_connect_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One ambiguous attempt makes the whole durable POST unsafe to cold-replay."""
+    second_retry_delay_started = asyncio.Event()
+
+    class _MixedFailureClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict,
+            timeout: float | None = None,
+        ) -> httpx.Response:
+            del json, timeout
+            self.calls += 1
+            request = httpx.Request("POST", url)
+            if self.calls == 1:
+                raise httpx.ReadTimeout("response lost", request=request)
+            raise httpx.ConnectError("refused", request=request)
+
+    sleep_calls = 0
+
+    async def _block_second_retry_delay(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            second_retry_delay_started.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(fwd, "_sleep", _block_second_retry_delay)
+    dead_letter_token = fwd._dead_letter_dir.set(tmp_path)
+    locks_token = fwd._conversation_item_locks.set({})
+    try:
+        task = asyncio.create_task(
+            fwd._post_external_item(
+                _MixedFailureClient(),  # type: ignore[arg-type]
+                "conv_x",
+                item_type="message",
+                item_data={"role": "assistant", "content": []},
+                response_id="codex_turn_1",
+                source_id="thread_1:turn_1:item_1",
+            )
+        )
+        await asyncio.wait_for(second_retry_delay_started.wait(), timeout=5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        fwd._conversation_item_locks.reset(locks_token)
+        fwd._dead_letter_dir.reset(dead_letter_token)
+
+    import json as _json
+
+    record = _json.loads((tmp_path / "dead_letter.jsonl").read_text().splitlines()[0])
+    assert record["delivered_ambiguous"] is True
+    assert record["http_status"] is None
+    assert record["transport_error"] == "ConnectError"
+    assert fwd._codex_dead_letter_safe_to_replay(record, session_id="conv_x") is False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_item_during_http_retry_delay_is_not_replayable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any HTTP response excludes a cancelled completion from cold replay."""
+    retry_delay_started = asyncio.Event()
+
+    class _RetryableResponseClient:
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict,
+            timeout: float | None = None,
+        ) -> httpx.Response:
+            del json, timeout
+            return httpx.Response(503, request=httpx.Request("POST", url))
+
+    async def _block_retry_delay(_seconds: float) -> None:
+        retry_delay_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fwd, "_sleep", _block_retry_delay)
+    dead_letter_token = fwd._dead_letter_dir.set(tmp_path)
+    locks_token = fwd._conversation_item_locks.set({})
+    try:
+        task = asyncio.create_task(
+            fwd._post_external_item(
+                _RetryableResponseClient(),  # type: ignore[arg-type]
+                "conv_x",
+                item_type="message",
+                item_data={"role": "assistant", "content": []},
+                response_id="codex_turn_1",
+                source_id="thread_1:turn_1:item_1",
+            )
+        )
+        await asyncio.wait_for(retry_delay_started.wait(), timeout=5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        fwd._conversation_item_locks.reset(locks_token)
+        fwd._dead_letter_dir.reset(dead_letter_token)
+
+    import json as _json
+
+    record = _json.loads((tmp_path / "dead_letter.jsonl").read_text().splitlines()[0])
+    assert record["delivered_ambiguous"] is True
+    assert record["http_status"] == 503
+    assert fwd._codex_dead_letter_safe_to_replay(record, session_id="conv_x") is False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_item_waiting_for_delivery_lock_is_not_dead_lettered(
+    tmp_path: Path,
+) -> None:
+    """Cancellation before the ordered POST begins must not invent a dead letter."""
+    client = _RecordingClient()
+    locks_token = fwd._conversation_item_locks.set({})
+    dead_letter_token = fwd._dead_letter_dir.set(tmp_path)
+    try:
+        async with fwd._conversation_item_delivery_scope("conv_x"):
+            task = asyncio.create_task(
+                fwd._post_external_item(
+                    client,  # type: ignore[arg-type]
+                    "conv_x",
+                    item_type="message",
+                    item_data={"role": "assistant", "content": []},
+                    response_id="codex_turn_2",
+                    source_id="thread_1:turn_2:item_2",
+                )
+            )
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    finally:
+        fwd._dead_letter_dir.reset(dead_letter_token)
+        fwd._conversation_item_locks.reset(locks_token)
+
+    assert client.posts == []
+    assert not (tmp_path / "dead_letter.jsonl").exists()
+
+
+@pytest.mark.asyncio
 async def test_post_session_event_inner_classifies_proven_undelivered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2724,7 +2937,9 @@ async def test_post_session_event_dead_letters_ambiguous_classification(
 
     fwd._reset_forward_health()
 
-    async def _ambiguous_inner(client, session_id, *, event_type, data, max_attempts, timeout):
+    async def _ambiguous_inner(
+        client, session_id, *, event_type, data, max_attempts, timeout, attempt_state=None
+    ):
         return fwd._PostResult(
             response=None, delivered_ambiguous=True, transport_error="ReadTimeout"
         )
@@ -2762,7 +2977,9 @@ async def test_post_session_event_dead_letters_records_http_status(
 
     fwd._reset_forward_health()
 
-    async def _failing_inner(client, session_id, *, event_type, data, max_attempts, timeout):
+    async def _failing_inner(
+        client, session_id, *, event_type, data, max_attempts, timeout, attempt_state=None
+    ):
         return fwd._PostResult(
             response=httpx.Response(503, request=httpx.Request("POST", "http://test"))
         )
@@ -2787,11 +3004,11 @@ async def test_post_session_event_dead_letters_records_http_status(
 
 
 @pytest.mark.asyncio
-async def test_replay_dead_letters_on_startup_reposts_proven_undelivered(
+async def test_pre_resume_recovery_reposts_proven_undelivered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    On startup, a proven-undelivered record is re-POSTed and removed (#1579).
+    Before cold resume, a proven-undelivered record is re-POSTed and removed.
 
     :param tmp_path: Pytest temp dir standing in for the bridge dir.
     :param monkeypatch: Pytest patcher (auto-restores the stubbed inner).
@@ -2800,7 +3017,7 @@ async def test_replay_dead_letters_on_startup_reposts_proven_undelivered(
         tmp_path,
         session_id="conv_codex1",
         event_type="external_conversation_item",
-        payload={"item_type": "message"},
+        payload={"item_type": "message", "source_id": "thread:turn:item"},
         reason="proven-undelivered transport failure after retries",
         delivered_ambiguous=False,
         http_status=None,
@@ -2809,7 +3026,9 @@ async def test_replay_dead_letters_on_startup_reposts_proven_undelivered(
 
     posted: list[dict] = []
 
-    async def _ok_inner(client, session_id, *, event_type, data, max_attempts, timeout):
+    async def _ok_inner(
+        client, session_id, *, event_type, data, max_attempts, timeout, attempt_state=None
+    ):
         posted.append(
             {
                 "session_id": session_id,
@@ -2824,12 +3043,19 @@ async def test_replay_dead_letters_on_startup_reposts_proven_undelivered(
         )
 
     monkeypatch.setattr(fwd, "_post_session_event_inner", _ok_inner)
-    await fwd._replay_dead_letters_on_startup(MagicMock(), tmp_path)
+    await fwd.recover_codex_transcript_dead_letters_before_resume(
+        MagicMock(),
+        bridge_dir=tmp_path,
+        session_id="conv_codex1",
+    )
 
     assert len(posted) == 1
     assert posted[0]["session_id"] == "conv_codex1"
     assert posted[0]["event_type"] == "external_conversation_item"
-    assert posted[0]["data"] == {"item_type": "message"}
+    assert posted[0]["data"] == {
+        "item_type": "message",
+        "source_id": "thread:turn:item",
+    }
     # Replay re-POSTs with a single attempt and a short timeout so a large file
     # or a hung server cannot stall startup.
     assert posted[0]["max_attempts"] == 1
@@ -2839,11 +3065,11 @@ async def test_replay_dead_letters_on_startup_reposts_proven_undelivered(
 
 
 @pytest.mark.asyncio
-async def test_replay_dead_letters_on_startup_skips_ambiguous(
+async def test_pre_resume_recovery_skips_ambiguous(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    On startup, an ambiguous record is never re-POSTed and is retained (#1579).
+    Before cold resume, an ambiguous record remains forensic-only.
 
     :param tmp_path: Pytest temp dir standing in for the bridge dir.
     :param monkeypatch: Pytest patcher (auto-restores the stubbed inner).
@@ -2852,7 +3078,7 @@ async def test_replay_dead_letters_on_startup_skips_ambiguous(
         tmp_path,
         session_id="conv_codex1",
         event_type="external_conversation_item",
-        payload={"item_type": "message"},
+        payload={"item_type": "message", "source_id": "thread:turn:item"},
         reason="ambiguous transport failure (may already be committed)",
         delivered_ambiguous=True,
     )
@@ -2867,11 +3093,102 @@ async def test_replay_dead_letters_on_startup_skips_ambiguous(
         )
 
     monkeypatch.setattr(fwd, "_post_session_event_inner", _inner)
-    await fwd._replay_dead_letters_on_startup(MagicMock(), tmp_path)
+    await fwd.recover_codex_transcript_dead_letters_before_resume(
+        MagicMock(),
+        bridge_dir=tmp_path,
+        session_id="conv_codex1",
+    )
 
     assert called is False
     # Ambiguous record retained as a forensic record.
     assert (tmp_path / "dead_letter.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_pre_resume_recovery_skips_legacy_transcript_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completed item without ``source_id`` remains forensic-only."""
+    fwd.append_dead_letter(
+        tmp_path,
+        session_id="conv_codex1",
+        event_type="external_conversation_item",
+        payload={"item_type": "message"},
+        reason="proven-undelivered transport failure after retries",
+        delivered_ambiguous=False,
+        transport_error="ConnectError",
+    )
+    inner = AsyncMock()
+    monkeypatch.setattr(fwd, "_post_session_event_inner", inner)
+
+    await fwd.recover_codex_transcript_dead_letters_before_resume(
+        MagicMock(),
+        bridge_dir=tmp_path,
+        session_id="conv_codex1",
+    )
+
+    inner.assert_not_awaited()
+    assert (tmp_path / "dead_letter.jsonl").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport_error", [None, "ReadTimeout", "WriteError"])
+async def test_pre_resume_recovery_requires_proven_no_send_transport_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transport_error: str | None,
+) -> None:
+    """A false ambiguity flag alone is insufficient proof that no bytes were sent."""
+    fwd.append_dead_letter(
+        tmp_path,
+        session_id="conv_codex1",
+        event_type="external_conversation_item",
+        payload={"item_type": "message", "source_id": "thread:turn:item"},
+        reason="untrusted legacy classification",
+        delivered_ambiguous=False,
+        transport_error=transport_error,
+    )
+    inner = AsyncMock()
+    monkeypatch.setattr(fwd, "_post_session_event_inner", inner)
+
+    await fwd.recover_codex_transcript_dead_letters_before_resume(
+        MagicMock(),
+        bridge_dir=tmp_path,
+        session_id="conv_codex1",
+    )
+
+    inner.assert_not_awaited()
+    assert (tmp_path / "dead_letter.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_pre_resume_recovery_does_not_retry_failure_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed one-shot replay is removed before newer live items can append."""
+    fwd.append_dead_letter(
+        tmp_path,
+        session_id="conv_codex1",
+        event_type="external_conversation_item",
+        payload={"item_type": "message", "source_id": "thread:turn:item"},
+        reason="proven-undelivered transport failure after retries",
+        delivered_ambiguous=False,
+        transport_error="ConnectError",
+    )
+
+    async def _still_failing(*_args, **_kwargs):
+        return fwd._PostResult(
+            response=httpx.Response(503, request=httpx.Request("POST", "http://test"))
+        )
+
+    monkeypatch.setattr(fwd, "_post_session_event_inner", _still_failing)
+    await fwd.recover_codex_transcript_dead_letters_before_resume(
+        MagicMock(),
+        bridge_dir=tmp_path,
+        session_id="conv_codex1",
+    )
+
+    assert not (tmp_path / "dead_letter.jsonl").exists()
 
 
 class _RecordingPostClient:

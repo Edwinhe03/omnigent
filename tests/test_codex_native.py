@@ -1956,6 +1956,82 @@ def test_supervise_forwarder_subscribes_existing_client_after_thread_discovery(
     assert fake_client.closed
 
 
+def test_supervise_forwarder_discards_stale_replayable_records_before_live_stream(
+    tmp_path: Path,
+) -> None:
+    """Fresh live startup cannot replay an older completion after newer traffic."""
+    codex_native_forwarder.append_dead_letter(
+        tmp_path,
+        session_id="conv_123",
+        event_type="external_conversation_item",
+        payload={"source_id": "thread_old:turn_old:item_old"},
+        reason="connect failed before send",
+        delivered_ambiguous=False,
+        transport_error="ConnectError",
+    )
+    codex_native_forwarder.append_dead_letter(
+        tmp_path,
+        session_id="conv_123",
+        event_type="external_conversation_item",
+        payload={"source_id": "thread_old:turn_old:item_ambiguous"},
+        reason="response lost",
+        delivered_ambiguous=True,
+        transport_error="ReadTimeout",
+    )
+    fake_client = _FakeCodexAppServerClient()
+
+    asyncio.run(
+        codex_native_forwarder.supervise_forwarder(
+            base_url="http://127.0.0.1:1",
+            headers={},
+            session_id="conv_123",
+            bridge_dir=tmp_path,
+            app_server_url=str(tmp_path / "app-server.sock"),
+            thread_id="thread_new",
+            client=fake_client,  # type: ignore[arg-type]
+        )
+    )
+
+    records = [
+        json.loads(line) for line in (tmp_path / "dead_letter.jsonl").read_text().splitlines()
+    ]
+    assert [record["payload"]["source_id"] for record in records] == [
+        "thread_old:turn_old:item_ambiguous"
+    ]
+
+
+def test_supervise_forwarder_stops_before_live_stream_when_sealing_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh live forwarding cannot start with stale replayable records unsealed."""
+    fake_client = _FakeCodexAppServerClient()
+
+    async def fail_sealing(*_args: object, **_kwargs: object) -> None:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(
+        codex_native_forwarder,
+        "discard_codex_transcript_dead_letters_before_live",
+        fail_sealing,
+    )
+
+    with pytest.raises(OSError, match="read-only filesystem"):
+        asyncio.run(
+            codex_native_forwarder.supervise_forwarder(
+                base_url="http://127.0.0.1:1",
+                headers={},
+                session_id="conv_123",
+                bridge_dir=tmp_path,
+                app_server_url=str(tmp_path / "app-server.sock"),
+                thread_id="thread_new",
+                client=fake_client,  # type: ignore[arg-type]
+            )
+        )
+
+    assert fake_client.requests == []
+
+
 def test_supervise_forwarder_resumes_when_it_opens_client(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -11248,6 +11324,194 @@ async def test_ensure_local_codex_resume_rollout_refreshes_existing_from_server(
     assert records[0]["payload"]["cwd"] == str(workspace)
     assert "authoritative server history" in json.dumps(records)
     assert "/stale/cwd" not in json.dumps(records)
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_codex_resume_rollout_recovers_dead_letter_before_fetch(
+    tmp_path: Path,
+) -> None:
+    """Cold resume repairs server history before rebuilding the local rollout."""
+    thread_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    bridge_dir = tmp_path / "bridge"
+    codex_home = bridge_dir / "codex-home"
+    server_items: list[dict[str, object]] = [
+        {
+            "id": "msg_user",
+            "response_id": "codex_turn_1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "finish the answer"}],
+        }
+    ]
+    codex_native_forwarder.append_dead_letter(
+        bridge_dir,
+        session_id="conv_codex",
+        event_type="external_conversation_item",
+        payload={
+            "source_id": f"{thread_id}:codex_turn_1:assistant",
+            "item_type": "message",
+            "item_data": {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "recovered final answer"}],
+            },
+            "response_id": "codex_turn_1",
+        },
+        reason="proven-undelivered transport failure after retries",
+        delivered_ambiguous=False,
+        transport_error="ConnectError",
+    )
+    request_order: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_order.append(request.url.path)
+        if request.url.path.endswith("/events"):
+            event = json.loads(request.content)
+            data = event["data"]
+            server_items.append(
+                {
+                    "id": data["source_id"],
+                    "response_id": data["response_id"],
+                    "type": data["item_type"],
+                    **data["item_data"],
+                }
+            )
+            return httpx.Response(200)
+        assert request.url.path.endswith("/items")
+        return httpx.Response(200, json={"data": server_items, "has_more": False})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        rollout = await codex_native._ensure_local_codex_resume_rollout(
+            client,
+            session_id="conv_codex",
+            external_session_id=thread_id,
+            codex_home=codex_home,
+            workspace=(tmp_path / "workspace").resolve(),
+            model_provider="omnigent_databricks",
+            codex_path=None,
+        )
+
+    assert request_order == [
+        "/v1/sessions/conv_codex/events",
+        "/v1/sessions/conv_codex/items",
+    ]
+    assert not (bridge_dir / "dead_letter.jsonl").exists()
+    assert "recovered final answer" in rollout.read_text()
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_codex_resume_rollout_drops_failed_replay_before_fetch(
+    tmp_path: Path,
+) -> None:
+    """A failed recovery attempt cannot append after post-resume live traffic."""
+    thread_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    bridge_dir = tmp_path / "bridge"
+    codex_home = bridge_dir / "codex-home"
+    existing = _write_source_rollout(
+        codex_home=codex_home,
+        thread_id=thread_id,
+        source_cwd="/local/only",
+    )
+    codex_native_forwarder.append_dead_letter(
+        bridge_dir,
+        session_id="conv_codex",
+        event_type="external_conversation_item",
+        payload={
+            "source_id": f"{thread_id}:codex_turn_1:assistant",
+            "item_type": "message",
+            "item_data": {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "uncommitted answer"}],
+            },
+            "response_id": "codex_turn_1",
+        },
+        reason="proven-undelivered transport failure after retries",
+        delivered_ambiguous=False,
+        transport_error="ConnectError",
+    )
+    request_order: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_order.append(request.url.path)
+        if request.url.path.endswith("/events"):
+            return httpx.Response(503)
+        assert request.url.path.endswith("/items")
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "msg_server",
+                        "response_id": "codex_turn_server",
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "server baseline"}],
+                    }
+                ],
+                "has_more": False,
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        rollout = await codex_native._ensure_local_codex_resume_rollout(
+            client,
+            session_id="conv_codex",
+            external_session_id=thread_id,
+            codex_home=codex_home,
+            workspace=(tmp_path / "workspace").resolve(),
+            model_provider="omnigent_databricks",
+            codex_path=None,
+        )
+
+    assert request_order == [
+        "/v1/sessions/conv_codex/events",
+        "/v1/sessions/conv_codex/items",
+    ]
+    assert rollout == existing
+    assert not (bridge_dir / "dead_letter.jsonl").exists()
+    rollout_text = rollout.read_text()
+    assert "server baseline" in rollout_text
+    assert "uncommitted answer" not in rollout_text
+    assert "/local/only" not in rollout_text
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_codex_resume_rollout_stops_when_local_sealing_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cold resume cannot proceed if stale replay state cannot be sealed locally."""
+    thread_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
+    history_requested = False
+
+    async def fail_recovery(*_args: object, **_kwargs: object) -> None:
+        raise OSError("read-only filesystem")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal history_requested
+        history_requested = True
+        return httpx.Response(200, json={"data": [], "has_more": False})
+
+    monkeypatch.setattr(
+        codex_native,
+        "recover_codex_transcript_dead_letters_before_resume",
+        fail_recovery,
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with pytest.raises(OSError, match="read-only filesystem"):
+            await codex_native._ensure_local_codex_resume_rollout(
+                client,
+                session_id="conv_codex",
+                external_session_id=thread_id,
+                codex_home=tmp_path / "bridge" / "codex-home",
+                workspace=(tmp_path / "workspace").resolve(),
+                model_provider="omnigent_databricks",
+                codex_path=None,
+            )
+
+    assert history_requested is False
 
 
 @pytest.mark.asyncio
