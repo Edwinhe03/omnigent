@@ -1706,6 +1706,11 @@ class SessionCreateMetadata(BaseModel):
         provision on ``host_type: "managed"`` (one of the server's
         ``sandbox_providers``); ``None`` takes the server's first. Only
         valid with ``host_type: "managed"``.
+    :param host_launch_contract: Optional atomic external-host launch
+        contract requested by a client. ``"result_v1"`` guarantees the
+        response reports the post-create launch result instead of failing
+        after the session row exists. Older servers reject this field before
+        creating a session, allowing a safe legacy fallback.
     """
 
     title: str | None = Field(default=None, max_length=USER_SESSION_TITLE_MAX_CHARS)
@@ -1718,6 +1723,7 @@ class SessionCreateMetadata(BaseModel):
     parent_session_id: str | None = None
     host_type: Literal["external", "managed"] = "external"
     sandbox_provider: str | None = None
+    host_launch_contract: Literal["result_v1"] | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1745,6 +1751,9 @@ class SessionCreateMetadata(BaseModel):
         # the FastAPI/click-importing managed-hosts module in at module
         # scope would risk import cycles.
         from omnigent.server.managed_hosts import is_repo_workspace, parse_repo_workspace
+
+        if self.host_launch_contract is not None and self.host_id is None:
+            raise ValueError("host_launch_contract requires host_id")
 
         if self.host_type == "managed":
             if self.host_id is not None:
@@ -1784,11 +1793,27 @@ class CreatedSessionResponse(BaseModel):
         from the uploaded bundle, e.g. ``"ag_abc123"``.
     :param agent_name: Agent name loaded from the uploaded bundle's
         spec, e.g. ``"code-assistant"``.
+    :param runner_id: Runner bound by an atomic caller-host launch, or
+        ``None`` when no launch result was requested or no runner was bound.
+    :param runner_launch_status: ``"launched"``, ``"failed"``, or
+        ``"indeterminate"`` for the ``result_v1`` caller-host launch
+        contract; ``None`` otherwise.
+    :param runner_launch_error: Human-readable launch failure for recovery;
+        ``None`` on success or when no result contract was requested.
     """
 
     session_id: str
     agent_id: str
     agent_name: str
+    runner_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    runner_launch_status: Literal["launched", "failed", "indeterminate"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    runner_launch_error: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class SessionLabelsResponse(BaseModel):

@@ -139,6 +139,68 @@ def write_daemon_record(
         (root / "host.pid").write_text(f"{record.pid}\n{record.target}\n")
 
 
+def daemon_connection_marker_path(record_path: Path) -> Path:
+    """Return the sidecar path holding a daemon's connected PID marker."""
+    return record_path.with_name(f"{record_path.name}.connected")
+
+
+def daemon_connection_is_marked(record_path: Path, *, pid: int) -> bool:
+    """Return whether *record_path* has a connection marker for *pid*."""
+    try:
+        marked_pid = int(daemon_connection_marker_path(record_path).read_text().strip())
+    except (OSError, ValueError):
+        return False
+    return marked_pid == pid
+
+
+def clear_daemon_connection_marker(record_path: Path) -> None:
+    """Remove a stale connection marker for *record_path*, if present."""
+    with contextlib.suppress(OSError):
+        daemon_connection_marker_path(record_path).unlink()
+
+
+def update_daemon_connection_state(
+    record_path: Path,
+    *,
+    pid: int,
+    connected: bool,
+) -> bool:
+    """Update a live daemon's PID-guarded connection sidecar.
+
+    Connection state is separate from the lifecycle record so this best-effort
+    update cannot clobber concurrent writes to fields such as
+    ``resolved_server_url``. The record PID guard prevents a superseded daemon
+    from publishing a fresh marker; disconnect only removes its own PID marker.
+
+    :param record_path: Registry record owned by the daemon.
+    :param pid: Current daemon process id.
+    :param connected: New WebSocket connection state.
+    :returns: ``True`` when the matching record was updated, else ``False``.
+    """
+    marker_path = daemon_connection_marker_path(record_path)
+    if connected:
+        try:
+            payload = json.loads(record_path.read_text())
+            record_pid = int(payload["pid"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return False
+        if record_pid != pid:
+            return False
+        try:
+            marker_path.write_text(f"{pid}\n")
+        except OSError:
+            return False
+        return True
+
+    if not daemon_connection_is_marked(record_path, pid=pid):
+        return False
+    try:
+        marker_path.unlink()
+    except OSError:
+        return False
+    return True
+
+
 def record_flock_is_held(record_path: Path) -> bool | None:
     """Return whether a live process holds the record's flock.
 
@@ -222,6 +284,11 @@ class DaemonLifecycleLock:
     def target(self) -> str:
         """Return the daemon target this lock guards."""
         return self._target
+
+    @property
+    def record_path(self) -> Path:
+        """Return the registry record path whose inode this lock owns."""
+        return self._record_path
 
     def acquire(self) -> bool:
         """Take the exclusive lifetime lock on the record file.

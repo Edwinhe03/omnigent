@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
+from typing import Literal, overload
 
 import click
 import httpx
@@ -74,6 +75,11 @@ from omnigent.harnesses.codex_native.forwarder import (
 )
 from omnigent.harnesses.codex_native.state import read_launch_state, write_launch_state
 from omnigent.host.daemon_launch import (
+    AtomicHostCreateFallback,
+    DaemonSessionCreateResult,
+    atomic_host_create_fallback_reason,
+    daemon_session_create_result,
+    daemon_session_id,
     error_text,
     launch_or_reuse_daemon_runner,
     open_daemon_client,
@@ -422,6 +428,7 @@ def run_codex_native(
     model: str | None = None,
     prompt: str | None = None,
     auto_open_conversation: bool = False,
+    host_already_connected: bool = False,
 ) -> None:
     """
     Launch Codex TUI in an Omnigent terminal.
@@ -437,6 +444,8 @@ def run_codex_native(
     :param prompt: Optional first prompt to send after launch.
     :param auto_open_conversation: When ``True``, open the
         browser conversation URL after the session is prepared.
+    :param host_already_connected: Whether the target daemon was connected
+        before this invocation ensured the backend.
     :returns: None after the terminal attach session ends.
     :raises click.ClickException: If setup fails.
     """
@@ -463,6 +472,7 @@ def run_codex_native(
             model=model,
             prompt=prompt,
             auto_open_conversation=auto_open_conversation,
+            host_already_connected=host_already_connected,
         )
 
 
@@ -773,6 +783,7 @@ def _run_with_remote_server(
     model: str | None,
     prompt: str | None,
     auto_open_conversation: bool = False,
+    host_already_connected: bool = False,
 ) -> None:
     """
     Launch Codex on an Omnigent server via a daemon-spawned runner.
@@ -787,6 +798,8 @@ def _run_with_remote_server(
     :param prompt: Optional first prompt.
     :param auto_open_conversation: When ``True``, open the
         browser conversation URL after the session is prepared.
+    :param host_already_connected: Whether the daemon was already connected
+        before backend setup for this invocation.
     :returns: None.
     """
     from omnigent.chat import _bundle_agent, _remote_headers, _server_auth
@@ -830,6 +843,7 @@ def _run_with_remote_server(
                     model=model,
                     host_id=host_id,
                     workspace=str(Path.cwd().resolve()),
+                    host_already_connected=host_already_connected,
                     startup_progress=progress,
                 )
             if resolved_session_id is None:
@@ -897,6 +911,7 @@ async def _prepare_codex_terminal_via_daemon(
     model: str | None,
     host_id: str,
     workspace: str,
+    host_already_connected: bool = False,
     startup_progress: RunnerStartupProgress | None = None,
 ) -> PreparedCodexTerminal:
     """
@@ -920,6 +935,9 @@ async def _prepare_codex_terminal_via_daemon(
     :param host_id: Local host daemon id, e.g. ``"host_abc123"``.
     :param workspace: Absolute workspace path for the runner cwd, e.g.
         ``"/Users/me/repo"``.
+    :param host_already_connected: Whether the daemon was connected before
+        this CLI invocation ensured it. Only this deterministic warm signal
+        enables inline create-and-launch.
     :param startup_progress: Optional user-visible progress renderer,
         e.g. a handle from :func:`runner_startup_progress`.
     :returns: Prepared terminal details for attaching.
@@ -930,19 +948,80 @@ async def _prepare_codex_terminal_via_daemon(
     async with open_daemon_client(base_url, headers, host_id, timeout=timeout) as client:
         reattached = session_id is not None
         fresh_session = session_id is None
+        runner_id: str | None = None
+        runner_launch_fresh = fresh_session
         if session_id is None:
             if session_bundle is None:
                 raise click.ClickException("Creating a Codex session requires a session bundle.")
             _update_startup_progress(startup_progress, "Creating Codex session...")
-            session_id, _ = await asyncio.gather(
-                _create_codex_session(
-                    client,
-                    session_bundle,
-                    bridge_id=None,
-                    terminal_launch_args=persist_args or None,
-                ),
-                wait_for_host_online(client, host_id, timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S),
-            )
+            if host_already_connected:
+                try:
+                    created = await _create_codex_session(
+                        client,
+                        session_bundle,
+                        bridge_id=None,
+                        terminal_launch_args=persist_args or None,
+                        host_id=host_id,
+                        workspace=workspace,
+                        require_host_launch_result=True,
+                    )
+                except AtomicHostCreateFallback as exc:
+                    _logger.info(
+                        "Atomic Codex create-and-launch unavailable; using legacy flow: %s",
+                        exc,
+                    )
+                    created, _ = await asyncio.gather(
+                        _create_codex_session(
+                            client,
+                            session_bundle,
+                            bridge_id=None,
+                            terminal_launch_args=persist_args or None,
+                        ),
+                        wait_for_host_online(
+                            client,
+                            host_id,
+                            timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S,
+                        ),
+                    )
+                else:
+                    if not isinstance(created, DaemonSessionCreateResult):
+                        raise click.ClickException(
+                            "Codex atomic session creation did not return launch metadata."
+                        )
+                    session_id = created.session_id
+                    if created.runner_launch_status == "indeterminate":
+                        detail = created.runner_launch_error or "the server lost the launch result"
+                        raise click.ClickException(
+                            f"Codex session {session_id!r} was created, but its runner launch "
+                            f"outcome is unknown ({detail}). Omnigent will not launch another "
+                            f"runner automatically; retry with --resume {session_id}."
+                        )
+                    runner_launch_fresh = False
+                    if created.runner_launch_status == "launched":
+                        runner_id = created.runner_id
+                    else:
+                        await wait_for_host_online(
+                            client,
+                            host_id,
+                            timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S,
+                        )
+                if session_id is None:
+                    session_id = daemon_session_id(created)
+            else:
+                created, _ = await asyncio.gather(
+                    _create_codex_session(
+                        client,
+                        session_bundle,
+                        bridge_id=None,
+                        terminal_launch_args=persist_args or None,
+                    ),
+                    wait_for_host_online(
+                        client,
+                        host_id,
+                        timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S,
+                    ),
+                )
+                session_id = daemon_session_id(created)
         else:
             _update_startup_progress(startup_progress, "Loading Codex session...")
             payload = await _fetch_codex_session(client, session_id)
@@ -1000,13 +1079,14 @@ async def _prepare_codex_terminal_via_daemon(
             await wait_for_host_online(client, host_id, timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S)
         _update_startup_progress(startup_progress, "Starting runner...")
         record_startup_event("runner_requested", session_id=session_id)
-        runner_id = await launch_or_reuse_daemon_runner(
-            client,
-            host_id=host_id,
-            session_id=session_id,
-            workspace=workspace,
-            fresh=fresh_session,
-        )
+        if runner_id is None:
+            runner_id = await launch_or_reuse_daemon_runner(
+                client,
+                host_id=host_id,
+                session_id=session_id,
+                workspace=workspace,
+                fresh=runner_launch_fresh,
+            )
         _update_startup_progress(startup_progress, "Waiting for runner...")
         await wait_for_runner_online(client, runner_id, timeout_s=_DAEMON_RUNNER_ONLINE_TIMEOUT_S)
         record_startup_event("runner_connected")
@@ -1646,13 +1726,42 @@ async def _attach_direct_tmux(socket_path: Path, tmux_target: str) -> None:
     record_startup_event("terminal_attach_exited", exit_code=exit_code)
 
 
+@overload
 async def _create_codex_session(
     client: httpx.AsyncClient,
     bundle: bytes,
     *,
     bridge_id: str | None,
     terminal_launch_args: list[str] | None = None,
-) -> str:
+    host_id: str | None = None,
+    workspace: str | None = None,
+    require_host_launch_result: Literal[False] = False,
+) -> str: ...
+
+
+@overload
+async def _create_codex_session(
+    client: httpx.AsyncClient,
+    bundle: bytes,
+    *,
+    bridge_id: str | None,
+    terminal_launch_args: list[str] | None = None,
+    host_id: str | None = None,
+    workspace: str | None = None,
+    require_host_launch_result: Literal[True],
+) -> DaemonSessionCreateResult: ...
+
+
+async def _create_codex_session(
+    client: httpx.AsyncClient,
+    bundle: bytes,
+    *,
+    bridge_id: str | None,
+    terminal_launch_args: list[str] | None = None,
+    host_id: str | None = None,
+    workspace: str | None = None,
+    require_host_launch_result: bool = False,
+) -> str | DaemonSessionCreateResult:
     """
     Create a bundled terminal-first Codex session.
 
@@ -1664,7 +1773,12 @@ async def _create_codex_session(
     :param terminal_launch_args: Pass-through Codex CLI args to persist
         for runner-owned terminal launch, e.g.
         ``["--config", "approval_policy=on-request"]``.
-    :returns: New Omnigent session id.
+    :param host_id: Connected external host for atomic create-and-launch.
+    :param workspace: Absolute host workspace, required with ``host_id``.
+    :param require_host_launch_result: Request the race-safe ``result_v1``
+        launch contract. Older servers reject it before creating a session.
+    :returns: New session id for a legacy create, or the atomic launch result
+        when ``require_host_launch_result`` is true.
     """
     labels = dict(_SESSION_LABELS)
     if bridge_id is not None:
@@ -1674,22 +1788,40 @@ async def _create_codex_session(
     }
     if terminal_launch_args:
         metadata["terminal_launch_args"] = terminal_launch_args
-    resp = await client.post(
-        "/v1/sessions",
-        data={"metadata": json.dumps(metadata)},
-        files={"bundle": ("codex-native-ui.tar.gz", bundle, "application/gzip")},
-        timeout=120.0,
-    )
+    if host_id is not None:
+        metadata["host_id"] = host_id
+        metadata["workspace"] = workspace
+    if require_host_launch_result:
+        metadata["host_launch_contract"] = "result_v1"
+    try:
+        resp = await client.post(
+            "/v1/sessions",
+            data={"metadata": json.dumps(metadata)},
+            files={"bundle": ("codex-native-ui.tar.gz", bundle, "application/gzip")},
+            timeout=120.0,
+        )
+    except httpx.TimeoutException as exc:
+        if require_host_launch_result:
+            raise click.ClickException(
+                "Codex atomic session creation timed out. The server may have created "
+                "the session, so Omnigent will not retry and risk a duplicate."
+            ) from exc
+        raise
     if resp.status_code >= 400:
+        if require_host_launch_result:
+            fallback_reason = atomic_host_create_fallback_reason(resp)
+            if fallback_reason is not None:
+                raise AtomicHostCreateFallback(fallback_reason)
         raise click.ClickException(
             f"Codex session creation failed ({resp.status_code}): {error_text(resp)}"
         )
-    body = resp.json()
-    new_session_id = body.get("session_id")
-    if not isinstance(new_session_id, str) or not new_session_id:
-        raise click.ClickException("Codex session creation response did not include session_id.")
-    record_startup_event("session_resolved", session_id=new_session_id)
-    return new_session_id
+    result = daemon_session_create_result(
+        resp,
+        harness_name="Codex",
+        atomic=require_host_launch_result,
+    )
+    record_startup_event("session_resolved", session_id=result.session_id)
+    return result if require_host_launch_result else result.session_id
 
 
 async def _fetch_codex_session(client: httpx.AsyncClient, session_id: str) -> _JsonObject:

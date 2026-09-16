@@ -15,9 +15,13 @@ from omnigent.host.connect import HostProcess
 from omnigent.host.daemon_lifecycle import (
     DaemonLifecycleLock,
     HostDaemonRecord,
+    daemon_connection_is_marked,
+    daemon_connection_marker_path,
     daemon_record_path,
     normalize_daemon_target,
     record_flock_is_held,
+    update_daemon_connection_state,
+    write_daemon_record,
 )
 from omnigent.host.identity import HostIdentity
 
@@ -58,6 +62,101 @@ def test_equivalent_server_urls_share_record_path(tmp_path: Path) -> None:
     assert daemon_record_path(canonical, base_dir=tmp_path) == daemon_record_path(
         equivalent, base_dir=tmp_path
     )
+
+
+def test_connection_state_update_is_pid_guarded(tmp_path: Path) -> None:
+    target = normalize_daemon_target("https://x.example.com/api")
+    path = daemon_record_path(target, base_dir=tmp_path)
+    write_daemon_record(
+        HostDaemonRecord(
+            pid=123,
+            target=target,
+            mode="server",
+            server_url=target,
+            log_path=None,
+            started_at=1,
+        ),
+        base_dir=tmp_path,
+    )
+
+    assert update_daemon_connection_state(path, pid=123, connected=True) is True
+    assert daemon_connection_is_marked(path, pid=123) is True
+    assert update_daemon_connection_state(path, pid=456, connected=False) is False
+    assert daemon_connection_is_marked(path, pid=123) is True
+    assert update_daemon_connection_state(path, pid=123, connected=False) is True
+    assert daemon_connection_marker_path(path).exists() is False
+
+
+def test_connection_marker_does_not_rewrite_daemon_record(tmp_path: Path) -> None:
+    target = normalize_daemon_target("https://x.example.com/api")
+    path = daemon_record_path(target, base_dir=tmp_path)
+    record = HostDaemonRecord(
+        pid=123,
+        target=target,
+        mode="server",
+        server_url=target,
+        log_path="host.log",
+        started_at=1,
+        resolved_server_url="https://resolved.example.com",
+        config_sig="sig",
+    )
+    write_daemon_record(record, base_dir=tmp_path)
+    before = path.read_bytes()
+
+    assert update_daemon_connection_state(path, pid=123, connected=True) is True
+
+    assert path.read_bytes() == before
+
+
+def test_cli_connected_marker_requires_live_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent import cli
+
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    target = normalize_daemon_target("https://x.example.com/api")
+    record = cli._HostDaemonRecord(
+        pid=123,
+        target=target,
+        mode="server",
+        server_url=target,
+        log_path=None,
+        started_at=1,
+    )
+    cli._write_daemon_record(record)
+    assert update_daemon_connection_state(cli._daemon_record_path(target), pid=123, connected=True)
+    monkeypatch.setattr(cli, "_daemon_owner_is_live", lambda record: True)
+    assert cli._host_daemon_is_connected(target) is True
+
+    monkeypatch.setattr(cli, "_daemon_owner_is_live", lambda record: False)
+    assert cli._host_daemon_is_connected(target) is False
+
+
+def test_daemon_record_without_connection_sidecar_is_disconnected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent import cli
+
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    target = normalize_daemon_target("https://x.example.com/api")
+    path = cli._daemon_record_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "pid": 123,
+                "target": target,
+                "mode": "server",
+                "server_url": target,
+                "started_at": 1,
+            }
+        )
+    )
+
+    record = cli._read_daemon_record(path)
+    assert record is not None
+    monkeypatch.setattr(cli, "_daemon_owner_is_live", lambda record: True)
+    assert cli._host_daemon_is_connected(target) is False
 
 
 def test_find_daemon_record_reuses_legacy_url_spelling(

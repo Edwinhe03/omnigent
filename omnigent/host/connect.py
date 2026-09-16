@@ -46,7 +46,7 @@ from omnigent.gateway_inference import gateway_inference_map
 from omnigent.harness_aliases import canonicalize_harness, is_claude_sdk_harness_name
 from omnigent.harness_availability import HARNESS_BINARY_MISSING, HarnessAvailability
 from omnigent.host import HOST_FATAL_EXIT_CODE
-from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
+from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, update_daemon_connection_state
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     WORKSPACE_MISSING_ERROR_CODE,
@@ -3921,6 +3921,7 @@ class HostProcess:
             # between connections park in _unreported_exits instead of
             # racing a half-closed socket.
             self._ws = None
+            await self._update_daemon_connection_state(False)
             # Close the tunnel context whether the serve loop returned
             # normally or raised (disconnect → reconnect). Mirrors the
             # ``async with`` this replaced; the manual enter is only so the
@@ -4066,6 +4067,7 @@ class HostProcess:
             raise HostConnectError(f"Could not encode host.hello: {exc}") from exc
         await ws.send(encoded_hello)
         self._ws = ws
+        await self._update_daemon_connection_state(True)
         # Reports raised while disconnected must wait until registration; the
         # server cannot route them before this connection owns the host.
         for runner_id, error in list(self._unreported_exits.items()):
@@ -4116,6 +4118,26 @@ class HostProcess:
             readiness_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await readiness_task
+
+    async def _update_daemon_connection_state(self, connected: bool) -> None:
+        """Persist this daemon's current host-tunnel state when registered.
+
+        Foreground hosts have no lifecycle record and therefore no marker.
+        Registry IO is best-effort and off the event loop; failure only
+        disables the warm-launch optimization for the next CLI invocation.
+
+        :param connected: Whether the host tunnel has completed ``host.hello``.
+        :returns: None.
+        """
+        lock = self._lifecycle_lock
+        if lock is None:
+            return
+        await asyncio.to_thread(
+            update_daemon_connection_state,
+            lock.record_path,
+            pid=os.getpid(),
+            connected=connected,
+        )
 
     async def _harness_readiness_loop(
         self,

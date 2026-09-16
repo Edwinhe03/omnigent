@@ -146,8 +146,7 @@ async def test_launch_or_reuse_daemon_runner_clears_stale_binding() -> None:
     assert runner_id == "runner_fresh"
     # The stale binding was cleared (runner_id="") strictly before the
     # launch — the ordering the atomic NULL-bind requires.
-    assert ("patch", {"runner_id": ""}) in events
-    assert events.index(("patch", {"runner_id": ""})) < events.index(("launch", None))
+    assert events == [("patch", {"runner_id": ""}), ("launch", None)]
 
 
 async def test_launch_or_reuse_daemon_runner_fresh_skips_session_get() -> None:

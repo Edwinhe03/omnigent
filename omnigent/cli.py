@@ -65,6 +65,12 @@ from omnigent.host.daemon_lifecycle import (
     HostDaemonRecord as _HostDaemonRecord,
 )
 from omnigent.host.daemon_lifecycle import (
+    clear_daemon_connection_marker as _clear_daemon_connection_marker,
+)
+from omnigent.host.daemon_lifecycle import (
+    daemon_connection_is_marked as _daemon_connection_is_marked,
+)
+from omnigent.host.daemon_lifecycle import (
     daemon_record_path as _daemon_record_path_for,
 )
 from omnigent.host.daemon_lifecycle import (
@@ -2846,6 +2852,7 @@ def _delete_daemon_record(record: _HostDaemonRecord) -> None:
     """
     with contextlib.suppress(OSError):
         _daemon_record_path(record.target).unlink()
+    _clear_daemon_connection_marker(_daemon_record_path(record.target))
     legacy = _read_host_pid_file()
     if legacy is not None and legacy[1] == record.target:
         with contextlib.suppress(OSError):
@@ -3059,6 +3066,27 @@ def _daemon_owner_is_live(record: _HostDaemonRecord) -> bool:
     if _record_flock_is_held(_daemon_record_path(record.target)) is True:
         return True
     return _pid_is_recorded_daemon(record)
+
+
+def _host_daemon_is_connected(server_url: str | None) -> bool:
+    """Return whether a live daemon was already connected for *server_url*.
+
+    This is intentionally a local-only signal: it performs no server request,
+    so warm native launches can decide whether to use atomic create-and-launch
+    without adding a probe round trip. Missing markers from older daemon
+    records, stale PIDs, and URL spellings that do not match a registered
+    target all conservatively return ``False`` and retain the legacy overlap.
+
+    :param server_url: Configured server URL, or ``None`` for local mode.
+    :returns: ``True`` only for a live record marked connected.
+    """
+    target = _normalize_daemon_target(server_url)
+    record = _find_daemon_record(target)
+    return bool(
+        record is not None
+        and _daemon_owner_is_live(record)
+        and _daemon_connection_is_marked(_daemon_record_path(record.target), pid=record.pid)
+    )
 
 
 def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
@@ -7615,6 +7643,7 @@ def _dispatch_native_terminal_harness(
             f"the REPL-only option(s) {', '.join(unsupported)} have no effect there — remove them."
         )
 
+    host_already_connected = _host_daemon_is_connected(server)
     server = _ensure_backend(server)
     passthrough = ("--model", model) if model else ()
 
@@ -7654,6 +7683,8 @@ def _dispatch_native_terminal_harness(
         launcher_kwargs[spec.args_param] = passthrough
     if spec.prompt_param is not None:
         launcher_kwargs[spec.prompt_param] = prompt
+    if native_agent.key in {"claude", "codex"}:
+        launcher_kwargs["host_already_connected"] = host_already_connected
 
     launcher = getattr(import_module(spec.module), spec.function)
     launcher(**launcher_kwargs)

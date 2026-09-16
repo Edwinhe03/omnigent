@@ -73,6 +73,7 @@ def register_native_commands(cli: click.Group) -> None:
     # objects once here would capture the pre-patch originals.
     _build_kiro_launch_args = _late_bound(lambda: _cli._build_kiro_launch_args)
     _ensure_backend = _late_bound(lambda: _cli._ensure_backend)
+    _host_daemon_is_connected = _late_bound(lambda: _cli._host_daemon_is_connected)
     _load_effective_config = _late_bound(lambda: _cli._load_effective_config)
     _reject_reserved_kiro_resume_args = _late_bound(lambda: _cli._reject_reserved_kiro_resume_args)
     _reject_reserved_devin_resume_args = _late_bound(
@@ -263,6 +264,7 @@ def register_native_commands(cli: click.Group) -> None:
         # owns the runner; the CLI only connects. ``--host`` is now redundant
         # (the daemon is always ensured) and kept only as a no-op for scripts.
         startup_profiler.mark("ensuring backend")
+        host_already_connected = _host_daemon_is_connected(server)
         server = _ensure_backend(server)
         startup_profiler.mark("backend ready", detail=f"server={server}")
 
@@ -308,6 +310,7 @@ def register_native_commands(cli: click.Group) -> None:
             prompt=prompt,
             use_claude_config=use_claude_config,
             auto_open_conversation=auto_open_conversation,
+            host_already_connected=host_already_connected,
             startup_profiler=startup_profiler,
             command=resolved_command,
         )
@@ -428,6 +431,7 @@ def register_native_commands(cli: click.Group) -> None:
         # remote otherwise) and resolve the concrete Omnigent server URL. Codex follows
         # the same ownership model as attach/run/claude: the daemon-spawned runner
         # owns the app-server and TUI; the CLI attaches to the tmux terminal.
+        host_already_connected = _host_daemon_is_connected(server)
         server = _ensure_backend(server)
 
         resolved_session_id = (
@@ -454,6 +458,7 @@ def register_native_commands(cli: click.Group) -> None:
             model=model,
             prompt=prompt,
             auto_open_conversation=auto_open_conversation,
+            host_already_connected=host_already_connected,
             command=resolved_command,
         )
 

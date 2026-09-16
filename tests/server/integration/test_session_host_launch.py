@@ -572,6 +572,8 @@ async def test_inline_launch_failure_still_returns_bound_session(
     assert resp.status_code == 201, f"expected 201 despite launch failure, got {resp.status_code}"
     body = resp.json()
     assert body["host_id"] == _HOST_ID
+    assert "runner_launch_status" not in body
+    assert "runner_launch_error" not in body
     # The runner is bound even though the host declined: the session
     # row was atomically bound (with a real token-derived id) before
     # the launch frame was sent, and the failure path leaves it in
@@ -586,6 +588,57 @@ async def test_inline_launch_failure_still_returns_bound_session(
         "runner binding should persist even when the host reports launch failure"
     )
     assert conv.host_id == _HOST_ID
+
+
+async def test_json_external_host_create_keeps_prebind_host_conflict_loud(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host disappearing after JSON workspace validation remains a 409.
+
+    The atomic multipart contract converts this demonstrably post-create
+    condition into launch-result metadata. The existing application/json
+    create contract does not: it returns the host conflict as an error. This
+    pins the explicit ``report_launch_result=False`` call site and prevents a
+    required-argument regression from turning Web UI creates into a 500.
+    """
+    comm = await _connect_host(app)
+    agent = await create_test_agent(client)
+    registry = app.state.host_registry
+    conn = registry.get(_HOST_ID)
+    assert conn is not None
+    original_send = registry.send_text
+
+    def disconnect_after_workspace_validation(connection: HostConnection, data: str) -> None:
+        frame = decode_host_frame(data)
+        if isinstance(frame, HostStatFrame):
+            connection.pending_stats[frame.request_id].set_result(
+                {
+                    "status": "ok",
+                    "exists": True,
+                    "type": "directory",
+                    "canonical_path": frame.path,
+                }
+            )
+            registry.deregister(
+                connection.host_id,
+                workspace_id=connection.workspace_id,
+                conn=connection,
+            )
+            return
+        original_send(connection, data)
+
+    monkeypatch.setattr(registry, "send_text", disconnect_after_workspace_validation)
+    response = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "host_id": _HOST_ID, "workspace": _WORKSPACE},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "conflict"
+    assert "host is offline" in response.json()["error"]["message"]
+    comm.stop()
 
 
 @pytest.mark.parametrize("disconnect", [False, True], ids=["replaced", "disconnected"])

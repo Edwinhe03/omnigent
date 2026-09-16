@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Iterator
+from dataclasses import dataclass
+from typing import Literal
 
 import click
 import httpx
@@ -31,6 +33,145 @@ DAEMON_POLL_INTERVAL_S = 0.5
 # off to the steady cadence for the long tail.
 DAEMON_POLL_INITIAL_INTERVAL_S = 0.1
 DAEMON_POLL_BACKOFF_FACTOR = 1.5
+
+
+class AtomicHostCreateFallback(Exception):
+    """Signal that atomic create was rejected before a session was created."""
+
+
+@dataclass(frozen=True)
+class DaemonSessionCreateResult:
+    """Result of a bundled session create used by native daemon launches.
+
+    :param session_id: Newly-created Omnigent session id.
+    :param runner_id: Runner bound by inline host launch, if reported.
+    :param runner_launch_status: ``"launched"``, ``"failed"``, or
+        ``"indeterminate"`` for an atomic create; ``None`` for a legacy
+        hostless create.
+    :param runner_launch_error: Inline launch failure, if any.
+    """
+
+    session_id: str
+    runner_id: str | None = None
+    runner_launch_status: Literal["launched", "failed", "indeterminate"] | None = None
+    runner_launch_error: str | None = None
+
+
+def daemon_session_id(result: str | DaemonSessionCreateResult) -> str:
+    """Return the session id from legacy or atomic bundled-create results."""
+    return result if isinstance(result, str) else result.session_id
+
+
+def response_error_code(resp: httpx.Response) -> str | None:
+    """Extract ``error.code`` from an Omnigent error response."""
+    error = _json_body(resp).get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    return code if isinstance(code, str) else None
+
+
+def atomic_host_create_fallback_reason(resp: httpx.Response) -> str | None:
+    """Return why an atomic create can safely retry as a legacy create.
+
+    ``host_launch_contract=result_v1`` is schema-validated before bundle
+    persistence. An older server therefore rejects the unknown field before
+    creating a session. On a supporting server, external-host workspace
+    validation also runs before persistence, so its explicit wrong-replica and
+    host-offline errors are safe to retry. Other conflicts stay loud because
+    they do not prove whether a session row already exists.
+
+    :param resp: Failed multipart session-create response.
+    :returns: Fallback reason, or ``None`` when retrying could duplicate a
+        session and the original error must remain loud.
+    """
+    message = error_text(resp)
+    lower_message = message.lower()
+    if (
+        resp.status_code in {400, 422}
+        and response_error_code(resp) == "invalid_input"
+        and "invalid session metadata:" in lower_message
+        and "host_launch_contract" in lower_message
+        and (
+            "extra inputs are not permitted" in lower_message or "extra_forbidden" in lower_message
+        )
+    ):
+        return "server does not support atomic host-launch results"
+    code = response_error_code(resp)
+    if (
+        resp.status_code == 400
+        and code == "wrong_replica"
+        and lower_message.startswith("host ")
+        and " is on another replica" in lower_message
+    ):
+        return message
+    if (
+        resp.status_code == 400
+        and code == "invalid_input"
+        and lower_message.startswith("host ")
+        and " is offline" in lower_message
+    ):
+        return message
+    return None
+
+
+def daemon_session_create_result(
+    resp: httpx.Response,
+    *,
+    harness_name: str,
+    atomic: bool,
+) -> DaemonSessionCreateResult:
+    """Validate and decode a native bundled session-create response.
+
+    :param resp: Successful multipart ``POST /v1/sessions`` response.
+    :param harness_name: Human-readable harness name for errors.
+    :param atomic: Whether the request required ``result_v1`` launch metadata.
+    :returns: Parsed create result.
+    :raises click.ClickException: On a malformed response.
+    """
+    body = _json_body(resp)
+    session_id = body.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise click.ClickException(
+            f"{harness_name} session creation response did not include session_id."
+        )
+    if not atomic:
+        return DaemonSessionCreateResult(session_id=session_id)
+
+    runner_id = body.get("runner_id")
+    runner_id = runner_id if isinstance(runner_id, str) and runner_id else None
+    launch_status = body.get("runner_launch_status")
+    launch_error = body.get("runner_launch_error")
+    launch_error = launch_error if isinstance(launch_error, str) and launch_error else None
+    if launch_status == "launched" and runner_id is not None:
+        return DaemonSessionCreateResult(
+            session_id=session_id,
+            runner_id=runner_id,
+            runner_launch_status="launched",
+        )
+    if launch_status == "failed":
+        return DaemonSessionCreateResult(
+            session_id=session_id,
+            runner_id=runner_id,
+            runner_launch_status="failed",
+            runner_launch_error=launch_error,
+        )
+    if launch_status == "indeterminate":
+        return DaemonSessionCreateResult(
+            session_id=session_id,
+            runner_id=runner_id,
+            runner_launch_status="indeterminate",
+            runner_launch_error=launch_error,
+        )
+    return DaemonSessionCreateResult(
+        session_id=session_id,
+        runner_id=runner_id,
+        runner_launch_status="indeterminate",
+        runner_launch_error=(
+            launch_error
+            or "server created the session but did not report a complete atomic launch result"
+        ),
+    )
 
 
 def daemon_poll_intervals() -> Iterator[float]:

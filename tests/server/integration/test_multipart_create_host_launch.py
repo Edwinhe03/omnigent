@@ -39,6 +39,7 @@ from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.auth import RESERVED_USER_LOCAL
 from omnigent.server.host_registry import HostConnection
+from omnigent.server.routes.sessions import routes_core
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.comment_store.sqlalchemy_store import SqlAlchemyCommentStore
@@ -141,12 +142,18 @@ async def register_host(
     :param app: App whose ``host_registry`` to register into.
     :param db_uri: DB URI so the ``host_id`` FK target row exists.
     :returns: Async iterator yielding a ``register`` factory. Kwargs:
-        ``launch_status`` (``"launched"``/``"failed"``). Returns the
+        ``launch_status`` (``"launched"``/``"failed"``),
+        ``disconnect_after_stat``, and ``answer_launch``. Returns the
         :class:`_HostCapture` accumulating frames the host received.
     """
     conns: list[HostConnection] = []
 
-    def _register(*, launch_status: str = "launched") -> _HostCapture:
+    def _register(
+        *,
+        launch_status: str = "launched",
+        disconnect_after_stat: bool = False,
+        answer_launch: bool = True,
+    ) -> _HostCapture:
         HostStore(db_uri).upsert_on_connect(_HOST_ID, "bundle-host", RESERVED_USER_LOCAL)
         conn = app.state.host_registry.register(
             host_id=_HOST_ID,
@@ -178,10 +185,12 @@ async def register_host(
                                 "error": None,
                             }
                         )
+                    if disconnect_after_stat:
+                        app.state.host_registry.deregister(_HOST_ID, conn=conn)
                 elif isinstance(frame, HostLaunchRunnerFrame):
                     cap.launch.append(frame)
                     fut = conn.pending_launches.pop(frame.request_id, None)
-                    if fut is not None and not fut.done():
+                    if answer_launch and fut is not None and not fut.done():
                         fut.set_result(
                             {
                                 "status": launch_status,
@@ -244,7 +253,11 @@ async def test_multipart_create_with_host_id_binds_and_launches(
 
     resp = await _multipart_create(client, {"host_id": _HOST_ID, "workspace": _WORKSPACE})
     assert resp.status_code == 201, resp.text
-    session_id = resp.json()["session_id"]
+    body = resp.json()
+    session_id = body["session_id"]
+    assert "runner_id" not in body
+    assert "runner_launch_status" not in body
+    assert "runner_launch_error" not in body
 
     conv = conv_store.get_conversation(session_id)
     assert conv is not None
@@ -261,6 +274,32 @@ async def test_multipart_create_with_host_id_binds_and_launches(
     assert cap.launch[0].workspace == _WORKSPACE
     # Workspace validation ran against the host (host.stat round-trip).
     assert any(frame.path == _WORKSPACE for frame in cap.stats)
+
+
+async def test_multipart_atomic_create_reports_inline_launch_result(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    conv_store: SqlAlchemyConversationStore,
+) -> None:
+    register_host()
+
+    resp = await _multipart_create(
+        client,
+        {
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "host_launch_contract": "result_v1",
+        },
+        agent_name="bundle-host-result-agent",
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    conv = conv_store.get_conversation(body["session_id"])
+    assert conv is not None
+    assert body["runner_id"] == conv.runner_id
+    assert body["runner_launch_status"] == "launched"
+    assert "runner_launch_error" not in body
 
 
 async def test_multipart_create_launch_failure_keeps_binding(
@@ -285,6 +324,202 @@ async def test_multipart_create_launch_failure_keeps_binding(
     assert conv is not None
     assert conv.host_id == _HOST_ID
     assert conv.runner_id is not None
+
+
+async def test_multipart_atomic_create_reports_host_refusal(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+) -> None:
+    register_host(launch_status="failed")
+
+    resp = await _multipart_create(
+        client,
+        {
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "host_launch_contract": "result_v1",
+        },
+        agent_name="bundle-host-refusal-agent",
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["runner_id"] is not None
+    assert body["runner_launch_status"] == "failed"
+    assert body["runner_launch_error"] == "boom"
+
+
+async def test_multipart_atomic_create_survives_disconnect_after_validation(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    conv_store: SqlAlchemyConversationStore,
+) -> None:
+    register_host(disconnect_after_stat=True)
+
+    resp = await _multipart_create(
+        client,
+        {
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "host_launch_contract": "result_v1",
+        },
+        agent_name="bundle-host-race-agent",
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert conv_store.get_conversation(body["session_id"]) is not None
+    assert "runner_id" not in body
+    assert body["runner_launch_status"] == "failed"
+    assert body["runner_launch_error"]
+
+
+async def test_multipart_legacy_create_preserves_postcreate_disconnect_error(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    conv_store: SqlAlchemyConversationStore,
+) -> None:
+    register_host(disconnect_after_stat=True)
+    before = len(conv_store.list_conversations(limit=100, kind=None).data)
+
+    resp = await _multipart_create(
+        client,
+        {"host_id": _HOST_ID, "workspace": _WORKSPACE},
+        agent_name="bundle-host-legacy-race-agent",
+    )
+
+    assert resp.status_code == 409, resp.text
+    after = len(conv_store.list_conversations(limit=100, kind=None).data)
+    assert after == before + 1
+
+
+async def test_multipart_atomic_create_reports_postcreate_bind_conflict(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    conv_store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    register_host()
+    monkeypatch.setattr(conv_store, "set_runner_id", lambda session_id, runner_id: False)
+    before = len(conv_store.list_conversations(limit=100, kind=None).data)
+
+    resp = await _multipart_create(
+        client,
+        {
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "host_launch_contract": "result_v1",
+        },
+        agent_name="bundle-host-bind-conflict-agent",
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert "runner_id" not in body
+    assert body["runner_launch_status"] == "failed"
+    assert "already has a runner bound" in body["runner_launch_error"]
+    after = len(conv_store.list_conversations(limit=100, kind=None).data)
+    assert after == before + 1
+
+
+async def test_multipart_atomic_create_reports_launch_timeout(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    conv_store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(routes_core, "_CALLER_HOST_LAUNCH_TIMEOUT_S", 0.01)
+    register_host(answer_launch=False)
+
+    resp = await _multipart_create(
+        client,
+        {
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "host_launch_contract": "result_v1",
+        },
+        agent_name="bundle-host-timeout-agent",
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    conv = conv_store.get_conversation(body["session_id"])
+    assert conv is not None
+    assert body["runner_id"] == conv.runner_id
+    assert body["runner_launch_status"] == "indeterminate"
+    assert body["runner_launch_error"] == "host launch timed out"
+
+
+async def test_multipart_unsupported_launch_contract_is_rejected_before_create(
+    client: httpx.AsyncClient,
+    conv_store: SqlAlchemyConversationStore,
+) -> None:
+    before = len(conv_store.list_conversations(limit=100, kind=None).data)
+
+    resp = await _multipart_create(
+        client,
+        {
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "host_launch_contract": "result_v2",
+        },
+        agent_name="bundle-host-unsupported-contract-agent",
+    )
+
+    assert resp.status_code == 400, resp.text
+    after = len(conv_store.list_conversations(limit=100, kind=None).data)
+    assert after == before
+
+
+async def test_multipart_atomic_create_offline_host_is_rejected_before_create(
+    client: httpx.AsyncClient,
+    conv_store: SqlAlchemyConversationStore,
+    db_uri: str,
+) -> None:
+    host_store = HostStore(db_uri)
+    host_store.upsert_on_connect(_HOST_ID, "bundle-host", RESERVED_USER_LOCAL)
+    host_store.set_offline(_HOST_ID)
+    before = len(conv_store.list_conversations(limit=100, kind=None).data)
+
+    resp = await _multipart_create(
+        client,
+        {
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "host_launch_contract": "result_v1",
+        },
+        agent_name="bundle-host-offline-agent",
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "invalid_input"
+    assert "offline" in resp.json()["error"]["message"]
+    after = len(conv_store.list_conversations(limit=100, kind=None).data)
+    assert after == before
+
+
+async def test_multipart_atomic_create_wrong_replica_is_rejected_before_create(
+    client: httpx.AsyncClient,
+    conv_store: SqlAlchemyConversationStore,
+    db_uri: str,
+) -> None:
+    HostStore(db_uri).upsert_on_connect(_HOST_ID, "bundle-host", RESERVED_USER_LOCAL)
+    before = len(conv_store.list_conversations(limit=100, kind=None).data)
+
+    resp = await _multipart_create(
+        client,
+        {
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "host_launch_contract": "result_v1",
+        },
+        agent_name="bundle-host-wrong-replica-agent",
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "wrong_replica"
+    after = len(conv_store.list_conversations(limit=100, kind=None).data)
+    assert after == before
 
 
 async def test_multipart_create_host_id_requires_workspace(

@@ -58,6 +58,7 @@ def main() -> None:
         DAEMON_CONFIG_SIG_ENV_VAR,
         DaemonLifecycleLock,
         HostDaemonRecord,
+        clear_daemon_connection_marker,
         normalize_daemon_target,
         write_daemon_record,
     )
@@ -72,6 +73,7 @@ def main() -> None:
         return
 
     try:
+        clear_daemon_connection_marker(lifecycle_lock.record_path)
         from omnigent.host.identity import load_or_create_host_identity
 
         identity = load_or_create_host_identity()

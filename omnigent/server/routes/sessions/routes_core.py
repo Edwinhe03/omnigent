@@ -8,7 +8,7 @@ import json
 import secrets
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import (
@@ -224,6 +224,9 @@ from omnigent.util.session_lifecycle import (
 )
 from omnigent.version import VERSION
 
+_CALLER_HOST_LAUNCH_TIMEOUT_S = 30.0
+_CallerHostLaunchStatus = Literal["launched", "failed", "indeterminate"]
+
 
 async def _reset_runner_and_clear_todos_after_switch(
     session_id: str, conversation_store: ConversationStore
@@ -393,7 +396,8 @@ def register_core_routes(
         host_id: str,
         workspace: str | None,
         harness: str | None,
-    ) -> tuple[str, bool] | None:
+        report_launch_result: bool,
+    ) -> tuple[str | None, _CallerHostLaunchStatus, str | None]:
         """
         Bind a just-created session to a caller-supplied host and launch.
 
@@ -426,9 +430,13 @@ def register_core_routes(
             requires it with ``host_id``) and raises.
         :param harness: Canonical harness for the host-side
             configuration check, or ``None`` to skip it.
-        :returns: ``(runner_id, launch_failed)`` after the bind, or
-            ``None`` when the server has no host registry/store wired
-            (minimal test wirings — nothing was attempted).
+        :param report_launch_result: Convert expected post-create launch
+            failures into the result tuple instead of preserving the legacy
+            HTTP error response.
+        :returns: ``(runner_id, launch_status, launch_error)``. ``runner_id``
+            is ``None`` when the host disappeared before the atomic bind.
+            ``indeterminate`` means the launch frame may have been delivered,
+            so callers must not launch a second runner automatically.
         :raises OmnigentError: ``CONFLICT`` when a runner is already
             bound; ``INTERNAL_ERROR`` on a NULL workspace.
         :raises HTTPException: 403/404 from ``resolve_host_launch``.
@@ -436,7 +444,7 @@ def register_core_routes(
         host_registry = getattr(request.app.state, "host_registry", None)
         host_store_inst = getattr(request.app.state, "host_store", None)
         if host_registry is None or host_store_inst is None:
-            return None
+            return None, "failed", "host launch is not configured on this server"
         from omnigent.host.frames import (
             HostLaunchRunnerFrame,
             encode_host_frame,
@@ -444,16 +452,28 @@ def register_core_routes(
         from omnigent.runner.identity import token_bound_runner_id
         from omnigent.server.routes._host_launch import resolve_host_launch
 
-        target = await asyncio.to_thread(
-            resolve_host_launch,
-            user_id=user_id,
-            host_id=host_id,
-            session_id=session_id,
-            host_store=host_store_inst,
-            host_registry=host_registry,
-            conversation_store=conversation_store,
-            permission_store=permission_store,
-        )
+        try:
+            target = await asyncio.to_thread(
+                resolve_host_launch,
+                user_id=user_id,
+                host_id=host_id,
+                session_id=session_id,
+                host_store=host_store_inst,
+                host_registry=host_registry,
+                conversation_store=conversation_store,
+                permission_store=permission_store,
+            )
+        except OmnigentError as exc:
+            if not report_launch_result or exc.code not in {
+                ErrorCode.CONFLICT,
+                ErrorCode.WRONG_REPLICA,
+            }:
+                raise
+            return None, "failed", exc.message
+        except HTTPException as exc:
+            if not report_launch_result:
+                raise
+            return None, "failed", str(exc.detail)
         conn = target.conn
         binding_token = secrets.token_urlsafe(32)
         runner_id = token_bound_runner_id(binding_token)
@@ -464,10 +484,10 @@ def register_core_routes(
             runner_id,
         )
         if not bound:
-            raise OmnigentError(
-                f"Session {session_id!r} already has a runner bound",
-                code=ErrorCode.CONFLICT,
-            )
+            message = f"Session {session_id!r} already has a runner bound"
+            if report_launch_result:
+                return None, "failed", message
+            raise OmnigentError(message, code=ErrorCode.CONFLICT)
         request_id = secrets.token_hex(8)
         future: asyncio.Future[dict[str, str | None]] = asyncio.get_running_loop().create_future()
         conn.pending_launches[request_id] = future
@@ -491,17 +511,24 @@ def register_core_routes(
         )
         try:
             host_registry.send_text(conn, launch_frame)
-            launch_result = await asyncio.wait_for(future, timeout=30.0)
+            launch_result = await asyncio.wait_for(future, timeout=_CALLER_HOST_LAUNCH_TIMEOUT_S)
         except ConnectionError as exc:
-            launch_result = {"status": "failed", "error": str(exc)}
+            launch_result = {"status": "indeterminate", "error": str(exc)}
         except asyncio.TimeoutError:
-            launch_result = {"status": "failed", "error": "host launch timed out"}
+            launch_result = {"status": "indeterminate", "error": "host launch timed out"}
         finally:
             conn.pending_launches.pop(request_id, None)
             if not future.done():
                 future.cancel()
-        launch_failed = launch_result.get("status") == "failed"
-        if launch_failed:
+        raw_launch_status = launch_result.get("status")
+        launch_status: _CallerHostLaunchStatus = (
+            "launched"
+            if raw_launch_status == "launched"
+            else "failed"
+            if raw_launch_status == "failed"
+            else "indeterminate"
+        )
+        if launch_status != "launched":
             # The runner failed to come up (generic launch-failure path with no
             # structured error_code), blocking the session at launch. A coded
             # deployment failure (harness_not_configured, etc.) is attributed
@@ -519,7 +546,8 @@ def register_core_routes(
                     error_phase=ErrorPhase.RUNNER_LAUNCH.value,
                 ),
             )
-        return runner_id, launch_failed
+        launch_error = launch_result.get("error") if launch_status != "launched" else None
+        return runner_id, launch_status, launch_error
 
     @router.post(
         "/sessions",
@@ -731,17 +759,17 @@ def register_core_routes(
                 workspace=resp.workspace,
                 # Already canonical (see _resolve_harness).
                 harness=resp.harness,
+                report_launch_result=False,
             )
-            if launched is not None:
-                runner_id, launch_failed = launched
-                if launch_failed and _terminal_first_create:
-                    # The runner never booted, so its pending=False clear
-                    # will never fire. Clear the spin-up flag here so a
-                    # failed launch doesn't strand the Terminal-pill
-                    # spinner. No-op when we never set it.
-                    _publish_terminal_pending(resp.id, False)
-                resp.runner_id = runner_id
-                resp.host_id = launch_host_id
+            runner_id, launch_status, _ = launched
+            if launch_status != "launched" and _terminal_first_create:
+                # The runner never booted, so its pending=False clear
+                # will never fire. Clear the spin-up flag here so a
+                # failed launch doesn't strand the Terminal-pill
+                # spinner. No-op when we never set it.
+                _publish_terminal_pending(resp.id, False)
+            resp.runner_id = runner_id
+            resp.host_id = launch_host_id
 
         add_audit_attrs(session_id=resp.id, agent=resp.agent_id)
         return resp
@@ -898,14 +926,24 @@ def register_core_routes(
             from omnigent.models.model_catalog import spec_harness
 
             raw_harness = spec_harness(spec)
-            await _bind_and_launch_on_caller_host(
+            report_launch_result = parsed_metadata.host_launch_contract == "result_v1"
+            runner_id, launch_status, launch_error = await _bind_and_launch_on_caller_host(
                 request,
                 user_id=user_id,
                 session_id=result.session_id,
                 host_id=parsed_metadata.host_id,
                 workspace=parsed_metadata.workspace,
                 harness=canonicalize_harness(raw_harness) or raw_harness,
+                report_launch_result=report_launch_result,
             )
+            if report_launch_result:
+                result = result.model_copy(
+                    update={
+                        "runner_id": runner_id,
+                        "runner_launch_status": launch_status,
+                        "runner_launch_error": launch_error,
+                    }
+                )
         return result
 
     # ── GET /sessions/projects ────────────────────────────────────

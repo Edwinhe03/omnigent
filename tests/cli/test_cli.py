@@ -798,6 +798,43 @@ def test_codex_command_resume_binds_session_and_passes_unknown_args(
     assert captured["resume_picker"] is False
 
 
+@pytest.mark.parametrize(
+    ("command", "target"),
+    [
+        ("claude", "omnigent.harnesses.claude_native.main.run_claude_native"),
+        ("codex", "omnigent.harnesses.codex_native.main.run_codex_native"),
+    ],
+)
+def test_direct_native_command_snapshots_connection_before_ensuring_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    target: str,
+) -> None:
+    order: list[str] = []
+    captured: dict[str, object] = {}
+
+    def connected(server: str | None) -> bool:
+        assert server == "https://example.com"
+        order.append("connected")
+        return True
+
+    def ensure(server: str | None) -> str:
+        assert order == ["connected"]
+        order.append("ensure")
+        return server or ""
+
+    monkeypatch.setattr("omnigent.cli._load_effective_config", dict)
+    monkeypatch.setattr("omnigent.cli._host_daemon_is_connected", connected)
+    monkeypatch.setattr("omnigent.cli._ensure_backend", ensure)
+    monkeypatch.setattr(target, lambda **kwargs: captured.update(kwargs))
+
+    result = CliRunner().invoke(cli, [command, "--server", "https://example.com"])
+
+    assert result.exit_code == 0, result.output
+    assert order == ["connected", "ensure"]
+    assert captured["host_already_connected"] is True
+
+
 def test_codex_command_bare_resume_requests_picker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6877,12 +6914,21 @@ def test_native_terminal_dispatch_specs_cover_registered_native_agents() -> None
         (
             "claude-native",
             "omnigent.harnesses.claude_native.main.run_claude_native",
-            {"extra_args": ("--model", "native-model"), "prompt": None},
+            {
+                "extra_args": ("--model", "native-model"),
+                "prompt": None,
+                "host_already_connected": False,
+            },
         ),
         (
             "codex-native",
             "omnigent.harnesses.codex_native.main.run_codex_native",
-            {"extra_args": (), "model": "native-model", "prompt": None},
+            {
+                "extra_args": (),
+                "model": "native-model",
+                "prompt": None,
+                "host_already_connected": False,
+            },
         ),
         (
             "pi-native",
@@ -6938,6 +6984,7 @@ def test_dispatch_native_terminal_harness_launches_registered_wrapper(
     expected_extra: dict[str, object],
 ) -> None:
     """Every registered native harness launches through the generic run dispatcher."""
+    monkeypatch.setattr("omnigent.cli._host_daemon_is_connected", lambda _server: False)
     monkeypatch.setattr("omnigent.cli._ensure_backend", lambda _s: "http://localhost:0")
     captured: dict[str, object] = {}
     monkeypatch.setattr(target, lambda **kwargs: captured.update(kwargs))
@@ -6959,6 +7006,44 @@ def test_dispatch_native_terminal_harness_launches_registered_wrapper(
         "auto_open_conversation": True,
         **expected_extra,
     }
+
+
+@pytest.mark.parametrize(
+    ("harness", "target"),
+    [
+        ("claude-native", "omnigent.harnesses.claude_native.main.run_claude_native"),
+        ("codex-native", "omnigent.harnesses.codex_native.main.run_codex_native"),
+    ],
+)
+def test_dispatch_native_terminal_snapshots_connection_before_ensuring_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    harness: str,
+    target: str,
+) -> None:
+    order: list[str] = []
+    captured: dict[str, object] = {}
+
+    def connected(server: str | None) -> bool:
+        assert server == "https://example.com"
+        order.append("connected")
+        return True
+
+    def ensure(server: str | None) -> str:
+        assert order == ["connected"]
+        order.append("ensure")
+        return server or ""
+
+    monkeypatch.setattr("omnigent.cli._host_daemon_is_connected", connected)
+    monkeypatch.setattr("omnigent.cli._ensure_backend", ensure)
+    monkeypatch.setattr(target, lambda **kwargs: captured.update(kwargs))
+
+    handled = _dispatch_native_terminal_harness(
+        **_native_dispatch_kwargs(harness=harness, server="https://example.com")
+    )
+
+    assert handled is True
+    assert order == ["connected", "ensure"]
+    assert captured["host_already_connected"] is True
 
 
 def test_dispatch_native_terminal_harness_cursor_launches_wrapper(
