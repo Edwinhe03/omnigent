@@ -347,10 +347,6 @@ export function beginLocalConversation(
           sessionModelOverride: model.modelOverride,
           sessionModelSeeded: true,
           sessionReasoningEffort: model.reasoningEffort ?? null,
-          // Authoritative only when the caller actually supplied an effort
-          // (a value or an intentional null) — an omitted effort stays a
-          // sticky-fallback, never a claimed "no effort".
-          sessionEffortSeeded: model.reasoningEffort !== undefined,
           boundAgentId: model.boundAgentId ?? null,
           boundAgentName: model.boundAgentName ?? null,
           sessionHostId: model.hostId ?? null,
@@ -665,36 +661,22 @@ export interface ConversationState {
   /**
    * The active session's REAL model override (server ``model_override``):
    * what the next turn actually uses, ``null`` when none and the agent
-   * ``llmModel`` default applies. Session-scoped (NOT a sticky pick):
-   * hydrated from the session snapshot on bind and kept in sync on
-   * ``setModel`` / terminal ``/model`` switches. Distinct from
-   * ``selectedModel`` (a single global sticky pick kept for cross-session
-   * restore) so the ``/model`` readout never shows an unapplied sticky
-   * pick as an active "(override)".
+   * ``llmModel`` default applies. Session-scoped: hydrated from the session
+   * snapshot on bind and kept in sync on
+   * ``setModel`` / terminal ``/model`` switches. The ``/model`` readout never
+   * uses a cross-session preference as if it were an applied override.
    */
   sessionModelOverride: string | null;
   /**
-   * This session's effective reasoning effort — the server's persisted
-   * ``reasoning_effort`` once hydrated, else the sticky pick applied on bind.
-   * ``null`` when the harness has no effort control or none is set.
+   * This session's effective reasoning effort from the server's persisted
+   * ``reasoning_effort``. ``null`` when the harness has no effort control or
+   * none is set.
    *
    * Conversation-scoped for the same reason as ``sessionModelOverride``: two
    * live conversations can sit at different efforts, and a warm switch back
-   * re-projects this rather than re-binding. ``selectedEffort`` remains the
-   * single app-global sticky pick used for cross-session restore, so it cannot
-   * answer "what is THIS conversation at".
+   * re-projects this rather than re-binding.
    */
   sessionReasoningEffort: string | null;
-  /**
-   * True when ``sessionReasoningEffort`` is AUTHORITATIVE for this conversation
-   * — set by the optimistic create seed (incl. an intentional ``null``) and by a
-   * live ``session_reasoning_effort`` report (also incl. null) — so the composer
-   * must NOT fall back to the app-global sticky pick. Distinguishes a
-   * deliberately-seeded / live-reported null from an unhydrated null. Cold
-   * hydration (bind) deliberately leaves this false: it folds the sticky pref
-   * into the value itself.
-   */
-  sessionEffortSeeded: boolean;
   sessionModelSeeded: boolean;
   /**
    * Selected host id seeded at optimistic create, so the temp composer can run
@@ -706,8 +688,8 @@ export interface ConversationState {
    * Per-session cost-control switch for the active session: ``"on"``
    * activates the spec's configured cost-control mode, ``"off"``
    * disables cost control, ``null`` defers to the spec default.
-   * Session-scoped (NOT a sticky pick): hydrated from the session
-   * snapshot on bind and written through `setCostControlMode`.
+   * Session-scoped: hydrated from the session snapshot on bind and written
+   * through `setCostControlMode`.
    */
   costControlModeOverride: "on" | "off" | null;
   /**
@@ -954,9 +936,9 @@ export interface ConversationState {
 /**
  * State that belongs to the APP, not to any one conversation.
  *
- * Sticky picker prefs span sessions; the rest describe the single active
- * view (which conversation is on screen, what its composer is holding).
- * These stay on the root store when per-conversation state moves out.
+ * These fields describe the single active view (which conversation is on
+ * screen, what its composer is holding). They stay on the root store when
+ * per-conversation state moves out.
  */
 export interface AppChatState {
   /** The conversation currently on screen. `null` on `/`. */
@@ -992,17 +974,6 @@ export interface AppChatState {
    * away from.
    */
   queuedMessages: QueuedMessage[];
-  /**
-   * Sticky picker pick — applies to the current session via PATCH and
-   * survives navigation + reload (localStorage). ``null`` means the
-   * agent-spec default applies.
-   */
-  selectedEffort: string | null;
-  /**
-   * Same shape as ``selectedEffort`` but for the LLM model. ``null``
-   * falls back to the agent's ``llmModel``.
-   */
-  selectedModel: string | null;
   /** Bubble that should pulse briefly (highlight on nav jump). */
   flashItemId: string | null;
   /**
@@ -1107,14 +1078,12 @@ export interface ChatActions {
     meta?: Record<string, unknown>,
   ) => Promise<void>;
   /**
-   * Set sticky effort; PATCH only when the active session supports it.
-   * ``null`` clears the override.
+   * Set the active session's effort. ``null`` clears the override.
    */
   setEffort: (effort: string | null) => Promise<void>;
   /**
-   * Set the sticky model and PATCH it onto the current session. For
-   * claude-native, the server also injects ``/model`` into the tmux
-   * pane so the in-binary picker tracks the change.
+   * Set the active session's model. For claude-native, the server also injects
+   * ``/model`` into the tmux pane so the in-binary picker tracks the change.
    *
    * ``expectConfirmation`` marks the pick pending until the harness's own
    * report (or a not-applied error) settles it — pass it for sessions
@@ -1445,27 +1414,6 @@ const BACKGROUND_FLUSH_COOLDOWN_MS = 5_000;
 const backgroundFlushInFlight = new Set<string>();
 const backgroundFlushCooldownUntil = new Map<string, number>();
 
-// Failure-scoped backoff for the silent sticky-apply PATCHes (effort/model): if
-// the backend errors they never persist and would re-fire on every rebind, so a
-// failure pauses them and the next success resumes. Reset in initChatStore.
-const STICKY_APPLY_BACKOFF_MS = 30_000;
-let stickyApplyBackoffUntil = 0;
-
-// Silent sticky applies pause for a cooldown after any failure — treated as a
-// transient backend-wide hiccup (a 404 here means the permission check didn't
-// succeed, a flaky permission service, not that the session is gone), so one
-// failure pauses every session. Explicit /model and /effort picks aren't gated.
-function stickyApplyBlocked(): boolean {
-  return Date.now() < stickyApplyBackoffUntil;
-}
-
-// Arm on failure only; the gate reopens by time, never on a success. During an
-// outage the ~10% of requests that succeed must not flap the gate open and leak
-// a fresh apply each time.
-function armStickyApplyBackoff(): void {
-  stickyApplyBackoffUntil = Date.now() + STICKY_APPLY_BACKOFF_MS;
-}
-
 // Remembers each File's successful upload so a retry reuses the server-assigned
 // file_id instead of re-uploading the blob (which would orphan the prior one).
 // Retries re-send the same File objects — background flush re-queues them on a
@@ -1530,35 +1478,6 @@ export const ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS = 15_000;
 // gives up rather than polling it forever.
 const MAX_TRANSIENT_404_RETRIES = 10;
 
-// Sticky picker prefs — persisted so a new chat inherits the user's
-// last pick across reloads and across sessions.
-const PICKER_PREF_EFFORT_KEY = "omnigent.picker.effort";
-const PICKER_PREF_MODEL_KEY = "omnigent.picker.model";
-
-function loadPickerPref(key: string): string | null {
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function savePickerPref(key: string, value: string | null): void {
-  try {
-    if (value === null) window.localStorage.removeItem(key);
-    else window.localStorage.setItem(key, value);
-  } catch {
-    // Ignore — running without storage just means prefs don't survive reload.
-  }
-}
-
-// Bumped by every explicit model pick, so a PATCH that resolves out of order can
-// tell whether its canonicalization is still the newest choice. A conversation-id
-// check is not enough: the user can pick in A, switch to B and pick again, then
-// have A's slower PATCH land last — and two reordered picks WITHIN one
-// conversation share an id. Only the newest pick may settle the sticky pref.
-let modelPickRevision = 0;
-
 /**
  * Make `id` the live, active conversation and return setters bound to its entry.
  *
@@ -1601,7 +1520,6 @@ export function initChatStore(client: QueryClient): void {
   workspaceInvalidationTimers.clear();
   backgroundFlushInFlight.clear();
   backgroundFlushCooldownUntil.clear();
-  stickyApplyBackoffUntil = 0;
   // Drop every live conversation: their streams must not outlive the app (or,
   // in tests, leak into the next case).
   conversationRegistry.clear();
@@ -1738,11 +1656,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   boundAgentName: null,
   loadingConversation: false,
   conversationLoadError: null,
-  selectedEffort: loadPickerPref(PICKER_PREF_EFFORT_KEY),
-  selectedModel: loadPickerPref(PICKER_PREF_MODEL_KEY),
   sessionModelOverride: null,
   sessionReasoningEffort: null,
-  sessionEffortSeeded: false,
   sessionModelSeeded: false,
   sessionHostId: null,
   costControlModeOverride: null,
@@ -2536,9 +2451,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     if (!wasLive) {
       // Cold entry: nothing is hydrated yet, so the page must show the
       // hydrating placeholder rather than mount the composer against empty
-      // state. Without this the composer resolves its model label from the
-      // sticky cross-session pick (session-scoped fields are still null) and
-      // paints the PREVIOUS conversation's model until the snapshot lands.
+      // state. Without this, session-scoped model fields are still null and the
+      // composer briefly paints incomplete configuration until the snapshot lands.
       // A live entry deliberately skips this — painting it instantly, with no
       // placeholder, is the whole point of keeping streams open.
       entry.setState({
@@ -2696,10 +2610,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   },
 
   setEffort: async (effort) => {
-    // `selectedEffort` is the cross-session sticky pick; `sessionReasoningEffort`
-    // is this conversation's effective value. An explicit pick sets both.
-    setActive({ selectedEffort: effort, sessionReasoningEffort: effort });
-    savePickerPref(PICKER_PREF_EFFORT_KEY, effort);
+    setActive({ sessionReasoningEffort: effort });
     const { conversationId } = get();
     if (conversationId) {
       if (queryClient === null) {
@@ -2714,7 +2625,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // Harness has no effort control: undo the optimistic session-scoped write
       // so this conversation doesn't claim an effort the server will never hold.
       if (!supportsEffortControl(session)) {
-        setterFor(conversationId)({ sessionReasoningEffort: null, sessionEffortSeeded: false });
+        setterFor(conversationId)({ sessionReasoningEffort: null });
         return;
       }
       await updateSession(conversationId, { reasoningEffort: effort });
@@ -2722,12 +2633,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   },
 
   setModel: async (model, opts) => {
-    // `selectedModel` is the sticky pick; `sessionModelOverride` is this
-    // session's applied override. An explicit `/model` sets both.
-    modelPickRevision += 1;
-    const pickRevision = modelPickRevision;
-    setActive({ selectedModel: model, sessionModelOverride: model });
-    savePickerPref(PICKER_PREF_MODEL_KEY, model);
+    setActive({ sessionModelOverride: model });
     const { conversationId } = get();
     if (conversationId) {
       const expectConfirmation = opts?.expectConfirmation === true && model !== null;
@@ -2767,15 +2673,6 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // The override belongs to the session that was PATCHed, so apply it there
       // even if the user has since switched away.
       setterFor(conversationId)({ sessionModelOverride: canonical });
-      // The sticky pref (root + localStorage) is app-global and must reflect the
-      // NEWEST pick, so a slower PATCH that resolves last cannot overwrite it —
-      // otherwise the superseded model returns on reload or in a new chat. Both
-      // writes are gated together: persisting without the root write would leave
-      // them disagreeing until the next reload.
-      if (pickRevision === modelPickRevision) {
-        rootSetState({ selectedModel: canonical });
-        savePickerPref(PICKER_PREF_MODEL_KEY, canonical);
-      }
     }
   },
 
@@ -3082,9 +2979,9 @@ function setStreamBudgetExceeded(exceeded: boolean): void {
 // different pair. These build that pair.
 //
 // Reads see the entry's own state merged under the root store's app-global
-// fields and actions, so existing code that reads e.g. `get().selectedEffort`
-// or calls `get().send(...)` keeps working. Writes are split by key: conversation
-// state goes to the entry, app-global state to the root store.
+// fields and actions, so existing code that calls e.g. `get().send(...)` keeps
+// working. Writes are split by key: conversation state goes to the entry,
+// app-global state to the root store.
 
 /**
  * Whether a conversation is no longer live — evicted, released, or never bound.
@@ -3200,10 +3097,10 @@ function entryGetter(entry: ConversationEntry): Getter {
 /**
  * Write to an entry, routing app-global keys to the root store.
  *
- * The split is by key rather than by caller because the streaming code writes
- * mixed patches (e.g. `bindStream` sets conversation fields alongside the
- * sticky-pref handoff). `conversationId` is dropped: an entry's identity is
- * fixed, and letting a patch move it would silently retarget the stream.
+ * The split is by key rather than by caller because streaming code can write
+ * mixed app and conversation patches. `conversationId` is dropped: an entry's
+ * identity is fixed, and letting a patch move it would silently retarget the
+ * stream.
  */
 function entrySetter(entry: ConversationEntry): Setter {
   return (partial) => {
@@ -3363,7 +3260,11 @@ async function ensureBoundSession(
     // initial_items dispatch synchronously inside create_session,
     // before we can subscribe to /stream, so early events can be
     // missed). Bind the stream FIRST, then post the first message.
-    const session = await createSession(agentId, []);
+    const state = get();
+    const session = await createSession(agentId, [], {
+      modelOverride: state.sessionModelOverride ?? undefined,
+      reasoningEffort: state.sessionReasoningEffort ?? undefined,
+    });
     sessionId = session.id;
     // Register the create_session span (see interactionTelemetry). This path
     // sends no host params, so the server always makes an external ("computer")
@@ -3376,14 +3277,6 @@ async function ensureBoundSession(
     // issued from here on resolves this id — and would find an empty chain and
     // overtake us if our slot were still under the new-session key.
     onSessionResolved?.(sessionId);
-    // Native runners read reasoning_effort during bind.
-    const preBindEffort = useChatStore.getState().selectedEffort;
-    if (preBindEffort != null && supportsEffortControl(session)) {
-      await updateSession(sessionId, {
-        reasoningEffort: preBindEffort,
-        silent: true,
-      });
-    }
     await bindOnlyOnlineRunner(sessionId);
     const entry = conversationRegistry.acquire(sessionId);
     // The landing composer's optimistic bubble (and any status it set) was
@@ -3797,34 +3690,8 @@ async function bindStream(
     const snapshotNativeMessageIds = nativeCompletedMessageIds(items);
     snapshotNativeMessageIds.forEach((messageId) => ignoredNativeMessageIds.add(messageId));
 
-    // Sticky-pref handoff for CLI-created sessions with no override.
-    // Sub-agents inherit orchestrator choices.
-    const isSubAgentSession = session.parentSessionId != null;
     const canApplyEffort = supportsEffortControl(session);
-    const stickyEffort = get().selectedEffort;
-    const stickyModel = get().selectedModel;
-    // Apply sticky effort only where the Web UI control is meaningful.
-    const effectiveEffort = canApplyEffort
-      ? (session.reasoningEffort ?? stickyEffort ?? null)
-      : stickyEffort;
-    // The sticky model is a UI PREFERENCE only: it pre-fills pickers but is
-    // never silently PATCHed onto a session and never rendered as the
-    // session's model. Display comes from the harness's reported model
-    // (`llmModel`); a request exists only when the user explicitly picks.
-    // (The old bind-time auto-apply wrote requests the pane was never asked
-    // to honor — removed with the reported-model semantics.)
-    if (
-      !isSubAgentSession &&
-      canApplyEffort &&
-      session.reasoningEffort == null &&
-      stickyEffort != null &&
-      !stickyApplyBlocked()
-    ) {
-      updateSession(id, { reasoningEffort: stickyEffort }).catch((err: unknown) => {
-        armStickyApplyBackoff();
-        console.warn(`Failed to apply sticky effort=${stickyEffort} to session ${id}:`, err);
-      });
-    }
+    const effectiveEffort = canApplyEffort ? (session.reasoningEffort ?? null) : null;
 
     const snapshotBlocks = itemsToBlocks(items);
     // Replay outstanding elicitation prompts from the snapshot.
@@ -3832,10 +3699,6 @@ async function bindStream(
     // before this chat was opened wouldn't render otherwise.
     const pendingElicitationBlocks = pendingElicitationBlocksFromSnapshot(session);
     const oldestItemId = items[0]?.id ?? null;
-    // The sticky pick this bind resolved, applied app-globally after the patch
-    // below — but only while this conversation is still on screen. Resolved
-    // inside the updater because it depends on the catalog bind race.
-    let resolvedStickyModel: string | null = null;
     set((state) => {
       const currentBlocks = withoutNativePreviews(state.blocks, snapshotNativeMessageIds);
       const bindingPatch = sessionBindingPatch(session, state, launchBeforeFetch);
@@ -3962,7 +3825,6 @@ async function bindStream(
               ...structuredErrorFields(session.lastTaskError),
             }
           : null;
-      resolvedStickyModel = stickyModel;
       return {
         ...effectiveBindingPatch,
         blocks: syntheticError !== null ? [...allBlocks, syntheticError] : allBlocks,
@@ -3999,17 +3861,9 @@ async function bindStream(
         backgroundTaskCount: session.backgroundTaskCount ?? 0,
         backgroundTasks: session.backgroundTasks ?? [],
         blockedOn: null,
-        // `selectedEffort` / `selectedModel` are app-global sticky picks, not
-        // conversation state, so they are applied below — and only while this
-        // conversation is still on screen. A cold bind that finishes after the
-        // user switched away (or a second concurrent bind) would otherwise
-        // overwrite the visible conversation's picker, last-response-wins.
-        //
         // This conversation's own effective effort, which is what a warm switch
         // back re-projects (it does not re-bind, so it cannot recompute it).
         sessionReasoningEffort: effectiveEffort,
-        // Server hydration supersedes any optimistic effort seed.
-        sessionEffortSeeded: false,
         tokensUsed: session.lastTotalTokens ?? null,
         sessionCostUsd: session.totalCostUsd ?? null,
         sessionUsageByModel: session.usageByModel ?? null,
@@ -4020,13 +3874,6 @@ async function bindStream(
         }[],
       };
     });
-    // App-global sticky picks: this conversation's snapshot is only allowed to
-    // move them while it is the one on screen. A background bind (a switch away
-    // mid-fetch, or two cold binds racing) must hydrate its own conversation
-    // without touching the visible conversation's picker.
-    if (useChatStore.getState().conversationId === id) {
-      rootSetState({ selectedEffort: effectiveEffort, selectedModel: resolvedStickyModel });
-    }
     racedNativeModelOptions.delete(id);
   } catch (err) {
     if (isConversationDisposed(id)) return;
@@ -4541,9 +4388,9 @@ async function rehydrateWindowOnReconnect(
  * the spinner stuck, and reconciles ApprovalCards against the snapshot's
  * `pending_elicitations` (see `reconcileElicitationBlocks`) — elicitations
  * are not items, so the item backfill can't recover prompts that fired or
- * resolved while the socket was dead. The backfill path leaves history-window state
- * (`hasMoreHistory` / `oldestItemId`) and sticky picker prefs untouched —
- * a reconnect is not a re-hydrate. Swallows fetch errors: a transient
+ * resolved while the socket was dead. The backfill path leaves history-window
+ * state (`hasMoreHistory` / `oldestItemId`) untouched — a reconnect is not a
+ * re-hydrate. Swallows fetch errors: a transient
  * failure just means the next reconnect retries. All writes are
  * `historyGeneration`-guarded so a window reset mid-fetch voids them.
  */
@@ -5898,8 +5745,7 @@ async function refetchRunnerBackedSessionState(
   if (options.modelOptionsResolved === true && (session.codexModelOptions ?? []).length > 0) {
     racedNativeModelOptions.set(conversationId, session.codexModelOptions ?? []);
   }
-  // No sticky-model graft here: the sticky pick is a pure preference under
-  // the reported-model semantics, so a delayed catalog only hydrates state.
+  // A delayed catalog only hydrates this session's runner-backed state.
   const statePatch: Partial<ConversationState> =
     options.applyBindingPatch === true
       ? sessionBindingPatch(session, currentState, launchBeforeFetch)
@@ -6111,8 +5957,8 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       // made inside the pane. The value is VERBATIM (the harness's own
       // spelling); it lands on `llmModel`, the reported-model slot every
       // display surface renders from. The request (`sessionModelOverride`)
-      // and the cross-session sticky are deliberately untouched: reports
-      // and requests are separate roles. The report also settles any
+      // remains deliberately untouched: reports and requests are separate
+      // roles. The report also settles any
       // pending switch: whatever the harness says it runs now IS the
       // outcome of the ask.
       applyToNamedConversation(event.conversationId, {
@@ -6152,21 +5998,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       // wrong until a refresh.
       applyToNamedConversation(event.conversationId, {
         sessionReasoningEffort: event.reasoningEffort,
-        // The live report is the AUTHORITATIVE per-session effort — including an
-        // explicit null ("reset to agent default"). Keep the authority flag set
-        // so a background reset-to-null is retained through a warm A→B→A switch
-        // (never falling back to another session's sticky pick). Cold hydration
-        // is different: bind folds the sticky pref into the value on purpose.
-        sessionEffortSeeded: true,
       });
-      // `selectedEffort` is the app-global sticky pick, so only adopt a value
-      // reported by the conversation the user is actually looking at.
-      if (
-        event.conversationId === sourceConversationId &&
-        useChatStore.getState().conversationId === event.conversationId
-      ) {
-        useChatStore.setState({ selectedEffort: event.reasoningEffort });
-      }
       return;
     case "session_permission_mode":
       // Pane-driven (in-TUI shift+tab) or UI-driven; either way the server
@@ -6761,8 +6593,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       return;
     case "session_model_options":
       // A runner-owned native model catalog just resolved. Refetch the
-      // cache-warmed snapshot so the picker and any delayed sticky handoff
-      // use the same authoritative options.
+      // cache-warmed snapshot so the picker uses the authoritative options.
       void refetchRunnerBackedSessionState(event.conversationId, {
         modelOptionsResolved: true,
       });

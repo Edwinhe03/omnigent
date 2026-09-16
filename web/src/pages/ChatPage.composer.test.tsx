@@ -1400,12 +1400,9 @@ describe("Composer model/effort label", () => {
     setComposerState({
       conversationId: "conv_test",
       skills: [],
-      selectedModel: null,
-      selectedEffort: null,
-      llmModel: null,
-      // Reset the per-session override too: a test that sets it must not leak
-      // into the next, which now reads sessionModelOverride first for the label.
       sessionModelOverride: null,
+      sessionReasoningEffort: null,
+      llmModel: null,
       codexModelOptions: [],
       nativeVendorOwnsModel: false,
       // Identity-fallback inputs: reset so a case that sets one can't leak it
@@ -1425,7 +1422,7 @@ describe("Composer model/effort label", () => {
     useChatStore.setState({
       llmModel: "system.ai.claude-opus-4-6",
       sessionHarness: "claude-native",
-      selectedEffort: "xhigh",
+      sessionReasoningEffort: "xhigh",
     });
     renderWithTooltips(
       <Composer
@@ -1457,7 +1454,7 @@ describe("Composer model/effort label", () => {
   it("shows the model in the foreground and effort muted", () => {
     // The chip renders the harness's reported model (`llmModel`), never the
     // sticky preference or the request.
-    useChatStore.setState({ llmModel: "opus", selectedEffort: "high" });
+    useChatStore.setState({ llmModel: "opus", sessionReasoningEffort: "high" });
     renderWithTooltips(
       <Composer
         {...composerProps({
@@ -1478,15 +1475,10 @@ describe("Composer model/effort label", () => {
     expect(within(label()).getByText("High")).toHaveClass("text-muted-foreground");
   });
 
-  it("shows no effort for a seeded null, never borrowing the cross-session sticky (#7039)", () => {
-    // Same sticky "high" as the test above, but the optimistic create seeded an
-    // intentional "no effort" (sessionEffortSeeded) — the authoritative seed
-    // must win, so the label shows the model with no effort, not "High".
+  it("shows no effort when the session uses its default", () => {
     useChatStore.setState({
       llmModel: "opus",
-      selectedEffort: "high",
       sessionReasoningEffort: null,
-      sessionEffortSeeded: true,
     });
     renderWithTooltips(
       <Composer
@@ -1502,17 +1494,14 @@ describe("Composer model/effort label", () => {
     expect(label()).toHaveTextContent("Opus");
     expect(label()).not.toHaveTextContent("High");
     expect(screen.queryByTestId("composer-agent-effort-value")).toBeNull();
-    // This suite shares one global store and only resets what each test sets;
-    // no other test touches the seeded flag, so restore the default here.
-    useChatStore.setState({ sessionEffortSeeded: false });
   });
 
   it("reads 'Smart Routing' with no model/effort when routing is on", async () => {
     // The router picks model + effort per turn, so the label must not surface a
     // stale pinned model/effort — it reads "Smart Routing" instead.
     useChatStore.setState({
-      selectedModel: "opus",
-      selectedEffort: "high",
+      sessionModelOverride: "opus",
+      sessionReasoningEffort: "high",
       costControlModeOverride: "on",
     });
     const options = CLAUDE_MODEL_OPTIONS.map((option) => ({
@@ -1541,11 +1530,10 @@ describe("Composer model/effort label", () => {
     expect(gearTooltip).not.toHaveTextContent("Connection:");
   });
 
-  it("renders the reported model, never the request or the sticky", () => {
+  it("renders the reported model, never the request", () => {
     useChatStore.setState({
-      selectedModel: "opus",
       sessionModelOverride: "sonnet",
-      selectedEffort: null,
+      sessionReasoningEffort: null,
       llmModel: "haiku",
     });
     renderWithTooltips(
@@ -1575,7 +1563,6 @@ describe("Composer model/effort label", () => {
 
   it("uses the catalog display name for an exact Claude model ID in the read-only label", () => {
     useChatStore.setState({
-      selectedModel: null,
       sessionModelOverride: null,
       llmModel: "system.ai.claude-sonnet-5",
     });
@@ -1600,10 +1587,14 @@ describe("Composer model/effort label", () => {
   });
 
   it("keeps the harness visible when model and effort are unresolved", () => {
-    // A claude-native session before the snapshot fills llmModel/selectedEffort
+    // A claude-native session before the snapshot fills llmModel/sessionReasoningEffort
     // has no model label and no effort label. The read-only label renders
     // nothing rather than a placeholder — the gear still owns the config path.
-    useChatStore.setState({ selectedModel: null, selectedEffort: null, llmModel: null });
+    useChatStore.setState({
+      sessionModelOverride: null,
+      sessionReasoningEffort: null,
+      llmModel: null,
+    });
     renderWithTooltips(
       <Composer
         {...composerProps({
@@ -1626,8 +1617,8 @@ describe("Composer model/effort label", () => {
     // would be empty. It falls back to the harness identity ("Polly (Pi)") so
     // the slot isn't blank.
     useChatStore.setState({
-      selectedModel: null,
-      selectedEffort: null,
+      sessionModelOverride: null,
+      sessionReasoningEffort: null,
       llmModel: null,
       sessionHarness: "pi",
     });
@@ -1652,8 +1643,8 @@ describe("Composer model/effort label", () => {
     // claude-native agent row — neither names the product, so the wrapper
     // label decides. The instance itself is named in the sub-agent tray.
     useChatStore.setState({
-      selectedModel: null,
-      selectedEffort: null,
+      sessionModelOverride: null,
+      sessionReasoningEffort: null,
       llmModel: null,
       sessionHarness: "claude-native",
       subAgentName: "general-purpose",
@@ -1680,7 +1671,11 @@ describe("Composer model/effort label", () => {
     // A native wrapper's harnessLabel is the bare vendor name ("Claude"), which
     // the gear tooltip owns now — the label must stay empty when unresolved
     // rather than resurrecting it. Only SDK/bundle agents get the fallback.
-    useChatStore.setState({ selectedModel: null, selectedEffort: null, llmModel: null });
+    useChatStore.setState({
+      sessionModelOverride: null,
+      sessionReasoningEffort: null,
+      llmModel: null,
+    });
     renderWithTooltips(
       <Composer
         {...composerProps({
@@ -1696,18 +1691,15 @@ describe("Composer model/effort label", () => {
     expect(screen.getByTestId("composer-agent-config-value")).toHaveTextContent("Claude Code");
   });
 
-  it("surfaces a cursor-native session's model from the override, not the cross-session sticky", () => {
+  it("surfaces a cursor-native session's model from the override", () => {
     // cursor-native is a vendor-owns-model wrapper, so `nativeVendorOwnsModel`
     // is true and the bound `llmModel` is a meaningless default. Its live model
-    // is mirrored into the session override (`sessionModelOverride`), NOT the
-    // cross-session sticky `selectedModel`. The label must read the real
-    // session model ("Composer 2.5"), not the stale sticky pick carried over
-    // from another session.
+    // is mirrored into the session override (`sessionModelOverride`). The label
+    // must read the real session model ("Composer 2.5").
     useChatStore.setState({
       nativeVendorOwnsModel: true,
-      selectedModel: "opus-4.5", // stale cross-session sticky — must be ignored
       sessionModelOverride: "composer-2.5",
-      selectedEffort: "low",
+      sessionReasoningEffort: "low",
       llmModel: "fable", // meaningless vendor default — must not surface
     });
     renderWithTooltips(
@@ -1733,16 +1725,10 @@ describe("Composer model/effort label", () => {
     expect(within(label()).getByText("Composer 2.5")).toHaveClass("text-foreground");
   });
 
-  it("surfaces an SDK/bundle session's model from the override, not the cross-session sticky", () => {
-    // Polly/Debby (claude-sdk) repro: a model picked in some other (Codex)
-    // session lingers in the global sticky `selectedModel`. SDK/bundle sessions
-    // (modelPickerKind === null) never have the sticky applied, so the label
-    // must read the session's own applied model (`sessionModelOverride`), never
-    // the stale sticky — the "gpt-5.5 on a Claude-SDK Polly" report.
+  it("surfaces an SDK/bundle session's model from the override", () => {
     useChatStore.setState({
-      selectedModel: "gpt-5.5", // stale cross-session sticky — must be ignored
       sessionModelOverride: "claude-opus-4-8",
-      selectedEffort: null,
+      sessionReasoningEffort: null,
       llmModel: null,
     });
     renderWithTooltips(
@@ -1758,14 +1744,10 @@ describe("Composer model/effort label", () => {
     expect(label()).not.toHaveTextContent("gpt-5.5");
   });
 
-  it("does not leak the cross-session sticky model on an SDK/bundle session with no applied model", () => {
-    // The exact report: a Polly (claude-sdk) session with no override and no
-    // bound model, but a `gpt-5.5` left in the sticky from a prior Codex
-    // session. The model label stays empty — only the real effort shows.
+  it("keeps the model label empty when an SDK/bundle session has no applied model", () => {
     useChatStore.setState({
-      selectedModel: "gpt-5.5", // stale cross-session sticky — must not surface
       sessionModelOverride: null,
-      selectedEffort: "high",
+      sessionReasoningEffort: "high",
       llmModel: null,
     });
     renderWithTooltips(
@@ -1783,16 +1765,12 @@ describe("Composer model/effort label", () => {
     expect(label()).toHaveTextContent("High");
   });
 
-  it("does not leak the cross-session sticky model on a native session before its catalog lands", () => {
-    // The Codex→Claude switch repro: `switchTo` clears the session-scoped model
-    // fields but keeps the sticky, so mid-switch a claude-native session has an
-    // empty catalog and the `gpt-5.5` the outgoing Codex session left behind.
-    // The label must wait for a model this session vouches for rather than
-    // paint the previous session's pick for the whole bind round trip.
+  it("waits for a native session model before its catalog lands", () => {
+    // During a Codex→Claude switch, `switchTo` clears the session-scoped model
+    // fields. The label must wait for a model this session vouches for.
     useChatStore.setState({
-      selectedModel: "gpt-5.5", // outgoing Codex session's pick — must not surface
       sessionModelOverride: null,
-      selectedEffort: "high",
+      sessionReasoningEffort: "high",
       llmModel: null,
       codexModelOptions: [], // cleared by `switchTo`, refilled when the snapshot lands
     });
@@ -1815,7 +1793,7 @@ describe("Composer model/effort label", () => {
   it("opens model configuration from Edit in the shared picker", async () => {
     // The pill-wide hover highlight advertises one clickable control, so the
     // label half must perform the same action as the gear beside it.
-    useChatStore.setState({ llmModel: "opus", selectedEffort: "high" });
+    useChatStore.setState({ llmModel: "opus", sessionReasoningEffort: "high" });
     renderWithTooltips(
       <Composer
         {...composerProps({
@@ -1838,7 +1816,7 @@ describe("Composer model/effort label", () => {
     // Mirrors the gear's soft-disable: a read-only viewer gets no config modal
     // from either pill half, and aria-disabled drops the pill's hover
     // highlight so no dead affordance is advertised.
-    useChatStore.setState({ llmModel: "opus", selectedEffort: "high" });
+    useChatStore.setState({ llmModel: "opus", sessionReasoningEffort: "high" });
     renderWithTooltips(
       <Composer
         {...composerProps({
@@ -1861,8 +1839,8 @@ describe("Composer model/effort label", () => {
     // SDK/bundle identity fallback with no config surface: there's no modal
     // to open, no button in the pill, and thus no hover highlight to honor.
     useChatStore.setState({
-      selectedModel: null,
-      selectedEffort: null,
+      sessionModelOverride: null,
+      sessionReasoningEffort: null,
       llmModel: null,
       sessionHarness: "pi",
     });
@@ -1900,7 +1878,7 @@ describe("Composer shared visible controls", () => {
       gitBranch: "feature/shared-composer",
       codexApprovalMode: "ask-for-approval",
       llmModel: null,
-      selectedEffort: null,
+      sessionReasoningEffort: null,
     });
     renderWithTooltips(
       <Composer
@@ -3714,11 +3692,10 @@ describe("Composer config gear", () => {
     setComposerState({
       conversationId: "conv_test",
       skills: [],
-      selectedModel: null,
       sessionModelOverride: null,
       llmModel: null,
       nativeVendorOwnsModel: false,
-      selectedEffort: null,
+      sessionReasoningEffort: null,
       costControlModeOverride: null,
       // Opening the gear re-reads the routing switches; stub the fetch away.
       refreshSessionOverrides: vi.fn().mockResolvedValue(undefined),
@@ -3777,7 +3754,7 @@ describe("Composer config gear", () => {
   });
 
   it("still shows the config tooltip on a disabled gear (soft-disable preserves hover)", async () => {
-    useChatStore.setState({ selectedEffort: "high", sessionHarness: "claude-sdk" });
+    useChatStore.setState({ sessionReasoningEffort: "high", sessionHarness: "claude-sdk" });
     renderWithTooltips(
       <Composer
         {...composerProps({
@@ -3795,7 +3772,7 @@ describe("Composer config gear", () => {
   });
 
   it("shows a hover summary with Harness/Model/Effort rows and no Permissions row", async () => {
-    useChatStore.setState({ selectedEffort: "high", sessionHarness: "claude-sdk" });
+    useChatStore.setState({ sessionReasoningEffort: "high", sessionHarness: "claude-sdk" });
     renderWithTooltips(
       <Composer
         {...composerProps({
@@ -3834,7 +3811,7 @@ describe("Composer config gear", () => {
   });
 
   it("omits the Effort row from the summary when routing is on (router owns effort)", async () => {
-    useChatStore.setState({ costControlModeOverride: "on", selectedEffort: "high" });
+    useChatStore.setState({ costControlModeOverride: "on", sessionReasoningEffort: "high" });
     renderWithTooltips(
       <Composer
         {...composerProps({
@@ -3972,7 +3949,7 @@ describe("Composer config gear", () => {
 
   it("offers inline effort choices without an Advanced entry in the session picker", async () => {
     useChatStore.setState({
-      selectedEffort: "xhigh",
+      sessionReasoningEffort: "xhigh",
       sessionHarness: "claude-native",
       llmModel: "opus",
     });
@@ -4137,7 +4114,7 @@ describe("Composer config gear", () => {
     useChatStore.setState({
       setModel,
       setEffort,
-      selectedEffort: "high",
+      sessionReasoningEffort: "high",
       codexModelOptions: options,
     });
     renderWithTooltips(
@@ -4216,7 +4193,7 @@ describe("Composer config gear", () => {
     useChatStore.setState({
       setModel: vi.fn().mockResolvedValue(undefined),
       setEffort: vi.fn().mockResolvedValue(undefined),
-      selectedEffort: "ultra",
+      sessionReasoningEffort: "ultra",
       llmModel: "gpt-5.6-sol",
       codexModelOptions: codexOptions,
       refreshSessionOverrides: vi.fn().mockResolvedValue(undefined),
@@ -4251,7 +4228,7 @@ describe("Composer config gear", () => {
     // The picked ultra is dropped (back to Default) and no longer offered,
     // while Luna's own max stays.
     await waitFor(() => expect(useChatStore.getState().setEffort).toHaveBeenCalledWith(null));
-    act(() => useChatStore.setState({ llmModel: "gpt-5.6-luna", selectedEffort: null }));
+    act(() => useChatStore.setState({ llmModel: "gpt-5.6-luna", sessionReasoningEffort: null }));
     await openSessionEfforts();
     expect(screen.queryByTestId("composer-agent-effort-default")).toBeNull();
     expect(document.querySelector('[data-testid="composer-agent-effort-ultra"]')).toBeNull();
@@ -4260,7 +4237,7 @@ describe("Composer config gear", () => {
 
   it("re-pins the model when turning Smart Routing off, even if the shown model is unchanged", async () => {
     // Routing-on clears the applied override but keeps the cross-session sticky
-    // (selectedModel), so the modal shows that model as "resolved". Turning
+    // (sessionModelOverride), so the modal shows that model as "resolved". Turning
     // routing off by re-picking that same model must still PATCH setModel —
     // otherwise the pin is silently dropped and the session falls back to
     // default. Regression for the resolvedModelId short-circuit false-negative.
@@ -4273,9 +4250,8 @@ describe("Composer config gear", () => {
     useChatStore.setState({
       setModel,
       setCostControlMode,
-      // Routing on + leftover sticky "opus", no applied override.
+      // Routing on with no applied override.
       costControlModeOverride: "on",
-      selectedModel: "opus",
       sessionModelOverride: null,
       codexModelOptions: options,
     });

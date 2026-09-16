@@ -4997,6 +4997,66 @@ def test_inject_slash_command_clears_draft_pastes_literal_then_enter(
     ]
 
 
+def test_tmux_injections_are_serialized_per_bridge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slash command cannot overtake a user message on the same pane."""
+    bridge_dir = tmp_path / "bridge"
+    first_injection_entered = threading.Event()
+    release_first_injection = threading.Event()
+    wait_call_threads: list[str] = []
+    errors: list[BaseException] = []
+
+    def wait_for_tmux_info(_bridge_dir: Path, *, timeout_s: float) -> dict[str, str]:
+        del timeout_s
+        wait_call_threads.append(threading.current_thread().name)
+        if len(wait_call_threads) == 1:
+            first_injection_entered.set()
+            assert release_first_injection.wait(timeout=2)
+        return {"socket_path": "/tmp/tmux.sock", "tmux_target": "claude:0.0"}
+
+    monkeypatch.setattr(claude_native_bridge, "_wait_for_tmux_info", wait_for_tmux_info)
+    monkeypatch.setattr(claude_native_bridge, "_restore_occupied_input", lambda *_args: None)
+    monkeypatch.setattr(
+        claude_native_bridge, "_wait_for_claude_prompt_ready", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(claude_native_bridge, "_paste_and_submit", lambda *_a, **_k: None)
+    monkeypatch.setattr(claude_native_bridge, "_run_tmux", lambda *_args: None)
+    monkeypatch.setattr(claude_native_bridge, "_capture_pane", lambda *_args: "")
+    monkeypatch.setattr(claude_native_bridge, "_PASTE_COMMIT_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(claude_native_bridge, "_PASTE_SETTLE_S", 0.0)
+
+    def run_user_message() -> None:
+        try:
+            inject_user_message(bridge_dir, content="seed prompt")
+        except BaseException as exc:  # pragma: no cover - assertion aid
+            errors.append(exc)
+
+    def run_slash_command() -> None:
+        try:
+            claude_native_bridge.inject_slash_command(bridge_dir, command="/effort medium")
+        except BaseException as exc:  # pragma: no cover - assertion aid
+            errors.append(exc)
+
+    user_thread = threading.Thread(target=run_user_message, name="user-message")
+    slash_thread = threading.Thread(target=run_slash_command, name="slash-command")
+    user_thread.start()
+    assert first_injection_entered.wait(timeout=2)
+    slash_thread.start()
+
+    time.sleep(0.05)
+    assert wait_call_threads == ["user-message"]
+
+    release_first_injection.set()
+    user_thread.join(timeout=2)
+    slash_thread.join(timeout=2)
+
+    assert not user_thread.is_alive()
+    assert not slash_thread.is_alive()
+    assert errors == []
+    assert wait_call_threads == ["user-message", "slash-command"]
+
+
 @pytest.mark.parametrize(
     "bad_command",
     [

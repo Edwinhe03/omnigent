@@ -1513,7 +1513,7 @@ describe("chatStore — switchTo", () => {
   });
 
   it("keeps each conversation's own effort across a warm A→B→A switch", async () => {
-    // `selectedEffort` is a single app-global sticky pick, so it cannot answer
+    // `sessionReasoningEffort` is a single app-global sticky pick, so it cannot answer
     // "what is THIS conversation at" once a warm switch skips hydration: cold
     // opening B set it to B's value, and returning to still-live A mirrored no
     // effort field and returned without a bind — so A displayed B's effort.
@@ -2069,7 +2069,7 @@ describe("chatStore — send (first-send ordering)", () => {
     expect(eventBodies.map(textOf)).toEqual(["1", "2", "3"]);
   });
 
-  it("PATCHes sticky effort onto a brand-new session before binding the runner", async () => {
+  it("creates a brand-new session with model and effort before binding the runner", async () => {
     seedSession("conv_new");
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -2089,37 +2089,14 @@ describe("chatStore — send (first-send ordering)", () => {
       }
       return defaultFetchHandler(input, init);
     });
-    useChatStore.setState({ selectedEffort: "max" });
-
-    await useChatStore.getState().send("hi", "agent_xyz");
-
-    // Effort must be persisted before runner bind.
-    const calls = fetchMock.mock.calls.map(([u, init]) => ({
-      url: String(u),
-      method: (init as RequestInit | undefined)?.method ?? "GET",
-      body: (init as RequestInit | undefined)?.body
-        ? JSON.parse((init as RequestInit).body as string)
-        : undefined,
-    }));
-    // 0: POST /v1/sessions (create)
-    // 1: PATCH /v1/sessions/{id} (effort, silent)
-    // 2: GET /v1/runners (find runner)
-    // 3: PATCH /v1/sessions/{id} (bind runner)
-    expect(calls[0]).toMatchObject({ url: "/v1/sessions", method: "POST" });
-    expect(calls[1]).toMatchObject({
-      url: "/v1/sessions/conv_new",
-      method: "PATCH",
-      body: { reasoning_effort: "max", silent: true },
+    useChatStore.setState({
+      sessionModelOverride: "opus",
+      sessionReasoningEffort: "max",
     });
-    expect(calls[2]).toMatchObject({ url: "/v1/runners", method: "GET" });
-  });
-
-  it("does not PATCH sticky effort onto a brand-new custom session", async () => {
-    seedSession("conv_new");
-    useChatStore.setState({ selectedEffort: "max" });
 
     await useChatStore.getState().send("hi", "agent_xyz");
 
+    // Model and effort must be persisted in the create row before runner bind.
     const calls = fetchMock.mock.calls.map(([u, init]) => ({
       url: String(u),
       method: (init as RequestInit | undefined)?.method ?? "GET",
@@ -2127,15 +2104,23 @@ describe("chatStore — send (first-send ordering)", () => {
         ? JSON.parse((init as RequestInit).body as string)
         : undefined,
     }));
-    expect(calls[0]).toMatchObject({ url: "/v1/sessions", method: "POST" });
-    // If sticky effort leaked onto custom sessions, that PATCH would occupy index 1.
+    expect(calls[0]).toMatchObject({
+      url: "/v1/sessions",
+      method: "POST",
+      body: {
+        agent_id: "agent_xyz",
+        initial_items: [],
+        model_override: "opus",
+        reasoning_effort: "max",
+      },
+    });
     expect(calls[1]).toMatchObject({ url: "/v1/runners", method: "GET" });
     expect(
       calls.some(
         (call) =>
           call.url === "/v1/sessions/conv_new" &&
           call.method === "PATCH" &&
-          "reasoning_effort" in (call.body ?? {}),
+          ("reasoning_effort" in (call.body ?? {}) || "model_override" in (call.body ?? {})),
       ),
     ).toBe(false);
   });
@@ -5435,7 +5420,6 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       // request is touched.
       useChatStore.setState({
         conversationId: "conv_abc",
-        selectedModel: "opus",
         sessionModelOverride: "sonnet",
         sessionModelSeeded: true,
         llmModel: null,
@@ -5448,7 +5432,6 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       const state = useChatStore.getState();
       expect(state.llmModel).toBe("system.ai.claude-sonnet-5");
       expect(state.sessionModelSeeded).toBe(false);
-      expect(state.selectedModel).toBe("opus");
       expect(state.sessionModelOverride).toBe("sonnet");
     });
 
@@ -5557,36 +5540,36 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
   });
 
   describe("session.reasoning_effort", () => {
-    it("reflects a TUI-side effort switch in selectedEffort", () => {
+    it("reflects a TUI-side effort switch in sessionReasoningEffort", () => {
       // A thinking-level change inside a native terminal arrives as
       // session.reasoning_effort; the effort picker must follow it.
-      useChatStore.setState({ conversationId: "conv_abc", selectedEffort: "high" });
+      useChatStore.setState({ conversationId: "conv_abc", sessionReasoningEffort: "high" });
       handleSessionEvent({
         type: "session_reasoning_effort",
         conversationId: "conv_abc",
         reasoningEffort: "medium",
       });
-      expect(useChatStore.getState().selectedEffort).toBe("medium");
+      expect(useChatStore.getState().sessionReasoningEffort).toBe("medium");
     });
 
-    it("reflects a terminal effort clear in selectedEffort", () => {
-      useChatStore.setState({ conversationId: "conv_abc", selectedEffort: "medium" });
+    it("reflects a terminal effort clear in sessionReasoningEffort", () => {
+      useChatStore.setState({ conversationId: "conv_abc", sessionReasoningEffort: "medium" });
       handleSessionEvent({
         type: "session_reasoning_effort",
         conversationId: "conv_abc",
         reasoningEffort: null,
       });
-      expect(useChatStore.getState().selectedEffort).toBeNull();
+      expect(useChatStore.getState().sessionReasoningEffort).toBeNull();
     });
 
     it("ignores an effort event from a different session", () => {
-      useChatStore.setState({ conversationId: "conv_open", selectedEffort: "high" });
+      useChatStore.setState({ conversationId: "conv_open", sessionReasoningEffort: "high" });
       handleSessionEvent({
         type: "session_reasoning_effort",
         conversationId: "conv_other",
         reasoningEffort: "medium",
       });
-      expect(useChatStore.getState().selectedEffort).toBe("high");
+      expect(useChatStore.getState().sessionReasoningEffort).toBe("high");
     });
 
     it("records a backgrounded conversation's effort switch on that conversation", () => {
@@ -5596,7 +5579,7 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       // still only adopted from the conversation on screen.
       bindConversationForTest("conv_effort_bg");
       bindConversationForTest("conv_effort_fg");
-      useChatStore.setState({ selectedEffort: "high" });
+      useChatStore.setState({ sessionReasoningEffort: "high" });
 
       // Delivered by the backgrounded conversation's OWN stream, which is how
       // this arrives in production.
@@ -5613,18 +5596,13 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
         "low",
       );
       // The visible conversation's sticky pick is untouched.
-      expect(useChatStore.getState().selectedEffort).toBe("high");
+      expect(useChatStore.getState().sessionReasoningEffort).toBe("high");
     });
 
-    it("keeps a backgrounded reset-to-null authoritative so a warm switch won't leak sticky (#7039)", () => {
-      // A resets to agent default (null) in the background; another session left
-      // the app-global sticky at "high". A's explicit null must stay
-      // AUTHORITATIVE on its entry (sessionEffortSeeded=true) so a warm switch
-      // back reads null — not the leaked "high" sticky. Regression for the
-      // background-null A→B→A leak.
+    it("keeps a backgrounded reset-to-null scoped to its conversation", () => {
       bindConversationForTest("conv_effort_null_bg");
       bindConversationForTest("conv_effort_null_fg");
-      useChatStore.setState({ selectedEffort: "high" });
+      useChatStore.setState({ sessionReasoningEffort: "high" });
 
       handleSessionEvent(
         {
@@ -5637,9 +5615,7 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
 
       const entry = conversationRegistry.peek("conv_effort_null_bg")!.getState();
       expect(entry.sessionReasoningEffort).toBeNull();
-      expect(entry.sessionEffortSeeded).toBe(true);
-      // The background reset never touches the app-global sticky.
-      expect(useChatStore.getState().selectedEffort).toBe("high");
+      expect(useChatStore.getState().sessionReasoningEffort).toBe("high");
     });
   });
 
@@ -7627,11 +7603,9 @@ describe("chatStore — elicitation_resolved", () => {
   });
 });
 
-// Sticky-pref handoff: a sessions's snapshot trumps the store; an
-// empty snapshot picks up the user's last compatible native pick.
-// PATCH fires as a side effect so the next turn uses the override
-// server-side.
-describe("chatStore — bindStream sticky-pref handoff", () => {
+// Binding projects persisted session state only. Opening a session must never
+// mutate it or import configuration from another conversation.
+describe("chatStore — session configuration scope", () => {
   const CLAUDE_MODEL_OPTIONS = [
     {
       id: "opus",
@@ -7694,9 +7668,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       });
   }
 
-  it("applies sticky effort but never silently PATCHes the sticky model", async () => {
-    // The sticky model is a UI preference: it must not be written onto the
-    // session as a request the pane was never asked to honor.
+  it("binds an empty native session without PATCHing or retaining prior configuration", async () => {
     seedSession("conv_cn", []);
     withSnapshot("conv_cn", {
       labels: { "omnigent.wrapper": "claude-code-native-ui" },
@@ -7704,194 +7676,25 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     });
 
     useChatStore.setState({
-      selectedEffort: "high",
-      selectedModel: "opus",
+      sessionReasoningEffort: "high",
+      sessionModelOverride: "opus",
     });
     await useChatStore.getState().switchTo("conv_cn");
 
     const patches = patchCallsFor("conv_cn");
-    expect(patches).toEqual(expect.arrayContaining([{ reasoning_effort: "high" }]));
+    expect(patches.some((p) => "reasoning_effort" in p)).toBe(false);
     expect(patches.some((p) => "model_override" in p)).toBe(false);
 
     const state = useChatStore.getState();
-    // The preference survives as a preference; no request was created.
-    expect(state.selectedModel).toBe("opus");
     expect(state.sessionModelOverride).toBeNull();
-    expect(state.selectedEffort).toBe("high");
+    expect(state.sessionReasoningEffort).toBeNull();
   });
 
-  // Flush the fire-and-forget sticky-apply promise chain (fetch → parse →
-  // reject → catch → arm/clear the backoff) before the next assertion.
-  const flushStickyApplies = () =>
-    new Promise<void>((resolve) => {
-      setTimeout(resolve, 0);
-    });
-
-  const nativeSnapshotResponse = (id: string): Response =>
-    mockResponse({
-      id,
-      agent_id: "agent_xyz",
-      status: "idle",
-      created_at: 0,
-      items: [],
-      labels: { "omnigent.wrapper": "claude-code-native-ui" },
-      reasoning_effort: null,
-      model_override: null,
-      model_options: CLAUDE_MODEL_OPTIONS,
-    });
-
-  it("stops re-firing sticky applies after a 5xx until the backoff clears", async () => {
-    // Backend outage: every sticky-apply PATCH 500s. Without a client backoff
-    // these re-fire on every bind/switch and pile onto the failing server.
-    seedSession("conv_bo1", []);
-    seedSession("conv_bo2", []);
-    sessionLabels.set("conv_bo1", { "omnigent.wrapper": "claude-code-native-ui" });
-    sessionLabels.set("conv_bo2", { "omnigent.wrapper": "claude-code-native-ui" });
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-      const path = (typeof input === "string" ? input : input.toString()).split("?")[0];
-      const ours = path === "/v1/sessions/conv_bo1" || path === "/v1/sessions/conv_bo2";
-      if (ours && init?.method === "PATCH") return mockResponse({}, { ok: false, status: 500 });
-      if (ours && (init?.method ?? "GET") === "GET") {
-        return nativeSnapshotResponse(path.slice("/v1/sessions/".length));
-      }
-      return defaultFetchHandler(input, init);
-    });
-
-    useChatStore.setState({ selectedEffort: "high", selectedModel: "opus" });
-
-    // First bind fires the sticky applies; both 500 → the cooldown arms.
-    await useChatStore.getState().switchTo("conv_bo1");
-    await flushStickyApplies();
-    expect(patchCallsFor("conv_bo1").length).toBeGreaterThan(0);
-
-    // A second bind (different session) while the backend-wide cooldown holds
-    // must NOT re-issue the silent applies.
-    await useChatStore.getState().switchTo("conv_bo2");
-    await flushStickyApplies();
-    expect(patchCallsFor("conv_bo2")).toEqual([]);
-    // ...and must NOT claim the sticky model as an override the skipped PATCH
-    // never persisted — the /model readout stays honest during the cooldown.
-    expect(conversationRegistry.peek("conv_bo2")!.getState().sessionModelOverride).toBeNull();
-  });
-
-  it("treats a 404 as a transient backend failure and pauses all sticky applies", async () => {
-    // A 404 here means the permission check didn't succeed (a flaky permission
-    // service), NOT that the session is gone — so it is backend-wide and
-    // transient, and must pause every session's applies just like a 5xx rather
-    // than singling out the session that happened to 404.
-    seedSession("conv_p1", []);
-    seedSession("conv_p2", []);
-    sessionLabels.set("conv_p1", { "omnigent.wrapper": "claude-code-native-ui" });
-    sessionLabels.set("conv_p2", { "omnigent.wrapper": "claude-code-native-ui" });
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-      const path = (typeof input === "string" ? input : input.toString()).split("?")[0];
-      const ours = path === "/v1/sessions/conv_p1" || path === "/v1/sessions/conv_p2";
-      if (ours && init?.method === "PATCH") return mockResponse({}, { ok: false, status: 404 });
-      if (ours && (init?.method ?? "GET") === "GET") {
-        return nativeSnapshotResponse(path.slice("/v1/sessions/".length));
-      }
-      return defaultFetchHandler(input, init);
-    });
-
-    useChatStore.setState({ selectedEffort: "high", selectedModel: "opus" });
-
-    // First bind fires the sticky applies; both 404 → the cooldown arms.
-    await useChatStore.getState().switchTo("conv_p1");
-    await flushStickyApplies();
-    expect(patchCallsFor("conv_p1").length).toBeGreaterThan(0);
-
-    // A different session bound while the cooldown holds must NOT re-issue the
-    // silent applies — the 404 pauses everyone, not just conv_p1.
-    await useChatStore.getState().switchTo("conv_p2");
-    await flushStickyApplies();
-    expect(patchCallsFor("conv_p2")).toEqual([]);
-  });
-
-  it("does not reopen the cooldown when an intervening request succeeds", async () => {
-    // The gate reopens by time, not on a success — otherwise the ~10% of
-    // requests that get through mid-outage would flap it open and leak a fresh
-    // apply each time. A successful bind here must leave the cooldown armed.
-    seedSession("conv_f1", []);
-    seedSession("conv_f2", []);
-    sessionLabels.set("conv_f1", { "omnigent.wrapper": "claude-code-native-ui" });
-    sessionLabels.set("conv_f2", { "omnigent.wrapper": "claude-code-native-ui" });
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-      const path = (typeof input === "string" ? input : input.toString()).split("?")[0];
-      if (path === "/v1/sessions/conv_f1" && init?.method === "PATCH") {
-        return mockResponse({}, { ok: false, status: 500 });
-      }
-      if (
-        (path === "/v1/sessions/conv_f1" || path === "/v1/sessions/conv_f2") &&
-        (init?.method ?? "GET") === "GET"
-      ) {
-        return nativeSnapshotResponse(path.slice("/v1/sessions/".length));
-      }
-      return defaultFetchHandler(input, init);
-    });
-
-    useChatStore.setState({ selectedEffort: "high", selectedModel: "opus" });
-
-    // Arm the cooldown.
-    await useChatStore.getState().switchTo("conv_f1");
-    await flushStickyApplies();
-    expect(patchCallsFor("conv_f1").length).toBeGreaterThan(0);
-
-    // A brand-new send binds successfully (a request that got through) — but it
-    // must NOT clear the cooldown.
-    await useChatStore.getState().switchTo(null);
-    await useChatStore.getState().send("hi", "agent_xyz");
-
-    // A fresh native session is still suppressed: the success didn't flap it open.
-    await useChatStore.getState().switchTo("conv_f2");
-    await flushStickyApplies();
-    expect(patchCallsFor("conv_f2")).toEqual([]);
-  });
-
-  it("reopens the cooldown once its window elapses", async () => {
-    // Recovery is time-based: after the window the applies fire again (and stay
-    // firing while the backend is healthy).
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
-    try {
-      seedSession("conv_e1", []);
-      seedSession("conv_e3", []);
-      sessionLabels.set("conv_e1", { "omnigent.wrapper": "claude-code-native-ui" });
-      sessionLabels.set("conv_e3", { "omnigent.wrapper": "claude-code-native-ui" });
-      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-        const path = (typeof input === "string" ? input : input.toString()).split("?")[0];
-        if (path === "/v1/sessions/conv_e1" && init?.method === "PATCH") {
-          return mockResponse({}, { ok: false, status: 500 });
-        }
-        if (
-          (path === "/v1/sessions/conv_e1" || path === "/v1/sessions/conv_e3") &&
-          (init?.method ?? "GET") === "GET"
-        ) {
-          return nativeSnapshotResponse(path.slice("/v1/sessions/".length));
-        }
-        return defaultFetchHandler(input, init);
-      });
-
-      useChatStore.setState({ selectedEffort: "high", selectedModel: "opus" });
-
-      // Arm the cooldown at t=1s (window is 30s → reopens at t=31s).
-      await useChatStore.getState().switchTo("conv_e1");
-      await flushStickyApplies();
-      expect(patchCallsFor("conv_e1").length).toBeGreaterThan(0);
-
-      // Advance the clock past the window; a fresh session's applies fire again.
-      nowSpy.mockReturnValue(32_000);
-      await useChatStore.getState().switchTo("conv_e3");
-      await flushStickyApplies();
-      expect(patchCallsFor("conv_e3").length).toBeGreaterThan(0);
-    } finally {
-      nowSpy.mockRestore();
-    }
-  });
-
-  it("lets only the newest model pick settle the persisted sticky preference", async () => {
-    // A conversation-id guard can't order two picks. If A's PATCH is slow, the
-    // user switches to B and picks again, then A resolves last: A's canonical
-    // value overwrote the newer localStorage pref even though the UI correctly
-    // showed B's. The wrong model then came back on reload / in a new chat.
+  it("keeps in-session model changes out of create-composer preferences", async () => {
+    window.localStorage.setItem(
+      "omnigent:last-mode-by-harness",
+      JSON.stringify({ "claude-native": { model: "haiku", effort: "low" } }),
+    );
     seedSession("conv_pick_a", []);
     seedSession("conv_pick_b", []);
     let releaseA: (() => void) | null = null;
@@ -7932,26 +7735,23 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     // Switch to B and pick a NEWER model, which settles first.
     await useChatStore.getState().switchTo("conv_pick_b");
     await useChatStore.getState().setModel("opus");
-    expect(window.localStorage.getItem("omnigent.picker.model")).toBe("opus");
+    expect(window.localStorage.getItem("omnigent.picker.model")).toBeNull();
 
-    // A's slower PATCH now resolves last. It must not revive the older pick.
+    // A's slower PATCH now resolves last. Each result belongs to its own session.
     releaseA!();
     await pickA;
 
-    expect(window.localStorage.getItem("omnigent.picker.model")).toBe("opus");
-    expect(useChatStore.getState().selectedModel).toBe("opus");
+    expect(
+      JSON.parse(window.localStorage.getItem("omnigent:last-mode-by-harness") ?? "{}"),
+    ).toEqual({ "claude-native": { model: "haiku", effort: "low" } });
+    expect(useChatStore.getState().sessionModelOverride).toBe("opus");
     // A's own session override still settled to its canonical value.
     expect(conversationRegistry.peek("conv_pick_a")!.getState().sessionModelOverride).toBe(
       "sonnet",
     );
   });
 
-  it("does not move the app-global picker when a bind lands after a switch away", async () => {
-    // `selectedModel` / `selectedEffort` are app-global sticky picks, not
-    // conversation state, so a cold bind that finishes in the background must
-    // hydrate its OWN conversation without touching them — otherwise A's late
-    // snapshot repaints the picker for whichever conversation the user is now
-    // looking at (and two concurrent cold binds are last-response-wins).
+  it("does not move the visible session when a bind lands after a switch away", async () => {
     seedSession("conv_slow_bind", []);
     seedSession("conv_now_visible", []);
     let releaseSnapshot: (() => void) | null = null;
@@ -7983,7 +7783,6 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       return defaultFetchHandler(input, init);
     });
 
-    useChatStore.setState({ selectedEffort: "high", selectedModel: "opus" });
     const binding = useChatStore.getState().switchTo("conv_slow_bind");
     await tick();
     // The user switches away before the snapshot lands.
@@ -7991,9 +7790,9 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     releaseSnapshot!();
     await binding;
 
-    // The visible conversation's picker is untouched...
-    expect(useChatStore.getState().selectedModel).toBe("opus");
-    expect(useChatStore.getState().selectedEffort).toBe("high");
+    // The visible conversation keeps its own empty snapshot...
+    expect(useChatStore.getState().sessionModelOverride).toBeNull();
+    expect(useChatStore.getState().sessionReasoningEffort).toBeNull();
     // ...while the backgrounded conversation still hydrated its own state.
     expect(conversationRegistry.peek("conv_slow_bind")!.getState().sessionModelOverride).toBe(
       "sonnet",
@@ -8025,7 +7824,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       return defaultFetchHandler(input, init);
     });
 
-    useChatStore.setState({ selectedEffort: null, selectedModel: "opus" });
+    useChatStore.setState({ sessionReasoningEffort: null, sessionModelOverride: "opus" });
     await useChatStore.getState().switchTo("conv_cn_delayed");
 
     expect(patchCallsFor("conv_cn_delayed").some((p) => "model_override" in p)).toBe(false);
@@ -8040,7 +7839,6 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     // silent request is ever written on its behalf.
     expect(patchCallsFor("conv_cn_delayed").some((p) => "model_override" in p)).toBe(false);
     expect(useChatStore.getState()).toMatchObject({
-      selectedModel: "opus",
       sessionModelOverride: null,
       codexModelOptions: CLAUDE_MODEL_OPTIONS,
     });
@@ -8083,7 +7881,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       return defaultFetchHandler(input, init);
     });
 
-    useChatStore.setState({ selectedEffort: null, selectedModel: "opus" });
+    useChatStore.setState({ sessionReasoningEffort: null, sessionModelOverride: "opus" });
     const switchPromise = useChatStore.getState().switchTo("conv_cn_race");
     await tick();
     expect(resolveInitialSnapshot).not.toBeNull();
@@ -8114,7 +7912,6 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     // silent request is written.
     expect(patchCallsFor("conv_cn_race").some((p) => "model_override" in p)).toBe(false);
     expect(useChatStore.getState()).toMatchObject({
-      selectedModel: "opus",
       sessionModelOverride: null,
       codexModelOptions: CLAUDE_MODEL_OPTIONS,
     });
@@ -8163,7 +7960,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       return defaultFetchHandler(input, init);
     });
 
-    useChatStore.setState({ selectedEffort: null, selectedModel: "fable" });
+    useChatStore.setState({ sessionReasoningEffort: null, sessionModelOverride: "fable" });
     const switchPromise = useChatStore.getState().switchTo("conv_cn_race_removed");
     await tick();
     expect(resolveInitialSnapshot).not.toBeNull();
@@ -8193,7 +7990,6 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       false,
     );
     expect(useChatStore.getState()).toMatchObject({
-      selectedModel: "fable",
       sessionModelOverride: null,
       codexModelOptions: CLAUDE_MODEL_OPTIONS,
     });
@@ -8225,7 +8021,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       return defaultFetchHandler(input, init);
     });
 
-    useChatStore.setState({ selectedEffort: null, selectedModel: "fable" });
+    useChatStore.setState({ sessionReasoningEffort: null, sessionModelOverride: "fable" });
     await useChatStore.getState().switchTo("conv_cn_delayed_removed");
     handleSessionEvent({
       type: "session_model_options",
@@ -8252,7 +8048,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       model_override: null,
     });
 
-    useChatStore.setState({ selectedModel: "claude-opus-4-7" });
+    useChatStore.setState({ sessionModelOverride: "claude-opus-4-7" });
     await useChatStore.getState().switchTo("conv_routing");
 
     // No model_override PATCH fired (contrast the handoff test above).
@@ -8262,7 +8058,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     expect(useChatStore.getState().sessionModelOverride).toBeNull();
   });
 
-  it("applies sticky effort but never the sticky model on a codex-native session", async () => {
+  it("binds an empty codex-native session without applying prior configuration", async () => {
     seedSession("conv_codex", []);
     withSnapshot("conv_codex", {
       labels: { "omnigent.wrapper": "codex-native-ui" },
@@ -8284,23 +8080,21 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     });
 
     useChatStore.setState({
-      selectedEffort: "xhigh",
-      selectedModel: "gpt-5.4",
+      sessionReasoningEffort: "xhigh",
+      sessionModelOverride: "gpt-5.4",
     });
     await useChatStore.getState().switchTo("conv_codex");
 
     const patches = patchCallsFor("conv_codex");
-    expect(patches).toEqual(expect.arrayContaining([{ reasoning_effort: "xhigh" }]));
+    expect(patches.some((p) => "reasoning_effort" in p)).toBe(false);
     expect(patches.some((p) => "model_override" in p)).toBe(false);
 
     const state = useChatStore.getState();
-    expect(state.selectedModel).toBe("gpt-5.4");
     expect(state.sessionModelOverride).toBeNull();
-    expect(state.selectedEffort).toBe("xhigh");
+    expect(state.sessionReasoningEffort).toBeNull();
   });
 
-  it("does NOT apply sticky effort or model to a sub-agent (child) session", async () => {
-    // Observer sticky prefs must not overwrite child sessions.
+  it("binds a child session from its own snapshot only", async () => {
     seedSession("conv_child", []);
     withSnapshot("conv_child", {
       labels: { "omnigent.wrapper": "claude-code-native-ui" },
@@ -8309,8 +8103,8 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     });
 
     useChatStore.setState({
-      selectedEffort: "xhigh",
-      selectedModel: "opus",
+      sessionReasoningEffort: "xhigh",
+      sessionModelOverride: "opus",
     });
     await useChatStore.getState().switchTo("conv_child");
 
@@ -8318,14 +8112,13 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     expect(patches.some((p) => "reasoning_effort" in p)).toBe(false);
     expect(patches.some((p) => "model_override" in p)).toBe(false);
 
-    // Sticky prefs are preserved for later top-level sessions.
     const state = useChatStore.getState();
-    expect(state.selectedEffort).toBe("xhigh");
-    expect(state.selectedModel).toBe("opus");
+    expect(state.sessionReasoningEffort).toBeNull();
+    expect(state.sessionModelOverride).toBeNull();
   });
 
   it("does NOT PATCH a non-Claude sticky model onto a claude-native session", async () => {
-    // Regression: `selectedModel` is a single global pick shared across
+    // Regression: `sessionModelOverride` is a single global pick shared across
     // harnesses, so it can hold a Codex default like `gpt-5.4`. Handing
     // that to a claude-native session would persist model_override=gpt-5.4
     // and launch Claude Code with `--model gpt-5.4`, which it can't run.
@@ -8334,7 +8127,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     seedSession("conv_cn_gpt", []);
     withSnapshot("conv_cn_gpt", { labels: { "omnigent.wrapper": "claude-code-native-ui" } });
 
-    useChatStore.setState({ selectedEffort: null, selectedModel: "gpt-5.4" });
+    useChatStore.setState({ sessionReasoningEffort: null, sessionModelOverride: "gpt-5.4" });
     await useChatStore.getState().switchTo("conv_cn_gpt");
 
     const patches = patchCallsFor("conv_cn_gpt");
@@ -8348,7 +8141,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       model_options: CLAUDE_MODEL_OPTIONS,
     });
 
-    useChatStore.setState({ selectedEffort: null, selectedModel: "fable" });
+    useChatStore.setState({ sessionReasoningEffort: null, sessionModelOverride: "fable" });
     await useChatStore.getState().switchTo("conv_cn_removed");
 
     expect(patchCallsFor("conv_cn_removed").some((p) => "model_override" in p)).toBe(false);
@@ -8361,7 +8154,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     seedSession("conv_codex_claude", []);
     withSnapshot("conv_codex_claude", { labels: { "omnigent.wrapper": "codex-native-ui" } });
 
-    useChatStore.setState({ selectedEffort: null, selectedModel: "opus" });
+    useChatStore.setState({ sessionReasoningEffort: null, sessionModelOverride: "opus" });
     await useChatStore.getState().switchTo("conv_codex_claude");
 
     const patches = patchCallsFor("conv_codex_claude");
@@ -8375,23 +8168,23 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       reasoning_effort: "medium",
     });
 
-    useChatStore.setState({ selectedEffort: "high", selectedModel: null });
+    useChatStore.setState({ sessionReasoningEffort: "high", sessionModelOverride: null });
     await useChatStore.getState().switchTo("conv_cn_eff");
 
     const patches = patchCallsFor("conv_cn_eff");
     // Existing server effort wins over the sticky picker value.
     expect(patches.some((p) => "reasoning_effort" in p)).toBe(false);
-    expect(useChatStore.getState().selectedEffort).toBe("medium");
+    expect(useChatStore.getState().sessionReasoningEffort).toBe("medium");
   });
 
-  it("does NOT PATCH model or effort on a custom session even with sticky prefs", async () => {
+  it("binds a custom session without retaining another session's configuration", async () => {
     seedSession("conv_other", []);
     // No terminal/native labels → custom web agent.
     withSnapshot("conv_other", { labels: {} });
 
     useChatStore.setState({
-      selectedEffort: "high",
-      selectedModel: "claude-opus-4-7",
+      sessionReasoningEffort: "high",
+      sessionModelOverride: "claude-opus-4-7",
     });
     await useChatStore.getState().switchTo("conv_other");
 
@@ -8400,9 +8193,8 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     expect(patches.some((p) => "model_override" in p)).toBe(false);
 
     const state = useChatStore.getState();
-    // Sticky picks remain in the store, but were not applied here.
-    expect(state.selectedModel).toBe("claude-opus-4-7");
-    expect(state.selectedEffort).toBe("high");
+    expect(state.sessionModelOverride).toBeNull();
+    expect(state.sessionReasoningEffort).toBeNull();
   });
 
   it("does NOT PATCH effort on an active custom session", async () => {
@@ -8414,7 +8206,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     await useChatStore.getState().setEffort("high");
 
     expect(patchCallsFor("conv_custom")).toEqual([]);
-    expect(useChatStore.getState().selectedEffort).toBe("high");
+    expect(useChatStore.getState().sessionReasoningEffort).toBeNull();
   });
 
   it("PATCHes effort on an active claude-native session", async () => {
@@ -8422,11 +8214,19 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     withSnapshot("conv_supported", { labels: { "omnigent.wrapper": "claude-code-native-ui" } });
     await useChatStore.getState().switchTo("conv_supported");
     fetchMock.mockClear();
+    window.localStorage.setItem(
+      "omnigent:last-mode-by-harness",
+      JSON.stringify({ "claude-native": { model: "haiku", effort: "low" } }),
+    );
 
     await useChatStore.getState().setEffort("high");
 
     expect(patchCallsFor("conv_supported")).toEqual([{ reasoning_effort: "high" }]);
-    expect(useChatStore.getState().selectedEffort).toBe("high");
+    expect(useChatStore.getState().sessionReasoningEffort).toBe("high");
+    expect(
+      JSON.parse(window.localStorage.getItem("omnigent:last-mode-by-harness") ?? "{}"),
+    ).toEqual({ "claude-native": { model: "haiku", effort: "low" } });
+    expect(window.localStorage.getItem("omnigent.picker.effort")).toBeNull();
   });
 
   it("PATCHes effort on an active codex-native session", async () => {
@@ -8438,7 +8238,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     await useChatStore.getState().setEffort("high");
 
     expect(patchCallsFor("conv_codex_supported")).toEqual([{ reasoning_effort: "high" }]);
-    expect(useChatStore.getState().selectedEffort).toBe("high");
+    expect(useChatStore.getState().sessionReasoningEffort).toBe("high");
   });
 
   it("hydrates Codex Plan mode from the session label", async () => {
@@ -8596,7 +8396,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     );
   });
 
-  it("server-side overrides win over sticky pref and skip the PATCH", async () => {
+  it("hydrates server-side model and effort without PATCHing", async () => {
     seedSession("conv_existing", []);
     withSnapshot("conv_existing", {
       labels: { "omnigent.wrapper": "claude-code-native-ui" },
@@ -8605,44 +8405,31 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     });
 
     useChatStore.setState({
-      selectedEffort: "high",
-      selectedModel: "claude-opus-4-7",
+      sessionReasoningEffort: "high",
+      sessionModelOverride: "claude-opus-4-7",
     });
     await useChatStore.getState().switchTo("conv_existing");
 
     const patches = patchCallsFor("conv_existing");
-    // Only the runner_id PATCH should fire — no sticky handoff because
-    // the session already carries authoritative values.
     expect(patches.some((p) => "reasoning_effort" in p)).toBe(false);
     expect(patches.some((p) => "model_override" in p)).toBe(false);
 
     const state = useChatStore.getState();
-    expect(state.selectedEffort).toBe("low");
-    // The sticky preference is untouched by the session's own request…
-    expect(state.selectedModel).toBe("claude-opus-4-7");
-    // …which rides in verbatim as the request slot.
+    expect(state.sessionReasoningEffort).toBe("low");
     expect(state.sessionModelOverride).toBe("claude-sonnet-4-6");
   });
 
-  it("does NOT surface an unapplied sticky model as the session override (custom session)", async () => {
-    // Regression: a fresh non-claude-native session inherits the global
-    // sticky pick into `selectedModel`, but the pick is NOT applied
-    // server-side. `/model` reads `sessionModelOverride`, which must stay
-    // null so the readout shows "agent default" rather than a bogus
-    // "(override)". See ChatPage `/model` and `/context` readouts.
+  it("keeps an empty custom-session model override empty", async () => {
     seedSession("conv_sticky_custom", []);
     withSnapshot("conv_sticky_custom", { labels: {} });
 
-    useChatStore.setState({ selectedModel: "claude-sonnet-4-6", sessionModelOverride: null });
+    useChatStore.setState({ sessionModelOverride: null });
     await useChatStore.getState().switchTo("conv_sticky_custom");
 
     const patches = patchCallsFor("conv_sticky_custom");
     expect(patches.some((p) => "model_override" in p)).toBe(false);
 
     const state = useChatStore.getState();
-    // Sticky pick preserved for cross-session restore...
-    expect(state.selectedModel).toBe("claude-sonnet-4-6");
-    // ...but it is NOT the session's active override.
     expect(state.sessionModelOverride).toBeNull();
   });
 
@@ -8655,7 +8442,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       model_options: CLAUDE_MODEL_OPTIONS,
     });
 
-    useChatStore.setState({ selectedModel: "opus", sessionModelOverride: null });
+    useChatStore.setState({ sessionModelOverride: null });
     await useChatStore.getState().switchTo("conv_sticky_cn");
 
     expect(patchCallsFor("conv_sticky_cn").some((p) => "model_override" in p)).toBe(false);
@@ -8668,7 +8455,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     seedSession("conv_sticky_gpt", []);
     withSnapshot("conv_sticky_gpt", { labels: { "omnigent.wrapper": "claude-code-native-ui" } });
 
-    useChatStore.setState({ selectedModel: "gpt-5.4", sessionModelOverride: null });
+    useChatStore.setState({ sessionModelOverride: null });
     await useChatStore.getState().switchTo("conv_sticky_gpt");
 
     expect(patchCallsFor("conv_sticky_gpt").some((p) => "model_override" in p)).toBe(false);
@@ -13780,7 +13567,7 @@ describe("beginLocalConversation — optimistic model seed", () => {
     seedConversationsCache([]);
     // A previous session left a cross-session sticky pick; it must NOT leak into
     // the optimistic view — the seed is authoritative.
-    useChatStore.setState({ selectedModel: "claude-sonnet-4-6" });
+    useChatStore.setState({ sessionModelOverride: "claude-sonnet-4-6" });
     const begun = beginLocalConversation("hi", undefined, undefined, undefined, {
       modelOverride: "opus[1m]",
       reasoningEffort: "high",
@@ -13866,7 +13653,7 @@ describe("beginLocalConversation — optimistic model seed", () => {
 
   it("is backward compatible: a 4-arg call seeds no model fields", () => {
     seedConversationsCache([]);
-    useChatStore.setState({ selectedModel: "claude-sonnet-4-6" });
+    useChatStore.setState({ sessionModelOverride: "claude-sonnet-4-6" });
     beginLocalConversation("hi", undefined);
     const state = useChatStore.getState();
     expect(state.sessionModelOverride).toBeNull();
@@ -13874,22 +13661,19 @@ describe("beginLocalConversation — optimistic model seed", () => {
     expect(state.sessionModelSeeded).toBe(false);
   });
 
-  it("marks a seeded null effort authoritative so it wins over a non-null sticky", () => {
+  it("seeds an explicit default effort into the optimistic conversation", () => {
     seedConversationsCache([]);
-    // Another session left a sticky "high"; a create that intentionally omits
-    // effort (seeded null) must NOT borrow it.
-    useChatStore.setState({ selectedEffort: "high" });
+    useChatStore.setState({ sessionReasoningEffort: "high" });
     beginLocalConversation("hi", undefined, undefined, undefined, {
       modelOverride: null,
       reasoningEffort: null,
       harness: "claude-sdk",
     });
     const state = useChatStore.getState();
-    expect(state.sessionEffortSeeded).toBe(true);
     expect(state.sessionReasoningEffort).toBeNull();
   });
 
-  it("marks a seeded explicit effort authoritative", () => {
+  it("seeds an explicit effort into the optimistic conversation", () => {
     seedConversationsCache([]);
     beginLocalConversation("hi", undefined, undefined, undefined, {
       modelOverride: null,
@@ -13897,46 +13681,6 @@ describe("beginLocalConversation — optimistic model seed", () => {
       harness: "claude-sdk",
     });
     const state = useChatStore.getState();
-    expect(state.sessionEffortSeeded).toBe(true);
     expect(state.sessionReasoningEffort).toBe("low");
-  });
-
-  it("does NOT mark effort authoritative when the create omits it (stays a sticky fallback)", () => {
-    seedConversationsCache([]);
-    beginLocalConversation("hi", undefined, undefined, undefined, {
-      modelOverride: "opus[1m]",
-      harness: "claude-sdk",
-    });
-    expect(useChatStore.getState().sessionEffortSeeded).toBe(false);
-  });
-
-  it("leaves effort unseeded for a 4-arg (no model) call", () => {
-    seedConversationsCache([]);
-    beginLocalConversation("hi", undefined);
-    expect(useChatStore.getState().sessionEffortSeeded).toBe(false);
-  });
-
-  it("preserves the effort-seeded authority across the temp→real rekey", () => {
-    seedSession("conv_effort_seed");
-    seedConversationsCache([]);
-    const begun = beginLocalConversation("hi", undefined, undefined, undefined, {
-      modelOverride: null,
-      reasoningEffort: null,
-      harness: "claude-sdk",
-      boundAgentId: "agent_xyz",
-    })!;
-    hydrateLocalConversation(
-      begun.tempConvId,
-      "conv_effort_seed",
-      "agent_xyz",
-      "hi",
-      undefined,
-      begun.pendingMsgTempId,
-      null,
-      () => {},
-    );
-    // Authority rides through rekey (registry copies entry state) until a
-    // server snapshot supersedes it.
-    expect(useChatStore.getState().sessionEffortSeeded).toBe(true);
   });
 });

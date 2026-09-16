@@ -24,6 +24,7 @@ import {
   openSessionStream,
   postEvent,
   retryRateLimitedTurn,
+  requestSessionCreation,
   SESSION_HISTORY_PAGE_SIZE,
   stopSession,
   updateSession,
@@ -111,6 +112,43 @@ describe("apiErrorFromResponse", () => {
 });
 
 describe("createSession", () => {
+  it("maps the complete create configuration to snake_case in one request", async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ id: "conv_new" }));
+
+    await requestSessionCreation({
+      agentId: "agent_xyz",
+      projectId: "project_abc",
+      labels: { "omnigent.ui": "terminal" },
+      hostId: "host_123",
+      workspace: "/workspace",
+      git: { branchName: "feature", baseBranch: "main", existingWorktree: true },
+      terminalLaunchArgs: ["--permission-mode", "plan"],
+      modelOverride: "opus",
+      reasoningEffort: "xhigh",
+      costControlModeOverride: "off",
+      subagentRoutingOverride: "on",
+      harnessOverride: "claude-native",
+      smartRoutingMessage: "seed prompt",
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      agent_id: "agent_xyz",
+      project_id: "project_abc",
+      labels: { "omnigent.ui": "terminal" },
+      host_id: "host_123",
+      workspace: "/workspace",
+      git: { branch_name: "feature", base_branch: "main", existing_worktree: true },
+      terminal_launch_args: ["--permission-mode", "plan"],
+      model_override: "opus",
+      reasoning_effort: "xhigh",
+      cost_control_mode_override: "off",
+      subagent_routing_override: "on",
+      harness_override: "claude-native",
+      smart_routing_message: "seed prompt",
+    });
+  });
+
   it("POSTs agent_id (snake_case) and parses the snake_case response", async () => {
     fetchMock.mockResolvedValueOnce(
       mockJsonResponse({
@@ -768,7 +806,7 @@ describe("runner binding", () => {
     expect(JSON.parse(init.body as string)).toEqual({ subagent_routing_override: null });
   });
 
-  it("forwards silent:true so bind-time auto-apply skips runner forward", async () => {
+  it("forwards silent:true for persistence-only session updates", async () => {
     fetchMock.mockResolvedValueOnce(
       mockJsonResponse({
         id: "conv_abc",

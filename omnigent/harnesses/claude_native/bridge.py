@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
 import hashlib
 import ipaddress
 import json
@@ -53,7 +54,7 @@ from http import HTTPStatus
 from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from urllib import request
 
 from omnigent._platform import is_wsl, stable_user_id
@@ -82,10 +83,28 @@ _logger = logging.getLogger(__name__)
 _INJECTION_CANCEL_EVENT: ContextVar[threading.Event | None] = ContextVar(
     "claude_native_injection_cancel_event", default=None
 )
+_INJECTION_LOCKS_GUARD = threading.Lock()
+_INJECTION_LOCKS: dict[str, threading.Lock] = {}
+_InjectionFunction = TypeVar("_InjectionFunction", bound=Callable[..., Any])
 
 BRIDGE_DIR_ENV_VAR = "HARNESS_CLAUDE_NATIVE_BRIDGE_DIR"
 REQUEST_SESSION_ID_ENV_VAR = "HARNESS_CLAUDE_NATIVE_REQUEST_SESSION_ID"
 BRIDGE_ID_LABEL_KEY = "omnigent.claude_native.bridge_id"
+
+
+def _serialize_bridge_injection(function: _InjectionFunction) -> _InjectionFunction:
+    """Serialize complete tmux injection operations for each bridge directory."""
+
+    @functools.wraps(function)
+    def wrapped(bridge_dir: Path, *args: Any, **kwargs: Any) -> Any:
+        key = os.path.normcase(os.path.abspath(os.fspath(bridge_dir)))
+        with _INJECTION_LOCKS_GUARD:
+            lock = _INJECTION_LOCKS.setdefault(key, threading.Lock())
+        with lock:
+            return function(bridge_dir, *args, **kwargs)
+
+    return cast(_InjectionFunction, wrapped)
+
 
 # Bind/advertise coordinates for the bridge's HTTP servers (the tool relay and
 # the MCP control ingress). These default to loopback (127.0.0.1) so an
@@ -3633,6 +3652,7 @@ def write_tmux_target(
     _write_json_file(bridge_dir / _TMUX_FILE, payload)
 
 
+@_serialize_bridge_injection
 def inject_user_message(
     bridge_dir: Path,
     *,
@@ -4056,6 +4076,7 @@ def kill_session(
         raise
 
 
+@_serialize_bridge_injection
 def inject_slash_command(
     bridge_dir: Path,
     *,
