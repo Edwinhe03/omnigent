@@ -1057,6 +1057,10 @@ class HostProcess:
         self._configured_harnesses: dict[str, HarnessAvailability] | None = None
         self._gateway_inference: dict[str, bool] | None = None
         self._capabilities_initialized = False
+        # Invalidates deferred probe results when an install or credential
+        # write has already produced a fresher snapshot. Capability state is
+        # mutated only on the event loop, so no cross-thread lock is needed.
+        self._capability_generation = 0
         # Consecutive login-page redirects; reset by a successful upgrade.
         self._login_redirect_streak = 0
         # Reset by a successful upgrade or non-auth error; bounds fresh-host refresh retries.
@@ -1121,6 +1125,10 @@ class HostProcess:
         # Warms the zygote at daemon start so the first launch doesn't pay
         # its one-time import; see run().
         self._zygote_prestart_task: asyncio.Task[ZygoteManager | None] | None = None
+        # Discovers advisory harness metadata after the first host hello. The
+        # task belongs to the daemon, not a tunnel generation, so reconnects
+        # share one probe instead of cancelling or repeating it.
+        self._capability_init_task: asyncio.Task[None] | None = None
         # Inbound frames are handled on their own tasks (see
         # _start_frame_task) so one slow handler — a model-options CLI exec,
         # an npm install — can't head-of-line block a launch or a stat behind
@@ -3401,8 +3409,8 @@ class HostProcess:
             _logger.exception("Host harness readiness probe failed")
             if startup:
                 print(
-                    "⚠ Could not inspect installed harnesses; the host will "
-                    f"connect with harness readiness unknown: {exc}",
+                    "⚠ Could not inspect installed harnesses; the host remains "
+                    f"connected with harness readiness unknown: {exc}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -3416,17 +3424,18 @@ class HostProcess:
             _logger.exception("Host gateway-inference probe failed")
             if startup:
                 print(
-                    "⚠ Could not inspect gateway inference; the host will "
-                    f"connect with gateway backing unknown: {exc}",
+                    "⚠ Could not inspect gateway inference; the host remains "
+                    f"connected with gateway backing unknown: {exc}",
                     file=sys.stderr,
                     flush=True,
                 )
             return None
 
     async def _initialize_capabilities(self) -> None:
-        """Build the initial capability snapshot once, before any handshake."""
+        """Build the initial capability snapshot once."""
         if self._capabilities_initialized:
             return
+        generation = self._capability_generation
         try:
             configured, gateway = await asyncio.wait_for(
                 asyncio.gather(
@@ -3442,13 +3451,31 @@ class HostProcess:
                 _HOST_CAPABILITY_INIT_TIMEOUT_S,
             )
             print(
-                "⚠ Host capability discovery timed out; connecting with readiness unknown.",
+                "⚠ Host capability discovery timed out; keeping readiness unknown.",
                 file=sys.stderr,
                 flush=True,
             )
-        self._configured_harnesses = configured
-        self._gateway_inference = gateway
+        if self._capability_generation == generation:
+            self._replace_capabilities(configured, gateway)
         self._capabilities_initialized = True
+
+    def _replace_capabilities(
+        self,
+        configured: dict[str, HarnessAvailability] | None,
+        gateway: dict[str, bool] | None,
+    ) -> None:
+        """Replace the advisory snapshot and invalidate older probe results."""
+        self._configured_harnesses = dict(configured) if configured is not None else None
+        self._gateway_inference = dict(gateway) if gateway is not None else None
+        self._capability_generation += 1
+
+    def _start_capability_discovery(self) -> None:
+        """Start the daemon-wide capability probe once."""
+        if self._capability_init_task is None:
+            self._capability_init_task = asyncio.create_task(
+                self._initialize_capabilities(),
+                name="host-capability-discovery",
+            )
 
     async def _lifecycle_monitor_loop(self) -> None:
         """Self-terminate once this daemon no longer owns its registry record.
@@ -3528,11 +3555,6 @@ class HostProcess:
             authorization / outdated server, or a loopback server that
             kept refusing connections (the local server is gone).
         """
-        # Capability probes may shell out or inspect local config, so perform
-        # them once during daemon initialization. They are advisory: a broken
-        # harness is reported as unknown and must not prevent registration.
-        await self._initialize_capabilities()
-
         # Reap orphaned harness/tool grandchildren that reparent here when a
         # runner dies (this host is PID 1 in a container, or a subreaper
         # otherwise). Without this they pile up as <defunct> zombies and can
@@ -3767,6 +3789,11 @@ class HostProcess:
             # takeover paths that own it (this daemon may have been superseded).
             if self._lifecycle_lock is not None:
                 self._lifecycle_lock.release()
+            if self._capability_init_task is not None:
+                self._capability_init_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._capability_init_task
+                self._capability_init_task = None
             if self._zygote_prestart_task is not None:
                 self._zygote_prestart_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -4066,24 +4093,16 @@ class HostProcess:
             raise HostConnectError(f"Could not encode host.hello: {exc}") from exc
         await ws.send(encoded_hello)
         self._ws = ws
-        # Reports raised while disconnected must wait until registration; the
-        # server cannot route them before this connection owns the host.
-        for runner_id, error in list(self._unreported_exits.items()):
-            del self._unreported_exits[runner_id]
-            await self._report_runner_exit(runner_id, error)
-        print(
-            f"✓ Connected as {self._identity.name!r} "
-            f"({self._identity.host_id}), {len(hello.runners)} live runner(s). "
-            "Listening for sessions — Ctrl-C to disconnect.",
-            flush=True,
+        # Capability discovery is advisory and can invoke several harness
+        # CLIs. Register first, then probe once for the daemon so it cannot
+        # delay the host becoming available.
+        self._start_capability_discovery()
+        readiness_task = asyncio.create_task(
+            self._harness_readiness_loop(
+                ws,
+                publish_startup_capabilities=hello.configured_harnesses is None,
+            )
         )
-
-        # Readiness refresh runs in its own task, never on this receive loop:
-        # a harness probe that blocks (a hung CLI ``--version`` / ``auth
-        # status``) must not delay ``ws.recv()`` or the inline keepalive pong
-        # the server's watchdog counts as liveness, or it closes the tunnel
-        # with ``4003 ping timeout``.
-        readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
         # Warm the pre-launch model listings once a server can actually ask
         # for them, so the first picker open is served from cache instead of
         # waiting on a harness probe. Cache-fresh reconnects are a no-op.
@@ -4091,6 +4110,23 @@ class HostProcess:
             self._prewarm_model_options(), name="host-model-options-prewarm"
         )
         try:
+            # Reports raised while disconnected must wait until registration;
+            # the server cannot route them before this connection owns the host.
+            for runner_id, error in list(self._unreported_exits.items()):
+                del self._unreported_exits[runner_id]
+                await self._report_runner_exit(runner_id, error)
+            print(
+                f"✓ Connected as {self._identity.name!r} "
+                f"({self._identity.host_id}), {len(hello.runners)} live runner(s). "
+                "Listening for sessions — Ctrl-C to disconnect.",
+                flush=True,
+            )
+
+            # Readiness refresh runs in its own task, never on this receive loop:
+            # a harness probe that blocks (a hung CLI ``--version`` / ``auth
+            # status``) must not delay ``ws.recv()`` or the inline keepalive pong
+            # the server's watchdog counts as liveness, or it closes the tunnel
+            # with ``4003 ping timeout``.
             while True:
                 raw = await ws.recv()
                 self._conn_frame_received = True
@@ -4120,16 +4156,24 @@ class HostProcess:
     async def _harness_readiness_loop(
         self,
         ws: websockets.asyncio.client.ClientConnection,
+        *,
+        publish_startup_capabilities: bool = False,
     ) -> None:
         """Refresh advisory capabilities without endangering the tunnel."""
-        configured = self._configured_harnesses
-        gateway = self._gateway_inference
+        if publish_startup_capabilities:
+            published_configured, published_gateway = await self._publish_startup_capabilities(ws)
+        else:
+            published_configured = self._configured_harnesses
+            published_gateway = self._gateway_inference
         loop = asyncio.get_running_loop()
         next_quick = loop.time() + HARNESS_READINESS_REFRESH_INTERVAL_S
         next_full = loop.time() + HARNESS_READINESS_FULL_REFRESH_INTERVAL_S
         while True:
             await asyncio.sleep(max(0.0, min(next_quick, next_full) - loop.time()))
             now = loop.time()
+            generation = self._capability_generation
+            configured = self._configured_harnesses
+            gateway = self._gateway_inference
             refresh_full = configured is None or now >= next_full
             if now >= next_quick:
                 next_quick = now + HARNESS_READINESS_REFRESH_INTERVAL_S
@@ -4148,21 +4192,54 @@ class HostProcess:
             next_full = now + HARNESS_READINESS_FULL_REFRESH_INTERVAL_S
             new_configured = latest if latest is not None else configured
             new_gateway = latest_gateway if latest_gateway is not None else gateway
-            if new_configured is None:
-                continue
-            if new_configured != configured or new_gateway != gateway:
+            if self._capability_generation == generation and (
+                new_configured != configured or new_gateway != gateway
+            ):
+                self._replace_capabilities(new_configured, new_gateway)
+            configured = self._configured_harnesses
+            gateway = self._gateway_inference
+            if configured is not None and (
+                configured != published_configured or gateway != published_gateway
+            ):
                 await ws.send(
                     encode_host_frame(
                         HostHarnessReadinessFrame(
-                            configured_harnesses=new_configured,
-                            gateway_inference=new_gateway,
+                            configured_harnesses=configured,
+                            gateway_inference=gateway,
                         )
                     )
                 )
-                configured = new_configured
-                gateway = new_gateway
-                self._configured_harnesses = configured
-                self._gateway_inference = gateway
+                published_configured = configured
+                published_gateway = gateway
+
+    async def _publish_startup_capabilities(
+        self,
+        ws: websockets.asyncio.client.ClientConnection,
+    ) -> tuple[
+        dict[str, HarnessAvailability] | None,
+        dict[str, bool] | None,
+    ]:
+        """Publish the deferred startup probe without owning its lifetime."""
+        task = self._capability_init_task
+        if task is not None:
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _logger.exception("Host startup capability discovery failed")
+        configured = self._configured_harnesses
+        gateway = self._gateway_inference
+        if configured is not None:
+            await ws.send(
+                encode_host_frame(
+                    HostHarnessReadinessFrame(
+                        configured_harnesses=configured,
+                        gateway_inference=gateway,
+                    )
+                )
+            )
+        return configured, gateway
 
     def _raise_connection_error(self, frame: HostConnectionErrorFrame) -> None:
         """Raise the lifecycle exception requested by a server error frame."""
@@ -4298,11 +4375,21 @@ class HostProcess:
             # The installer shells out (npm) and can run for minutes, so run
             # it off the event loop and reply when it completes.
             install_result = await asyncio.to_thread(self._handle_install_harness, frame)
+            if install_result.status == "ok":
+                self._replace_capabilities(
+                    install_result.configured_harnesses,
+                    install_result.gateway_inference,
+                )
             await ws.send(encode_host_frame(install_result))
         elif isinstance(frame, HostStoreSecretFrame):
             # The credential write touches the OS keychain / config file, so run
             # it off the event loop and reply when it completes.
             secret_result = await asyncio.to_thread(self._handle_store_secret, frame)
+            if secret_result.status == "ok":
+                self._replace_capabilities(
+                    secret_result.configured_harnesses,
+                    secret_result.gateway_inference,
+                )
             await ws.send(encode_host_frame(secret_result))
         elif isinstance(frame, HostDetectCredentialsFrame):
             # Ambient detection may probe files / a localhost socket, so run it
