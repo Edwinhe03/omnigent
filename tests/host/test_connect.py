@@ -2837,6 +2837,27 @@ def test_build_runner_env_omits_cleanup_owner_without_active_janitor() -> None:
     assert RUNNER_HOST_OWNS_GLOBAL_CLEANUP_ENV_VAR not in env
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Symlink path is POSIX-only.")
+async def test_build_runner_env_preserves_short_symlink_spelling(tmp_path: Path) -> None:
+    target = tmp_path / "private" / "tmp"
+    target.mkdir(parents=True)
+    short_root = tmp_path / "tmp"
+    short_root.symlink_to(target, target_is_directory=True)
+
+    env = _build_runner_env(
+        {},
+        server_url="http://server",
+        runner_id="runner_abc",
+        binding_token="tok",
+        workspace="/ws",
+        parent_pid=42,
+        harness_tmp_parent=short_root,
+    )
+
+    assert env[HARNESS_TMP_PARENT_ENV_VAR] == str(short_root)
+    assert env[HARNESS_TMP_PARENT_ENV_VAR] != str(target.resolve())
+
+
 def test_build_runner_env_forwards_harness_credentials_and_endpoints() -> None:
     """
     Every var in HARNESS_CREDENTIAL_ENV_VARS forwards when present —
@@ -4995,78 +5016,6 @@ def test_run_host_process_announces_session_log_dir_on_start(
     assert "This host's log: ~/.omnigent/logs/host/host-" in out
 
 
-class _ConnectReachedThenPark:
-    """Async-CM stand-in for ``websockets.asyncio.client.connect``.
-
-    Signals that the host reached its connect attempt (the step that
-    registers it), then parks until the test cancels ``run()`` so a
-    background startup task can be observed completing meanwhile.
-    """
-
-    def __init__(self, reached: asyncio.Event) -> None:
-        self._reached = reached
-
-    async def __aenter__(self) -> object:
-        self._reached.set()
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-    async def __aexit__(self, *exc_info: object) -> bool:
-        return False
-
-
-async def test_run_sweeps_orphaned_native_bridge_dirs_on_startup(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Host startup reclaims native bridge dirs orphaned by a crashed runner.
-
-    A runner that dies uncleanly (SIGKILL / crash / host restart mid-run)
-    never runs its explicit-delete cleanup, and if no new runner ever
-    launches on the machine the runner-side startup sweep never fires
-    either — so ``~/.omnigent`` grows without bound. The host daemon's own
-    (re)start is the reliable moment to reap — in the background: the sweep
-    must complete while the connect loop (which registers the host) is
-    already underway, not as a startup prerequisite, and it must be torn
-    down cleanly when ``run()`` exits.
-    """
-    import websockets.asyncio.client as ws_client
-
-    import omnigent.runner._entry as entry_mod
-
-    monkeypatch.setattr(entry_mod, "_make_auth_token_factory", lambda *, server_url=None: None)
-    connect_reached = asyncio.Event()
-    monkeypatch.setattr(
-        ws_client, "connect", lambda url, **kwargs: _ConnectReachedThenPark(connect_reached)
-    )
-    sweeps: list[int] = []
-    monkeypatch.setattr(
-        "omnigent.native.native_bridge_common.reap_orphaned_native_bridge_dirs",
-        lambda: sweeps.append(1) or 3,
-    )
-    host = _host()
-    host._capabilities_initialized = True
-    host._zygote_disabled = True  # keep the test from prestarting a zygote
-
-    caplog.set_level(logging.INFO, logger="omnigent.host.connect")
-    run_task = asyncio.create_task(host.run())
-    try:
-        await asyncio.wait_for(connect_reached.wait(), timeout=10.0)
-        sweep_task = host._bridge_sweep_task
-        assert sweep_task is not None, "run() never launched the bridge-dir sweep"
-        # The host is parked in its connect attempt; the sweep completes
-        # concurrently rather than gating registration.
-        await asyncio.wait_for(asyncio.shield(sweep_task), timeout=10.0)
-    finally:
-        run_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await run_task
-
-    assert sweeps == [1]
-    assert "Reaped 3 orphaned native bridge dir(s)" in caplog.text
-    assert host._bridge_sweep_task is None, "run() teardown left the sweep task"
-
-
 async def test_run_starts_and_shuts_down_host_maintenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5130,47 +5079,6 @@ async def test_run_survives_host_maintenance_start_failure(
     await host.run()
 
     assert host._maintenance_janitor is None
-
-
-async def test_run_survives_a_failing_native_bridge_dir_sweep(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A raising bridge-dir sweep must not abort host startup.
-
-    The sweep is best-effort housekeeping; a broken bridge module or an
-    unreadable bridge root must never prevent the host from registering.
-    """
-    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
-    _patch_connect(monkeypatch, _ConnectSpy([asyncio.CancelledError()]))
-
-    def _boom() -> int:
-        raise OSError("bridge root unreadable")
-
-    monkeypatch.setattr(
-        "omnigent.native.native_bridge_common.reap_orphaned_native_bridge_dirs",
-        _boom,
-    )
-    host = _host()
-
-    # Startup completes (run returns via the clean cancel) despite the raise.
-    await host.run()
-
-
-async def test_bridge_dir_sweep_failure_is_contained(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failing sweep is housekeeping: it must never escape its background task."""
-
-    def _boom() -> int:
-        raise RuntimeError("sweep exploded")
-
-    monkeypatch.setattr(
-        "omnigent.native.native_bridge_common.reap_orphaned_native_bridge_dirs",
-        _boom,
-    )
-    host = _host()
-    # Must swallow the failure (logged at debug), not raise.
-    await host._sweep_orphaned_bridge_dirs()
 
 
 async def test_launch_cancelled_midspawn_does_not_leak_untracked_runner(
@@ -5246,6 +5154,19 @@ async def test_launch_cancelled_midspawn_does_not_leak_untracked_runner(
     while time.monotonic() < deadline and not maintenance_reasons:
         await asyncio.sleep(0.01)
     assert maintenance_reasons == ["runner_spawn_abandoned"]
+
+
+@pytest.mark.timeout(5, method="signal")
+async def test_drain_runner_stop_tasks_removes_completed_tasks_before_callbacks() -> None:
+    host = _make_host_process()
+    task = asyncio.create_task(asyncio.sleep(0))
+    await task
+    host._runner_stop_tasks.add(task)
+    task.add_done_callback(host._runner_stop_tasks.discard)
+
+    await host._drain_runner_stop_tasks()
+
+    assert not host._runner_stop_tasks
 
 
 async def test_handle_model_options_serves_codex_probe_rows_and_caches(

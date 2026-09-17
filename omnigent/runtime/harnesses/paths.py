@@ -23,6 +23,11 @@ def harness_tmp_parent(env: Mapping[str, str] | None = None) -> Path:
     return Path(f"/tmp/omnigent-{os.getuid()}")
 
 
+def absolute_harness_tmp_parent(path: Path) -> Path:
+    """Make a harness socket root absolute without resolving symlinks."""
+    return Path(os.path.abspath(path.expanduser()))
+
+
 def resolve_harness_tmp_parent(env: Mapping[str, str] | None = None) -> Path:
-    """Return one absolute harness socket root for cross-process propagation."""
-    return harness_tmp_parent(env).resolve()
+    """Return one short absolute socket root for cross-process propagation."""
+    return absolute_harness_tmp_parent(harness_tmp_parent(env))

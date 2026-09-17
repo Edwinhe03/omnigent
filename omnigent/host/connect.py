@@ -154,6 +154,7 @@ from omnigent.runner.transports.ws_tunnel.frames import (
 )
 from omnigent.runtime.harnesses.paths import (
     HARNESS_TMP_PARENT_ENV_VAR,
+    absolute_harness_tmp_parent,
     resolve_harness_tmp_parent,
 )
 from omnigent.runtime.websocket_metrics import (
@@ -856,7 +857,7 @@ def _build_runner_env(
     if host_owns_global_cleanup:
         env[RUNNER_HOST_OWNS_GLOBAL_CLEANUP_ENV_VAR] = "1"
     if harness_tmp_parent is not None:
-        env[HARNESS_TMP_PARENT_ENV_VAR] = str(harness_tmp_parent.expanduser().resolve())
+        env[HARNESS_TMP_PARENT_ENV_VAR] = str(absolute_harness_tmp_parent(harness_tmp_parent))
     # Bound glibc allocator RSS in the runner (no-op off Linux). Injected
     # explicitly because the allowlist above would otherwise drop an inherited
     # MALLOC_ARENA_MAX. setdefault so an operator override still wins.
@@ -1112,9 +1113,6 @@ class HostProcess:
         self._runner_stop_tasks: set[asyncio.Task[None]] = set()
         # Strong ref to the orphan-reaper task (see :meth:`_orphan_reaper_loop`).
         self._reaper_task: asyncio.Task[None] | None = None
-        # Background sweep of native bridge dirs orphaned by prior runs; kept
-        # off the startup path so it never delays registration (see run()).
-        self._bridge_sweep_task: asyncio.Task[None] | None = None
         # Host-owned machine-global cleanup. Runner exits trigger background
         # passes; runner startup never waits for them.
         self._maintenance_janitor: HostMaintenanceJanitor | None = None
@@ -3622,17 +3620,6 @@ class HostProcess:
             except OSError:
                 _logger.debug("lifecycle tunnel abort raised", exc_info=True)
 
-    async def _sweep_orphaned_bridge_dirs(self) -> None:
-        """Reclaim native bridge dirs orphaned by prior runs (best-effort)."""
-        from omnigent.native.native_bridge_common import reap_orphaned_native_bridge_dirs
-
-        try:
-            reaped = await asyncio.to_thread(reap_orphaned_native_bridge_dirs)
-            if reaped:
-                _logger.info("Reaped %d orphaned native bridge dir(s) from prior runs", reaped)
-        except Exception:  # noqa: BLE001 — housekeeping must never break the host
-            _logger.debug("native bridge-dir orphan sweep failed", exc_info=True)
-
     async def run(self) -> None:
         """Run the host process with reconnection.
 
@@ -3671,16 +3658,6 @@ class HostProcess:
         except Exception:
             self._maintenance_janitor = None
             _logger.exception("Failed to start host maintenance janitor")
-        # Reap per-session native-harness bridge dirs orphaned by a runner
-        # that died uncleanly (crash / SIGKILL / host restart mid-run). The
-        # runner performs the same sweep at its own startup, but after a
-        # crash no new runner may ever launch on this machine, so the host
-        # (re)start is the reliable moment to reclaim them. Runs as a
-        # background task: a slow sweep (many stale dirs) must not sit on the
-        # critical path of the connect loop below, which registers the host.
-        self._bridge_sweep_task = asyncio.create_task(
-            self._sweep_orphaned_bridge_dirs(), name="host-bridge-dir-sweep"
-        )
         # Detect wake from system suspend (laptop sleep) and force-drop the
         # then-dead tunnel so the reconnect loop reattaches within seconds
         # instead of waiting out the ~90s keepalive ping timeout.
@@ -3878,11 +3855,6 @@ class HostProcess:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._reaper_task
                 self._reaper_task = None
-            if self._bridge_sweep_task is not None:
-                self._bridge_sweep_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await self._bridge_sweep_task
-                self._bridge_sweep_task = None
             if self._suspend_task is not None:
                 self._suspend_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -4349,8 +4321,11 @@ class HostProcess:
         while self._runner_stop_tasks:
             tasks = list(self._runner_stop_tasks)
             for task in tasks:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+                try:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await task
+                finally:
+                    self._runner_stop_tasks.discard(task)
 
     async def _run_frame_handler(
         self, ws: websockets.asyncio.client.ClientConnection, raw: str

@@ -38,6 +38,7 @@ from pathlib import Path
 import pytest
 
 from omnigent.runtime.harnesses import _HARNESS_MODULES
+from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 from omnigent.runtime.harnesses.process_manager import (
     _AP_PID_FILE,
     _TMP_PARENT_ENV_VAR,
@@ -241,6 +242,35 @@ def test_default_tmp_parent_is_per_uid_on_posix(
     assert parent == Path(f"/tmp/omnigent-{os.getuid()}")
     # The shared parent that locked out other users must be gone.
     assert parent != Path("/tmp/omnigent")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Symlink path is POSIX-only.")
+def test_resolve_harness_tmp_parent_preserves_symlink_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "private" / "tmp"
+    target.mkdir(parents=True)
+    short_root = tmp_path / "tmp"
+    short_root.symlink_to(target, target_is_directory=True)
+    monkeypatch.setenv(_TMP_PARENT_ENV_VAR, str(short_root))
+
+    resolved = resolve_harness_tmp_parent()
+
+    assert resolved == short_root
+    assert resolved != target.resolve()
+
+
+def test_resolve_harness_tmp_parent_makes_relative_path_absolute(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(_TMP_PARENT_ENV_VAR, "nested/../harness-sockets")
+
+    resolved = resolve_harness_tmp_parent()
+
+    assert resolved == tmp_path / "harness-sockets"
 
 
 async def test_shutdown_without_start_is_noop(

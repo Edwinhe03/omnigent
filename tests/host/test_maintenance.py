@@ -18,6 +18,7 @@ def test_host_janitor_covers_global_runner_cleanup() -> None:
         "harness_process_orphans",
         "codex_process_registry",
         "terminal_orphans",
+        "native_bridge_orphans",
     ]
 
 
@@ -58,12 +59,12 @@ async def test_start_runs_stages_in_background_and_in_order(tmp_path: Path) -> N
     assert calls == ["first", "second"]
 
 
-async def test_host_janitor_uses_resolved_harness_tmp_parent(
+async def test_host_janitor_uses_absolute_unresolved_harness_tmp_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configured_root = tmp_path / "relative-parent" / ".." / "harness-sockets"
-    expected_root = configured_root.resolve()
+    expected_root = Path(os.path.abspath(configured_root.expanduser()))
     observed_roots: list[Path | None] = []
 
     async def _sweep(*, tmp_parent: Path | None = None) -> None:
@@ -82,6 +83,40 @@ async def test_host_janitor_uses_resolved_harness_tmp_parent(
     await janitor.shutdown()
 
     assert observed_roots == [expected_root]
+
+
+async def test_runner_lifecycle_trigger_reaps_native_bridge_dirs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_sweeps: list[int] = []
+
+    async def _sweep_harness_processes(*, tmp_parent: Path | None = None) -> None:
+        assert tmp_parent is not None
+
+    monkeypatch.setattr(
+        "omnigent.runtime.harnesses.process_manager.sweep_orphaned_harness_processes",
+        _sweep_harness_processes,
+    )
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.process_registry.reconcile_codex_native_process_registry",
+        lambda: None,
+    )
+    monkeypatch.setattr("omnigent.inner.terminal.reap_orphaned_terminals", lambda: None)
+    monkeypatch.setattr(
+        "omnigent.native.native_bridge_common.reap_orphaned_native_bridge_dirs",
+        lambda: bridge_sweeps.append(1) or 2,
+    )
+    janitor = HostMaintenanceJanitor.for_host(harness_tmp_parent=tmp_path / "harness-sockets")
+    janitor._lock_path = tmp_path / "maintenance.lock"
+
+    janitor.trigger("runner_exited")
+    task = janitor._task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=5.0)
+    await janitor.shutdown()
+
+    assert bridge_sweeps == [1]
 
 
 async def test_triggers_during_cleanup_coalesce_into_one_follow_up(tmp_path: Path) -> None:

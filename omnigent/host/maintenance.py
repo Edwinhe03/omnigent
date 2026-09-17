@@ -102,10 +102,13 @@ class HostMaintenanceJanitor:
     ) -> HostMaintenanceJanitor:
         """Build the machine-global cleanup stages for a host daemon."""
         from omnigent.process_logging import data_dir
-        from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
+        from omnigent.runtime.harnesses.paths import (
+            absolute_harness_tmp_parent,
+            resolve_harness_tmp_parent,
+        )
 
         resolved_harness_tmp_parent = (
-            harness_tmp_parent.expanduser().resolve()
+            absolute_harness_tmp_parent(harness_tmp_parent)
             if harness_tmp_parent is not None
             else resolve_harness_tmp_parent()
         )
@@ -129,11 +132,17 @@ class HostMaintenanceJanitor:
 
             return await _run_sync_stage(reap_orphaned_terminals)
 
+        async def _reap_native_bridge_dirs() -> object:
+            from omnigent.native.native_bridge_common import reap_orphaned_native_bridge_dirs
+
+            return await _run_sync_stage(reap_orphaned_native_bridge_dirs)
+
         return cls(
             stages=(
                 ("harness_process_orphans", _reap_harness_processes),
                 ("codex_process_registry", _reconcile_codex_processes),
                 ("terminal_orphans", _reap_terminals),
+                ("native_bridge_orphans", _reap_native_bridge_dirs),
             ),
             lock_path=data_dir().resolve() / "locks" / "host-maintenance.lock",
         )
