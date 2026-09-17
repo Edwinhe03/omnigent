@@ -14,8 +14,8 @@ dirs alone; harnesses may apply an additional retention policy.
 
 This module factors the marker write and the per-root sweep so all five
 harnesses share one implementation (the per-harness modules only supply their
-own bridge root), plus a dynamic cross-harness reaper for the runner to call at
-startup. It mirrors the terminal orphan sweep
+own bridge root), plus a dynamic cross-harness reaper for host maintenance or
+standalone runner startup. It mirrors the terminal orphan sweep
 (``inner/terminal.py:reap_orphaned_terminals``) and reuses that module's
 canonical process-liveness predicate.
 """
@@ -65,9 +65,12 @@ def prune_orphaned_dirs(
     additional eligibility predicate, such as a minimum inactivity period.
     Conservative in the dangerous direction — a reused/foreign pid reads as
     alive and is left.
-    The check-then-rmtree race (a pid reused between the liveness read and
-    the removal) is accepted: it is benign because a live session refreshes
-    its marker every turn, so only genuinely orphaned dirs reach removal.
+    The owner marker and liveness are rechecked immediately before removal,
+    after any harness-specific eligibility check. If a replacement runner
+    refreshed the marker while the sweep was inspecting the directory, the
+    directory is retained for that live session. A tiny final check-to-remove
+    race remains; eliminating it would require every bridge user to coordinate
+    on a persistent lock.
     Dirs with no marker (or an unparseable one) are left untouched: they are
     either from an older version or not ours.
 
@@ -103,6 +106,12 @@ def prune_orphaned_dirs(
                 continue
             if not eligible:
                 continue
+        try:
+            confirmed_pid = int(marker.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if confirmed_pid != pid or _process_alive(confirmed_pid):
+            continue
         shutil.rmtree(entry, ignore_errors=True)
         pruned += 1
     return pruned
@@ -110,7 +119,7 @@ def prune_orphaned_dirs(
 
 def reap_orphaned_native_bridge_dirs() -> int:
     """
-    Sweep orphaned bridge dirs across every native harness at runner startup.
+    Sweep orphaned bridge dirs across every native harness during maintenance.
 
     Iterates the registered native coding agents and invokes each one's
     module-level ``prune_orphaned_bridge_dirs`` (if it defines one), so
@@ -120,9 +129,9 @@ def reap_orphaned_native_bridge_dirs() -> int:
     isolated: an import failure, a missing pruner, or a raising pruner
     never aborts the sweep of the others.
 
-    Mirrors ``inner/terminal.py:reap_orphaned_terminals``; the runner calls
-    this once at startup to reclaim dirs leaked by a prior runner that died
-    without running the explicit delete path.
+    Mirrors ``inner/terminal.py:reap_orphaned_terminals``; host maintenance and
+    standalone runners call this to reclaim dirs leaked by a prior runner that
+    died without running the explicit delete path.
 
     :returns: The total number of orphaned bridge dirs removed.
     """
@@ -136,7 +145,7 @@ def reap_orphaned_native_bridge_dirs() -> int:
         try:
             module = importlib.import_module(module_name)
         except Exception:
-            # A broken transitive import must not crash runner startup;
+            # A broken transitive import must not crash maintenance startup;
             # skip this harness (matches the per-prune guard below).
             _logger.exception(
                 "Error importing native bridge module %s for orphan sweep",

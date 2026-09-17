@@ -213,7 +213,7 @@ def prune_orphaned_bridge_dirs() -> int:
     cannot imply that the local rollout is disposable. Keep the whole bridge
     for 7 days after its latest bridge preparation or rollout activity, then
     remove it intact.
-    Explicit session deletion remains immediate. The runner calls this via
+    Explicit session deletion remains immediate. Global maintenance calls this via
     ``native_bridge_common.reap_orphaned_native_bridge_dirs`` at startup.
 
     :returns: The number of orphaned bridge dirs pruned.

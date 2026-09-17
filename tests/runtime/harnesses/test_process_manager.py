@@ -44,10 +44,12 @@ from omnigent.runtime.harnesses.process_manager import (
     HarnessProcessManager,
     NoLiveHarnessError,
     _default_tmp_parent,
+    _kill_orphan_runners,
     _model_env_key,
     _pid_alive,
     _pids_holding_socket,
     _SubprocessEntry,
+    sweep_orphaned_harness_processes,
 )
 
 _TEST_HARNESS_NAME = "test"
@@ -160,6 +162,24 @@ async def test_start_creates_instance_dir_with_sentinel(
         assert sentinel.read_text(encoding="utf-8").strip() == str(os.getpid())
     finally:
         await manager.shutdown()
+
+
+async def test_start_can_delegate_orphan_sweep_to_host(short_tmp_parent: Path) -> None:
+    """Host-spawned runners can start without scanning machine-global state."""
+    stale_dir = short_tmp_parent / "ap-dead"
+    stale_dir.mkdir(mode=0o700)
+    (stale_dir / _AP_PID_FILE).write_text("99999999", encoding="utf-8")
+
+    manager = HarnessProcessManager(tmp_parent=short_tmp_parent)
+    await manager.start(sweep_orphans=False)
+    try:
+        assert stale_dir.exists()
+        assert manager.instance_dir.exists()
+    finally:
+        await manager.shutdown()
+
+    await sweep_orphaned_harness_processes(tmp_parent=short_tmp_parent)
+    assert not stale_dir.exists()
 
 
 async def test_start_is_idempotent(manager: HarnessProcessManager) -> None:
@@ -1346,8 +1366,7 @@ async def test_orphan_sweep_escalates_to_sigkill(
     instance_dir.mkdir()
     (instance_dir / "conv-stale.sock").touch()
 
-    mgr = HarnessProcessManager(tmp_parent=short_tmp_parent)
-    await mgr._kill_orphan_runners(instance_dir)
+    await _kill_orphan_runners(instance_dir)
 
     assert calls == 2
     assert killed == [(12345, signal.SIGTERM), (12345, signal.SIGKILL)]
