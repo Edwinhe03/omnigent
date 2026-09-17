@@ -80,7 +80,15 @@ def local_host(live_server: str, tmp_path: Path) -> Iterator[subprocess.Popen[st
     log_path = tmp_path / "host.log"
     with open(log_path, "w") as handle:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "omnigent", "host", "--server", live_server, "--non-interactive"],
+            [
+                sys.executable,
+                "-m",
+                "omnigent",
+                "host",
+                "--server",
+                live_server,
+                "--non-interactive",
+            ],
             env=env,
             stdout=handle,
             stderr=subprocess.STDOUT,
@@ -259,9 +267,7 @@ def test_created_session_keeps_default_effort_after_in_session_pick(
     claude_row = page.get_by_role("menuitem", name=re.compile(r"^Claude Code"))
     expect(claude_row.first).to_be_visible(timeout=30_000)
     claude_row.first.click()
-    expect(agent_picker).to_have_attribute(
-        "aria-label", re.compile("Claude Code"), timeout=30_000
-    )
+    expect(agent_picker).to_have_attribute("aria-label", re.compile("Claude Code"), timeout=30_000)
     _log.info("landing composer: Claude Code selected, effort left at Default")
 
     landing_input.fill(f"Context marker {marker}. Summarize this repository's README.")

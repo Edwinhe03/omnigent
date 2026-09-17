@@ -8475,6 +8475,38 @@ def test_resolve_native_claude_config_global_databricks_auth_uses_ucode(
     assert seen["refresh_models"] is True
 
 
+def test_resolve_native_claude_config_spec_global_databricks_auth_uses_ucode(
+    _isolated_provider_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spec without auth inherits the global Databricks profile."""
+    (_isolated_provider_config / "config.yaml").write_text(
+        yaml.safe_dump({"auth": {"type": "databricks", "profile": "oss"}})
+    )
+    sentinel = claude_native.ClaudeNativeUcodeConfig(
+        env={"ANTHROPIC_BASE_URL": "https://db.example/gw"},
+        api_key_helper="databricks auth token",
+        model="databricks-claude",
+    )
+    seen: dict[str, str | bool | None] = {}
+
+    def _fake_ucode(
+        profile: str | None,
+        *,
+        refresh_models: bool = True,
+    ) -> claude_native.ClaudeNativeUcodeConfig:
+        seen["profile"] = profile
+        seen["refresh_models"] = refresh_models
+        return sentinel
+
+    monkeypatch.setattr(claude_native, "_ucode_config_for_profile", _fake_ucode)
+
+    cfg = claude_native.resolve_native_claude_config(spec=_no_auth_claude_spec())
+
+    assert cfg is sentinel
+    assert seen["profile"] == "oss"
+    assert seen["refresh_models"] is True
+
+
 def test_resolve_native_claude_config_databricks_provider_uses_ucode(
     _isolated_provider_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
