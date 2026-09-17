@@ -1125,9 +1125,8 @@ class HostProcess:
         # Warms the zygote at daemon start so the first launch doesn't pay
         # its one-time import; see run().
         self._zygote_prestart_task: asyncio.Task[ZygoteManager | None] | None = None
-        # Discovers advisory harness metadata after the first host hello. The
-        # task belongs to the daemon, not a tunnel generation, so reconnects
-        # share one probe instead of cancelling or repeating it.
+        # Discovery belongs to the daemon so connection retries share one
+        # in-flight probe and registration waits for bounded discovery.
         self._capability_init_task: asyncio.Task[None] | None = None
         # Inbound frames are handled on their own tasks (see
         # _start_frame_task) so one slow handler — a model-options CLI exec,
@@ -3409,8 +3408,8 @@ class HostProcess:
             _logger.exception("Host harness readiness probe failed")
             if startup:
                 print(
-                    "⚠ Could not inspect installed harnesses; the host remains "
-                    f"connected with harness readiness unknown: {exc}",
+                    "⚠ Could not inspect installed harnesses; the host will "
+                    f"connect with harness readiness unknown: {exc}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -3424,15 +3423,15 @@ class HostProcess:
             _logger.exception("Host gateway-inference probe failed")
             if startup:
                 print(
-                    "⚠ Could not inspect gateway inference; the host remains "
-                    f"connected with gateway backing unknown: {exc}",
+                    "⚠ Could not inspect gateway inference; the host will "
+                    f"connect with gateway backing unknown: {exc}",
                     file=sys.stderr,
                     flush=True,
                 )
             return None
 
     async def _initialize_capabilities(self) -> None:
-        """Build the initial capability snapshot once."""
+        """Collect startup metadata before registration, with bounded fallback."""
         if self._capabilities_initialized:
             return
         generation = self._capability_generation
@@ -3451,7 +3450,7 @@ class HostProcess:
                 _HOST_CAPABILITY_INIT_TIMEOUT_S,
             )
             print(
-                "⚠ Host capability discovery timed out; keeping readiness unknown.",
+                "⚠ Host capability discovery timed out; connecting with readiness unknown.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -3470,8 +3469,10 @@ class HostProcess:
         self._capability_generation += 1
 
     def _start_capability_discovery(self) -> None:
-        """Start the daemon-wide capability probe once."""
-        if self._capability_init_task is None:
+        """Share discovery across reconnects, retrying unexpected initialization errors."""
+        if self._capability_init_task is None or (
+            self._capability_init_task.done() and not self._capabilities_initialized
+        ):
             self._capability_init_task = asyncio.create_task(
                 self._initialize_capabilities(),
                 name="host-capability-discovery",
@@ -3596,6 +3597,7 @@ class HostProcess:
                 asyncio.to_thread(self._ensure_zygote_started),
                 name="host-zygote-prestart",
             )
+        self._start_capability_discovery()
         backoff = _RECONNECT_BASE_S
         try:
             while True:
@@ -4060,7 +4062,10 @@ class HostProcess:
         return None
 
     async def _serve_frames(self, ws: websockets.asyncio.client.ClientConnection) -> None:
-        """Send the cached host hello, then service frames until disconnect."""
+        """Wait for bounded startup discovery, register, then service the connection."""
+        self._start_capability_discovery()
+        if self._capability_init_task is not None:
+            await asyncio.shield(self._capability_init_task)
         _tel_opt_out = False
         try:
             from omnigent.telemetry.client import is_disabled as _tel_disabled
@@ -4093,16 +4098,7 @@ class HostProcess:
             raise HostConnectError(f"Could not encode host.hello: {exc}") from exc
         await ws.send(encoded_hello)
         self._ws = ws
-        # Capability discovery is advisory and can invoke several harness
-        # CLIs. Register first, then probe once for the daemon so it cannot
-        # delay the host becoming available.
-        self._start_capability_discovery()
-        readiness_task = asyncio.create_task(
-            self._harness_readiness_loop(
-                ws,
-                publish_startup_capabilities=hello.configured_harnesses is None,
-            )
-        )
+        readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
         # Warm the pre-launch model listings once a server can actually ask
         # for them, so the first picker open is served from cache instead of
         # waiting on a harness probe. Cache-fresh reconnects are a no-op.
@@ -4156,15 +4152,10 @@ class HostProcess:
     async def _harness_readiness_loop(
         self,
         ws: websockets.asyncio.client.ClientConnection,
-        *,
-        publish_startup_capabilities: bool = False,
     ) -> None:
         """Refresh advisory capabilities without endangering the tunnel."""
-        if publish_startup_capabilities:
-            published_configured, published_gateway = await self._publish_startup_capabilities(ws)
-        else:
-            published_configured = self._configured_harnesses
-            published_gateway = self._gateway_inference
+        published_configured = self._configured_harnesses
+        published_gateway = self._gateway_inference
         loop = asyncio.get_running_loop()
         next_quick = loop.time() + HARNESS_READINESS_REFRESH_INTERVAL_S
         next_full = loop.time() + HARNESS_READINESS_FULL_REFRESH_INTERVAL_S
@@ -4184,18 +4175,16 @@ class HostProcess:
                         )
                     except Exception:
                         _logger.exception("Host harness quick readiness probe failed")
-            if not refresh_full:
-                continue
-
-            latest = await self._probe_configured_harnesses(startup=False)
-            latest_gateway = await self._probe_gateway_inference(startup=False)
-            next_full = now + HARNESS_READINESS_FULL_REFRESH_INTERVAL_S
-            new_configured = latest if latest is not None else configured
-            new_gateway = latest_gateway if latest_gateway is not None else gateway
-            if self._capability_generation == generation and (
-                new_configured != configured or new_gateway != gateway
-            ):
-                self._replace_capabilities(new_configured, new_gateway)
+            if refresh_full:
+                latest = await self._probe_configured_harnesses(startup=False)
+                latest_gateway = await self._probe_gateway_inference(startup=False)
+                next_full = now + HARNESS_READINESS_FULL_REFRESH_INTERVAL_S
+                new_configured = latest if latest is not None else configured
+                new_gateway = latest_gateway if latest_gateway is not None else gateway
+                if self._capability_generation == generation and (
+                    new_configured != configured or new_gateway != gateway
+                ):
+                    self._replace_capabilities(new_configured, new_gateway)
             configured = self._configured_harnesses
             gateway = self._gateway_inference
             if configured is not None and (
@@ -4211,35 +4200,6 @@ class HostProcess:
                 )
                 published_configured = configured
                 published_gateway = gateway
-
-    async def _publish_startup_capabilities(
-        self,
-        ws: websockets.asyncio.client.ClientConnection,
-    ) -> tuple[
-        dict[str, HarnessAvailability] | None,
-        dict[str, bool] | None,
-    ]:
-        """Publish the deferred startup probe without owning its lifetime."""
-        task = self._capability_init_task
-        if task is not None:
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _logger.exception("Host startup capability discovery failed")
-        configured = self._configured_harnesses
-        gateway = self._gateway_inference
-        if configured is not None:
-            await ws.send(
-                encode_host_frame(
-                    HostHarnessReadinessFrame(
-                        configured_harnesses=configured,
-                        gateway_inference=gateway,
-                    )
-                )
-            )
-        return configured, gateway
 
     def _raise_connection_error(self, frame: HostConnectionErrorFrame) -> None:
         """Raise the lifecycle exception requested by a server error frame."""
