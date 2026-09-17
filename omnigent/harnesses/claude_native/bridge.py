@@ -1494,53 +1494,54 @@ def prepare_bridge_dir(
     """
     resolved_bridge_id = bridge_id or conversation_id
     bridge_dir = bridge_dir_for_bridge_id(resolved_bridge_id)
-    _ensure_secure_dir(bridge_dir)
-    # A parked permission hook only touches files in this root, so the runner
-    # owns creating and validating it before any hook can fire. Derived from the
-    # bridge dir just validated rather than read from the module global, so it
-    # lands in the same tree the caller asked for.
-    _ensure_secure_dir(bridge_dir.parent / _APPROVAL_WAIT_DIR_NAME)
-    config = _read_json_file(bridge_dir / _CONFIG_FILE)
-    token = config.get("token") if isinstance(config, dict) else None
-    if not isinstance(token, str) or not token:
-        token = secrets.token_urlsafe(32)
-    payload: dict[str, object] = {
-        "bridge_id": resolved_bridge_id,
-        "active_session_id": conversation_id,
-        "conversation_id": conversation_id,
-        "workspace": str(workspace),
-        "token": token,
-        "updated_at": time.time(),
-    }
-    if launch_model is not None:
-        payload["launch_model"] = launch_model
-    model_env = {
-        key: launch_env[key]
-        for key in MODEL_VOCABULARY_ENV_VARS
-        if launch_env is not None and launch_env.get(key)
-    }
-    if model_env:
-        payload["model_env"] = model_env
-    if sandbox is not None:
-        payload["sandbox"] = _bridge_sandbox_payload(sandbox)
-    _write_json_file(bridge_dir / _CONFIG_FILE, payload)
-    # Keep ``_PERMISSION_HOOK_FILE`` — the PermissionRequest command hook
-    # reads the Omnigent server URL from it at runtime, so wiping it on re-prep
-    # breaks approval routing on reattach/rebind. ``build_hook_settings``
-    # rewrites it on cold launch.
-    for filename in (
-        _SERVER_FILE,
-        _STATE_FILE,
-        _HOOKS_FILE,
-        OBSERVER_HOOK_STDERR_FILE,
-        _TOOL_RELAY_FILE,
-        _TMUX_FILE,
-    ):
-        with contextlib.suppress(FileNotFoundError):
-            (bridge_dir / filename).unlink()
-    # Owner-pid marker for the periodic dead-owner prune; refreshed every
-    # turn so it always names the current runner. See native_bridge_common.
-    native_bridge_common.write_owner_pid_marker(bridge_dir)
+    with native_bridge_common.bridge_dir_preparation_lock(bridge_dir):
+        _ensure_secure_dir(bridge_dir)
+        # A parked permission hook only touches files in this root, so the runner
+        # owns creating and validating it before any hook can fire. Derived from the
+        # bridge dir just validated rather than read from the module global, so it
+        # lands in the same tree the caller asked for.
+        _ensure_secure_dir(bridge_dir.parent / _APPROVAL_WAIT_DIR_NAME)
+        config = _read_json_file(bridge_dir / _CONFIG_FILE)
+        token = config.get("token") if isinstance(config, dict) else None
+        if not isinstance(token, str) or not token:
+            token = secrets.token_urlsafe(32)
+        payload: dict[str, object] = {
+            "bridge_id": resolved_bridge_id,
+            "active_session_id": conversation_id,
+            "conversation_id": conversation_id,
+            "workspace": str(workspace),
+            "token": token,
+            "updated_at": time.time(),
+        }
+        if launch_model is not None:
+            payload["launch_model"] = launch_model
+        model_env = {
+            key: launch_env[key]
+            for key in MODEL_VOCABULARY_ENV_VARS
+            if launch_env is not None and launch_env.get(key)
+        }
+        if model_env:
+            payload["model_env"] = model_env
+        if sandbox is not None:
+            payload["sandbox"] = _bridge_sandbox_payload(sandbox)
+        _write_json_file(bridge_dir / _CONFIG_FILE, payload)
+        # Keep ``_PERMISSION_HOOK_FILE`` — the PermissionRequest command hook
+        # reads the Omnigent server URL from it at runtime, so wiping it on re-prep
+        # breaks approval routing on reattach/rebind. ``build_hook_settings``
+        # rewrites it on cold launch.
+        for filename in (
+            _SERVER_FILE,
+            _STATE_FILE,
+            _HOOKS_FILE,
+            OBSERVER_HOOK_STDERR_FILE,
+            _TOOL_RELAY_FILE,
+            _TMUX_FILE,
+        ):
+            with contextlib.suppress(FileNotFoundError):
+                (bridge_dir / filename).unlink()
+        # Owner-pid marker for the periodic dead-owner prune; refreshed every
+        # turn so it always names the current runner. See native_bridge_common.
+        native_bridge_common.write_owner_pid_marker(bridge_dir)
     return bridge_dir
 
 

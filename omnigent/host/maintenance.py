@@ -7,7 +7,7 @@ import contextlib
 import logging
 import os
 import time
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
@@ -83,11 +83,16 @@ class HostMaintenanceJanitor:
         lock_path: Path,
         startup_delay_s: float = _DEFAULT_STARTUP_DELAY_S,
         lock_retry_s: float = _DEFAULT_LOCK_RETRY_S,
+        stage_skip_reasons: Mapping[str, Collection[str]] | None = None,
     ) -> None:
         self._stages = tuple(stages)
         self._lock_path = lock_path
         self._startup_delay_s = startup_delay_s
         self._lock_retry_s = lock_retry_s
+        self._stage_skip_reasons = {
+            stage_name: frozenset(reasons)
+            for stage_name, reasons in (stage_skip_reasons or {}).items()
+        }
         self._pending_reasons: set[str] = set()
         self._startup_task: asyncio.Task[None] | None = None
         self._task: asyncio.Task[None] | None = None
@@ -145,6 +150,7 @@ class HostMaintenanceJanitor:
                 ("native_bridge_orphans", _reap_native_bridge_dirs),
             ),
             lock_path=data_dir().resolve() / "locks" / "host-maintenance.lock",
+            stage_skip_reasons={"native_bridge_orphans": {"runner_superseded"}},
         )
 
     def start(self) -> None:
@@ -226,6 +232,20 @@ class HostMaintenanceJanitor:
             if lock_outcome == "failed":
                 return "failed"
             for stage_name, stage in self._stages:
+                skipped_reasons = self._stage_skip_reasons.get(stage_name, frozenset())
+                if skipped_reasons.intersection(reasons):
+                    _logger.info(
+                        "host global maintenance stage skipped: stage=%s reasons=%s",
+                        stage_name,
+                        list(reasons),
+                        extra=debug_event(
+                            "host_maintenance_stage",
+                            reasons=list(reasons),
+                            stage=stage_name,
+                            status="skipped",
+                        ),
+                    )
+                    continue
                 started_at = time.monotonic()
                 try:
                     cleaned_items = await stage()

@@ -27,12 +27,46 @@ import importlib
 import logging
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
+
+from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 
 _logger = logging.getLogger(__name__)
 
 OWNER_PID_FILENAME = "owner.pid"
+_LOCK_DIR_NAME = ".locks"
+
+
+def _bridge_dir_lock(bridge_dir: Path) -> FileLock:
+    """Return the stable cross-process lock for one bridge directory."""
+    lock_dir = bridge_dir.parent / _LOCK_DIR_NAME
+    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return FileLock(str(lock_dir / f"{bridge_dir.name}.lock"), mode=0o600)
+
+
+@contextmanager
+def bridge_dir_preparation_lock(bridge_dir: Path) -> Iterator[None]:
+    """Prevent orphan cleanup while a runner prepares a bridge directory."""
+    with _bridge_dir_lock(bridge_dir):
+        yield
+
+
+@contextmanager
+def _try_bridge_dir_cleanup_lock(bridge_dir: Path) -> Iterator[bool]:
+    """Try to exclude bridge preparation without ever blocking cleanup."""
+    lock = _bridge_dir_lock(bridge_dir)
+    try:
+        lock.acquire(timeout=0)
+    except FileLockTimeout:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        lock.release()
 
 
 def write_owner_pid_marker(bridge_dir: Path) -> None:
@@ -65,12 +99,12 @@ def prune_orphaned_dirs(
     additional eligibility predicate, such as a minimum inactivity period.
     Conservative in the dangerous direction — a reused/foreign pid reads as
     alive and is left.
-    The owner marker and liveness are rechecked immediately before removal,
-    after any harness-specific eligibility check. If a replacement runner
-    refreshed the marker while the sweep was inspecting the directory, the
-    directory is retained for that live session. A tiny final check-to-remove
-    race remains; eliminating it would require every bridge user to coordinate
-    on a persistent lock.
+    Cleanup holds the bridge directory's stable lock while checking the owner
+    marker, liveness, and harness-specific eligibility and while removing the
+    directory. A replacement runner holds the same lock throughout bridge
+    preparation, so cleanup either finishes before preparation begins or skips
+    the actively prepared directory. The final marker reread remains as a
+    conservative guard against uncoordinated marker writers.
     Dirs with no marker (or an unparseable one) are left untouched: they are
     either from an older version or not ours.
 
@@ -89,31 +123,34 @@ def prune_orphaned_dirs(
 
     pruned = 0
     for entry in bridge_root.iterdir():
-        if not entry.is_dir():
+        if not entry.is_dir() or entry.name == _LOCK_DIR_NAME:
             continue
-        marker = entry / OWNER_PID_FILENAME
-        try:
-            pid = int(marker.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            continue
-        if _process_alive(pid):
-            continue
-        if should_prune is not None:
+        with _try_bridge_dir_cleanup_lock(entry) as acquired:
+            if not acquired:
+                continue
+            marker = entry / OWNER_PID_FILENAME
             try:
-                eligible = should_prune(entry)
-            except Exception:
-                _logger.exception("Error checking orphaned bridge dir %s", entry)
+                pid = int(marker.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
                 continue
-            if not eligible:
+            if _process_alive(pid):
                 continue
-        try:
-            confirmed_pid = int(marker.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            continue
-        if confirmed_pid != pid or _process_alive(confirmed_pid):
-            continue
-        shutil.rmtree(entry, ignore_errors=True)
-        pruned += 1
+            if should_prune is not None:
+                try:
+                    eligible = should_prune(entry)
+                except Exception:
+                    _logger.exception("Error checking orphaned bridge dir %s", entry)
+                    continue
+                if not eligible:
+                    continue
+            try:
+                confirmed_pid = int(marker.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                continue
+            if confirmed_pid != pid or _process_alive(confirmed_pid):
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            pruned += 1
     return pruned
 
 

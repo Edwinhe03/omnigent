@@ -58,13 +58,14 @@ def prepare_bridge_dir(session_id: str) -> Path:
     :returns: Prepared bridge directory.
     """
     bridge_dir = bridge_dir_for_session_id(session_id)
-    bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(bridge_dir, 0o700)
-    (bridge_dir / _INBOX_DIR).mkdir(mode=0o700, exist_ok=True)
-    (bridge_dir / _SESSIONS_DIR).mkdir(mode=0o700, exist_ok=True)
-    # Owner-pid marker for the periodic dead-owner prune; refreshed every
-    # turn so it always names the current runner. See native_bridge_common.
-    native_bridge_common.write_owner_pid_marker(bridge_dir)
+    with native_bridge_common.bridge_dir_preparation_lock(bridge_dir):
+        bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(bridge_dir, 0o700)
+        (bridge_dir / _INBOX_DIR).mkdir(mode=0o700, exist_ok=True)
+        (bridge_dir / _SESSIONS_DIR).mkdir(mode=0o700, exist_ok=True)
+        # Owner-pid marker for the periodic dead-owner prune; refreshed every
+        # turn so it always names the current runner. See native_bridge_common.
+        native_bridge_common.write_owner_pid_marker(bridge_dir)
     return bridge_dir
 
 

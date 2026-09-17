@@ -20,6 +20,9 @@ def test_host_janitor_covers_global_runner_cleanup() -> None:
         "terminal_orphans",
         "native_bridge_orphans",
     ]
+    assert janitor._stage_skip_reasons == {
+        "native_bridge_orphans": frozenset({"runner_superseded"})
+    }
 
 
 async def test_start_runs_stages_in_background_and_in_order(tmp_path: Path) -> None:
@@ -148,6 +151,39 @@ async def test_triggers_during_cleanup_coalesce_into_one_follow_up(tmp_path: Pat
     await janitor.shutdown()
 
     assert calls == 2
+
+
+async def test_superseded_pass_skips_native_bridge_cleanup(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    async def _global_cleanup() -> None:
+        calls.append("global")
+
+    async def _native_bridge_cleanup() -> None:
+        calls.append("native_bridge")
+
+    janitor = HostMaintenanceJanitor(
+        stages=(
+            ("global", _global_cleanup),
+            ("native_bridge_orphans", _native_bridge_cleanup),
+        ),
+        lock_path=tmp_path / "maintenance.lock",
+        stage_skip_reasons={"native_bridge_orphans": {"runner_superseded"}},
+    )
+
+    janitor.trigger("runner_superseded")
+    task = janitor._task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=5.0)
+    assert calls == ["global"]
+
+    janitor.trigger("runner_exited")
+    task = janitor._task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=5.0)
+    await janitor.shutdown()
+
+    assert calls == ["global", "global", "native_bridge"]
 
 
 async def test_runner_trigger_does_not_wait_for_startup_delay(tmp_path: Path) -> None:
