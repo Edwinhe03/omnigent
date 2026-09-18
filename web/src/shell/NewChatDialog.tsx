@@ -74,6 +74,7 @@ import {
   CLAUDE_NATIVE_EFFORTS,
   PI_NATIVE_EFFORTS,
   ConfigRow,
+  EFFORT_SELECT_NONE,
   EFFORT_UNAVAILABLE_PLACEHOLDER,
   MODEL_SELECT_DEFAULT,
   MODEL_SELECT_SMART,
@@ -92,7 +93,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { getCurrentUserId, resolveIdentity } from "@/lib/identity";
+import { authenticatedFetch, getCurrentUserId, resolveIdentity } from "@/lib/identity";
+import { backgroundSessionTitlesRequestHeaders } from "@/lib/backgroundSessionTitlesPreferences";
 import { fetchGithubBranches, fetchGithubRepos, type GithubRepo } from "@/lib/githubIntegration";
 import { randomUUID } from "@/lib/randomUUID";
 import { readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
@@ -297,7 +299,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { CreateAgentDialog } from "./CreateAgentDialog";
 import { buildAgentBundle, type AgentBundleInput } from "@/lib/agentBundle";
-import { createBundledSession, launchRunner, requestSessionCreation } from "@/lib/sessionsApi";
+import { createBundledSession, launchRunner } from "@/lib/sessionsApi";
 import { promoteSessionDraft, recoverFailedSessionDraft } from "@/lib/sessionDrafts";
 
 // Short picker-row blurbs — the spec descriptions are long paragraphs that
@@ -3531,8 +3533,9 @@ export function NewChatLandingScreen() {
   };
   const selectPickerEffort = (effort: string) => {
     if (!selectedNativeHarness) return;
-    setPickedEffort(effort);
-    rememberPickerOptions(selectedNativeHarness, { effort });
+    const picked = effort === EFFORT_SELECT_NONE ? "" : effort;
+    setPickedEffort(picked);
+    rememberPickerOptions(selectedNativeHarness, { effort: picked });
   };
   const selectedConfigContent =
     selectedAgent && isEntryConfigurable(selectedAgent) ? (
@@ -3629,14 +3632,24 @@ export function NewChatLandingScreen() {
               ? {
                   testId: "new-chat-landing-agent-efforts",
                   header: selectedNativeHarness === "pi-native" ? "Thinking level" : "Effort",
-                  choices: pickerEffortOptions.map((option) => ({
-                    key: option.value,
-                    label: option.label,
-                    checked: !routingOn && pickedEffort === option.value,
-                    disabled: routingOn,
-                    onSelect: () => selectPickerEffort(option.value),
-                    testId: `new-chat-landing-agent-effort-${option.value}`,
-                  })),
+                  choices: [
+                    {
+                      key: "__default__",
+                      label: "Default",
+                      checked: !routingOn && pickedEffort === "",
+                      disabled: routingOn,
+                      onSelect: () => selectPickerEffort(EFFORT_SELECT_NONE),
+                      testId: "new-chat-landing-agent-effort-default",
+                    },
+                    ...pickerEffortOptions.map((option) => ({
+                      key: option.value,
+                      label: option.label,
+                      checked: !routingOn && pickedEffort === option.value,
+                      disabled: routingOn,
+                      onSelect: () => selectPickerEffort(option.value),
+                      testId: `new-chat-landing-agent-effort-${option.value}`,
+                    })),
+                  ],
                 }
               : undefined
           }
@@ -3780,7 +3793,7 @@ export function NewChatLandingScreen() {
   // Seed the harness's knobs from the user's last picks when the selected
   // harness changes (including the first mount), so a returning user starts a
   // new session on the options they used last for that harness instead of the
-  // default. Keyed on the harness so an in-session edit isn't clobbered on
+  // default. Keyed on the harness so an in-composer edit isn't clobbered on
   // re-render — only a harness switch reseeds.
   useEffect(() => {
     if (!selectedNativeHarness) return;
@@ -5169,90 +5182,97 @@ export function NewChatLandingScreen() {
         const matchOwnCreate = (item: SessionListWireItem) =>
           item.parent_session_id == null &&
           item.labels?.[CLIENT_CREATE_TOKEN_LABEL] === createToken;
-        const createRequest = requestSessionCreation({
-          // Config-seeded agent on a `project_id` create: omitted so the
-          // server default-fills it from the project config.
-          ...(agentFromProjectConfig ? {} : { agentId: effectiveAgentId ?? undefined }),
-          ...(createProjectId !== null ? { projectId: createProjectId } : {}),
-          ...(sandboxSelected
-            ? {
-                hostType: "managed" as const,
-                // The repos to clone in parallel; the agent starts in the one
-                // repo, or the parent that holds them all. Empty = empty
-                // sandbox workspace.
-                workspaces: composeSandboxWorkspaces(sandboxRepoSelections),
-                // On a `project_id` create an ABSENT (path) workspace would be
-                // default-filled with the config's path workspace, which a
-                // managed create rejects — pin an explicit null (explicit
-                // values are never replaced by project hints). Same guard for
-                // a config-stored `git` block: a sandbox has no host for the
-                // server to create a worktree on.
-                ...(createProjectId !== null ? { workspace: null, git: null } : {}),
-                // Omitted when null so a default create is unchanged.
-                ...(sandboxProvider !== null ? { sandboxProvider } : {}),
-              }
-            : {
-                hostId: selectedHostId,
-                // Config-seeded workspace on a `project_id` create: omitted
-                // so the server default-fills it (see agent_id above).
-                ...(workspaceFromProjectConfig ? {} : { workspace: workspaceTrimmed }),
-                // Create a new worktree, or bind an existing one
-                // (`existing_worktree` records the branch for the sidebar +
-                // delete flow without creating anything), or neither. Always
-                // explicit when set: the branch name is generated (or typed)
-                // client-side, so the server cannot default-fill it.
-                git: shouldCreateWorktree
-                  ? { branchName: trimmedBranch, baseBranch: baseBranch.trim() || undefined }
-                  : startInExistingWorktree
-                    ? { branchName: trimmedBranch, existingWorktree: true }
-                    : undefined,
-              }),
-          // Native-wrapper labels + codex bypass + the born-filed project
-          // label (see `createLabels` above).
-          // Smart Routing sends none of these: the bound agent is only a
-          // placeholder, so the placeholder's wrapper labels, launch args and
-          // model would all describe a CLI the router may not pick. The
-          // server stamps the routed wrapper's labels once it has rebound.
-          labels: {
-            ...(smartRoutingHarnessSelected ? {} : createLabels),
-            [CLIENT_CREATE_TOKEN_LABEL]: createToken,
+        const createRequest = authenticatedFetch("/v1/sessions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...backgroundSessionTitlesRequestHeaders(),
           },
-          // Permission / approval / cursor mode → CLI flag pair, persisted as
-          // terminal_launch_args. Omitted for the default and non-native agents.
-          terminalLaunchArgs: smartRoutingHarnessSelected
-            ? undefined
-            : agentSupportsPermissionMode &&
-                permissionMode !== CLAUDE_NATIVE_DEFAULT_PERMISSION_MODE
-              ? ["--permission-mode", permissionMode]
-              : agentSupportsApprovalMode && approvalMode !== CODEX_NATIVE_DEFAULT_APPROVAL_MODE
-                ? (CODEX_NATIVE_APPROVAL_MODES.find((m) => m.value === approvalMode)?.args ?? [])
-                : agentSupportsCursorMode && cursorExecMode !== CURSOR_NATIVE_DEFAULT_EXEC_MODE
-                  ? (CURSOR_NATIVE_EXEC_MODES.find((m) => m.value === cursorExecMode)?.args ?? [])
-                  : agentSupportsAgySkip && agySkipMode !== AGY_NATIVE_DEFAULT_SKIP_MODE
-                    ? (AGY_NATIVE_SKIP_MODES.find((m) => m.value === agySkipMode)?.args ?? [])
-                    : agentSupportsDevinPermission &&
-                        devinPermissionMode !== DEVIN_NATIVE_DEFAULT_PERMISSION_MODE
-                      ? (DEVIN_NATIVE_PERMISSION_MODES.find((m) => m.value === devinPermissionMode)
-                          ?.args ?? [])
+          body: JSON.stringify({
+            // Config-seeded agent on a `project_id` create: omitted so the
+            // server default-fills it from the project config.
+            ...(agentFromProjectConfig ? {} : { agent_id: effectiveAgentId }),
+            ...(createProjectId !== null ? { project_id: createProjectId } : {}),
+            ...(sandboxSelected
+              ? {
+                  host_type: "managed",
+                  // The repos to clone in parallel; the agent starts in the one
+                  // repo, or the parent that holds them all. Empty = empty
+                  // sandbox workspace.
+                  workspaces: composeSandboxWorkspaces(sandboxRepoSelections),
+                  // On a `project_id` create an ABSENT (path) workspace would be
+                  // default-filled with the config's path workspace, which a
+                  // managed create rejects — pin an explicit null (explicit
+                  // values are never replaced by project hints). Same guard for
+                  // a config-stored `git` block: a sandbox has no host for the
+                  // server to create a worktree on.
+                  ...(createProjectId !== null ? { workspace: null, git: null } : {}),
+                  // Omitted when null so a default create is unchanged.
+                  ...(sandboxProvider !== null ? { sandbox_provider: sandboxProvider } : {}),
+                }
+              : {
+                  host_id: selectedHostId,
+                  // Config-seeded workspace on a `project_id` create: omitted
+                  // so the server default-fills it (see agent_id above).
+                  ...(workspaceFromProjectConfig ? {} : { workspace: workspaceTrimmed }),
+                  // Create a new worktree, or bind an existing one
+                  // (`existing_worktree` records the branch for the sidebar +
+                  // delete flow without creating anything), or neither. Always
+                  // explicit when set: the branch name is generated (or typed)
+                  // client-side, so the server cannot default-fill it.
+                  git: shouldCreateWorktree
+                    ? { branch_name: trimmedBranch, base_branch: baseBranch.trim() || undefined }
+                    : startInExistingWorktree
+                      ? { branch_name: trimmedBranch, existing_worktree: true }
                       : undefined,
-          // Model + reasoning effort, persisted on the session row before
-          // the runner launches. Claude, Codex, and Pi read model_override at
-          // terminal launch; an unselected ("") knob is omitted so the
-          // harness keeps its own configured/default model.
-          modelOverride: normalizedModelOverride ?? undefined,
-          reasoningEffort: normalizedReasoningEffort ?? undefined,
-          costControlModeOverride: costControlOverride,
-          // Top-level Smart Routing sends the same "auto" sentinel the bundle
-          // path does; the server tells them apart by the bound agent being a
-          // native wrapper, and routes at create time (the terminal launches
-          // with the row, so there is no first message to wait for). The
-          // message text rides along for routing only — the client still
-          // delivers the real message after navigation.
-          harnessOverride: smartRoutingHarnessSelected
-            ? AUTO_HARNESS_ID
-            : (pickedHarness ?? undefined),
-          smartRoutingMessage:
-            smartRoutingHarnessSelected || pinnedNativeRoutes ? initialPrompt : undefined,
+                }),
+            // Native-wrapper labels + codex bypass + the born-filed project
+            // label (see `createLabels` above).
+            // Smart Routing sends none of these: the bound agent is only a
+            // placeholder, so the placeholder's wrapper labels, launch args and
+            // model would all describe a CLI the router may not pick. The
+            // server stamps the routed wrapper's labels once it has rebound.
+            labels: {
+              ...(smartRoutingHarnessSelected ? {} : createLabels),
+              [CLIENT_CREATE_TOKEN_LABEL]: createToken,
+            },
+            // Permission / approval / cursor mode → CLI flag pair, persisted as
+            // terminal_launch_args. Omitted for the default and non-native agents.
+            terminal_launch_args: smartRoutingHarnessSelected
+              ? undefined
+              : agentSupportsPermissionMode &&
+                  permissionMode !== CLAUDE_NATIVE_DEFAULT_PERMISSION_MODE
+                ? ["--permission-mode", permissionMode]
+                : agentSupportsApprovalMode && approvalMode !== CODEX_NATIVE_DEFAULT_APPROVAL_MODE
+                  ? (CODEX_NATIVE_APPROVAL_MODES.find((m) => m.value === approvalMode)?.args ?? [])
+                  : agentSupportsCursorMode && cursorExecMode !== CURSOR_NATIVE_DEFAULT_EXEC_MODE
+                    ? (CURSOR_NATIVE_EXEC_MODES.find((m) => m.value === cursorExecMode)?.args ?? [])
+                    : agentSupportsAgySkip && agySkipMode !== AGY_NATIVE_DEFAULT_SKIP_MODE
+                      ? (AGY_NATIVE_SKIP_MODES.find((m) => m.value === agySkipMode)?.args ?? [])
+                      : agentSupportsDevinPermission &&
+                          devinPermissionMode !== DEVIN_NATIVE_DEFAULT_PERMISSION_MODE
+                        ? (DEVIN_NATIVE_PERMISSION_MODES.find(
+                            (m) => m.value === devinPermissionMode,
+                          )?.args ?? [])
+                        : undefined,
+            // Model + reasoning effort, persisted on the session row before
+            // the runner launches. An unselected ("") knob is omitted so the
+            // harness keeps its own configured/default value.
+            model_override: normalizedModelOverride ?? undefined,
+            reasoning_effort: normalizedReasoningEffort ?? undefined,
+            cost_control_mode_override: costControlOverride,
+            // Top-level Smart Routing sends the same "auto" sentinel the bundle
+            // path does; the server tells them apart by the bound agent being a
+            // native wrapper, and routes at create time (the terminal launches
+            // with the row, so there is no first message to wait for). The
+            // message text rides along for routing only — the client still
+            // delivers the real message after navigation.
+            harness_override: smartRoutingHarnessSelected
+              ? AUTO_HARNESS_ID
+              : (pickedHarness ?? undefined),
+            smart_routing_message:
+              smartRoutingHarnessSelected || pinnedNativeRoutes ? initialPrompt : undefined,
+          }),
         });
         // Managed launch validation continues after the row is announced, so
         // only its HTTP response can resolve the temp chat.

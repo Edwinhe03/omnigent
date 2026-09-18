@@ -3273,9 +3273,8 @@ def resolve_native_claude_config(
 
     1. when a *spec* is given, its resolved provider (spec ``executor.auth``
        → explicit per-family default → global ``auth:`` → ``databricks-*``
-       model → ambient detection), falling back to the applicable Databricks
-       profile (spec auth/profile first, then global auth when the spec is
-       silent);
+       model → ambient detection), falling back to the spec's own
+       ``executor.profile`` (ucode) when it routed to legacy databricks;
     2. when spec-less (``omnigent claude``): an explicit per-family default
        → global ``auth:`` (→ ucode) → ambient detection;
     3. otherwise ``None`` (Claude's own login).
@@ -3302,32 +3301,17 @@ def resolve_native_claude_config(
 
     # 1. Spec-driven: reuse the harness routing precedence verbatim. A
     #    non-None entry decides the config (including a deliberate None for a
-    #    subscription); a None entry can mean Databricks or API-key auth, so
-    #    resolve the applicable Databricks profile without overriding an
-    #    explicit non-Databricks credential.
+    #    subscription); a None entry means the spec routed to databricks /
+    #    global auth → fall back to the spec's own ucode profile.
     if spec is not None:
         entry = _resolve_provider_for_build(spec, harness_type="claude-sdk")
         if entry is not None:
             return _native_claude_config_from_entry(entry, refresh_models=refresh_models)
-        executor_auth = getattr(spec.executor, "auth", None)
-        executor_config = getattr(spec.executor, "config", {})
-        spec_profile = (
-            executor_auth.profile
-            if isinstance(executor_auth, DatabricksAuth)
-            else spec.executor.profile or executor_config.get("profile")
+        ucode_config = _ucode_config_for_profile(
+            spec.executor.profile, refresh_models=refresh_models
         )
-        if spec_profile:
-            ucode_config = _ucode_config_for_profile(spec_profile, refresh_models=refresh_models)
-            if ucode_config is not None:
-                return ucode_config
-        elif executor_auth is None:
-            global_auth = _load_global_auth()
-            if isinstance(global_auth, DatabricksAuth):
-                ucode_config = _ucode_config_for_profile(
-                    global_auth.profile, refresh_models=refresh_models
-                )
-                if ucode_config is not None:
-                    return ucode_config
+        if ucode_config is not None:
+            return ucode_config
         # The spec named no provider and no usable ucode profile — fall through to
         # the managed-connect-host broker fallback (step 4) rather than giving up.
     else:

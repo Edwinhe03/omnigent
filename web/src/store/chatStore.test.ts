@@ -2069,7 +2069,7 @@ describe("chatStore — send (first-send ordering)", () => {
     expect(eventBodies.map(textOf)).toEqual(["1", "2", "3"]);
   });
 
-  it("creates a brand-new session with model and effort before binding the runner", async () => {
+  it("does not apply prior session config while creating a brand-new session", async () => {
     seedSession("conv_new");
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -2096,7 +2096,8 @@ describe("chatStore — send (first-send ordering)", () => {
 
     await useChatStore.getState().send("hi", "agent_xyz");
 
-    // Model and effort must be persisted in the create row before runner bind.
+    // This fallback create path has no create-composer selection of its own.
+    // Prior session state must affect neither the create POST nor a follow-up PATCH.
     const calls = fetchMock.mock.calls.map(([u, init]) => ({
       url: String(u),
       method: (init as RequestInit | undefined)?.method ?? "GET",
@@ -2110,10 +2111,10 @@ describe("chatStore — send (first-send ordering)", () => {
       body: {
         agent_id: "agent_xyz",
         initial_items: [],
-        model_override: "opus",
-        reasoning_effort: "max",
       },
     });
+    expect(calls[0]?.body).not.toHaveProperty("model_override");
+    expect(calls[0]?.body).not.toHaveProperty("reasoning_effort");
     expect(calls[1]).toMatchObject({ url: "/v1/runners", method: "GET" });
     expect(
       calls.some(

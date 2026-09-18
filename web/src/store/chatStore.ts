@@ -3260,11 +3260,7 @@ async function ensureBoundSession(
     // initial_items dispatch synchronously inside create_session,
     // before we can subscribe to /stream, so early events can be
     // missed). Bind the stream FIRST, then post the first message.
-    const state = get();
-    const session = await createSession(agentId, [], {
-      modelOverride: state.sessionModelOverride ?? undefined,
-      reasoningEffort: state.sessionReasoningEffort ?? undefined,
-    });
+    const session = await createSession(agentId, []);
     sessionId = session.id;
     // Register the create_session span (see interactionTelemetry). This path
     // sends no host params, so the server always makes an external ("computer")

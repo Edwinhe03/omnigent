@@ -453,72 +453,51 @@ function postEventResponseFromWire(wire: {
  * parameter is retained here for non-browser callers (CLI / tests)
  * that can tolerate snapshot-only catch-up.
  */
-export interface SessionGitOptions {
-  branchName: string;
-  baseBranch?: string;
-  existingWorktree?: boolean;
-}
-
-/** Complete JSON create surface for `POST /v1/sessions`. */
-export interface CreateSessionOptions {
-  agentId?: string;
-  projectId?: string;
-  initialItems?: SessionEventInput[];
-  title?: string;
-  labels?: Record<string, string>;
-  parentSessionId?: string;
-  subAgentName?: string | null;
-  hostType?: "external" | "managed";
-  hostId?: string | null;
-  sandboxProvider?: string;
-  workspace?: string | null;
-  workspaces?: string[];
-  git?: SessionGitOptions | null;
-  terminalLaunchArgs?: string[];
-  modelOverride?: string;
-  reasoningEffort?: string;
-  costControlModeOverride?: "on" | "off";
-  subagentRoutingOverride?: "on" | "off";
-  harnessOverride?: string;
-  smartRoutingMessage?: string;
-}
-
 /**
- * Start a typed JSON session create without consuming the response body.
- * Callers that race the response against a pushed session row can inspect the
- * raw response; ordinary callers should use {@link createSession}.
+ * Create a session bound to a registered agent via POST /v1/sessions.
+ *
+ * `options` covers the sub-agent / "Add agent" path: a child session is
+ * created by passing `parentSessionId` (and optionally a `title`). Leave
+ * `subAgentName` unset (or null) for a user-added agent so the runner
+ * resolves the child's own bound agent_id rather than walking the
+ * parent's declared sub-agent tree. Optional fields are only sent when
+ * provided, so a plain `createSession(agentId)` posts the same minimal
+ * body as before.
+ *
+ * @param agentId - Durable id of the agent to bind, e.g. "ag_abc123".
+ * @param initialItems - Optional history seed (e.g. a first user message).
+ * @param options.parentSessionId - Parent session id to attach this
+ *   session under as a child, e.g. "conv_parent987".
+ * @param options.subAgentName - Sub-agent name for parent-spec-tree
+ *   resolution; null/omitted for user-added agents.
+ * @param options.title - Child title, e.g. "ui:claude-native-ui:1".
  */
-export function requestSessionCreation(options: CreateSessionOptions): Promise<Response> {
-  const body = {
-    agent_id: options.agentId,
-    project_id: options.projectId,
-    initial_items: options.initialItems,
-    title: options.title,
-    labels: options.labels,
-    parent_session_id: options.parentSessionId,
-    sub_agent_name: options.subAgentName,
-    host_type: options.hostType,
-    host_id: options.hostId,
-    sandbox_provider: options.sandboxProvider,
-    workspace: options.workspace,
-    workspaces: options.workspaces,
-    git:
-      options.git == null
-        ? options.git
-        : {
-            branch_name: options.git.branchName,
-            base_branch: options.git.baseBranch,
-            existing_worktree: options.git.existingWorktree,
-          },
-    terminal_launch_args: options.terminalLaunchArgs,
-    model_override: options.modelOverride,
-    reasoning_effort: options.reasoningEffort,
-    cost_control_mode_override: options.costControlModeOverride,
-    subagent_routing_override: options.subagentRoutingOverride,
-    harness_override: options.harnessOverride,
-    smart_routing_message: options.smartRoutingMessage,
-  };
-  return authenticatedFetch("/v1/sessions", {
+export async function createSession(
+  agentId: string,
+  initialItems: SessionEventInput[] = [],
+  options: {
+    parentSessionId?: string;
+    subAgentName?: string | null;
+    title?: string;
+  } = {},
+): Promise<Session> {
+  const body: {
+    agent_id: string;
+    initial_items: SessionEventInput[];
+    parent_session_id?: string;
+    sub_agent_name?: string | null;
+    title?: string;
+  } = { agent_id: agentId, initial_items: initialItems };
+  if (options.parentSessionId !== undefined) {
+    body.parent_session_id = options.parentSessionId;
+  }
+  if (options.subAgentName !== undefined) {
+    body.sub_agent_name = options.subAgentName;
+  }
+  if (options.title !== undefined) {
+    body.title = options.title;
+  }
+  const res = await authenticatedFetch("/v1/sessions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -526,26 +505,6 @@ export function requestSessionCreation(options: CreateSessionOptions): Promise<R
       ...backgroundSessionTitlesRequestHeaders(),
     },
     body: JSON.stringify(body),
-  });
-}
-
-/**
- * Create a session bound to a registered agent via POST /v1/sessions.
- *
- * `options` covers the sub-agent / "Add agent" path and the per-session
- * launch configuration. Model and effort belong in this create request so a
- * native runner never needs a competing post-create command before the first
- * user message.
- */
-export async function createSession(
-  agentId: string,
-  initialItems: SessionEventInput[] = [],
-  options: Omit<CreateSessionOptions, "agentId" | "initialItems"> = {},
-): Promise<Session> {
-  const res = await requestSessionCreation({
-    ...options,
-    agentId,
-    initialItems,
   });
   return sessionFromWire(await readJsonOrThrow<SessionResponseWire>(res));
 }
