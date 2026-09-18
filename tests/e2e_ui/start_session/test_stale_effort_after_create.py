@@ -266,11 +266,8 @@ def test_created_session_keeps_default_effort_after_in_session_pick(
     # The host's Claude Code harness row (session-scoped agents don't list).
     claude_row = page.get_by_role("menuitem", name=re.compile(r"^Claude Code"))
     expect(claude_row.first).to_be_visible(timeout=30_000)
-    claude_row.first.click()
+    claude_row.first.get_by_text("Edit", exact=True).click()
     expect(agent_picker).to_have_attribute("aria-label", re.compile("Claude Code"), timeout=30_000)
-    agent_picker.click()
-    claude_row = page.get_by_role("menuitem", name=re.compile(r"^Claude Code"))
-    claude_row.first.press("ArrowRight")
     model_default = page.get_by_test_id("new-chat-landing-agent-model-default")
     effort_default = page.get_by_test_id("new-chat-landing-agent-effort-default")
     expect(model_default).to_be_visible(timeout=30_000)

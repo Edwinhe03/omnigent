@@ -5004,8 +5004,35 @@ def test_tmux_injections_are_serialized_per_bridge(
     bridge_dir = tmp_path / "bridge"
     first_injection_entered = threading.Event()
     release_first_injection = threading.Event()
+    second_lock_acquire_started = threading.Event()
     wait_call_threads: list[str] = []
     errors: list[BaseException] = []
+
+    class ObservedInjectionLock:
+        """Signal when a competing injection tries to acquire the pane lock."""
+
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._counter_lock = threading.Lock()
+            self._acquire_count = 0
+
+        def __enter__(self) -> ObservedInjectionLock:
+            with self._counter_lock:
+                self._acquire_count += 1
+                if self._acquire_count == 2:
+                    second_lock_acquire_started.set()
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self._lock.release()
+
+    lock_key = os.path.normcase(os.path.abspath(os.fspath(bridge_dir)))
+    monkeypatch.setitem(
+        claude_native_bridge._INJECTION_LOCKS,
+        lock_key,
+        ObservedInjectionLock(),
+    )
 
     def wait_for_tmux_info(_bridge_dir: Path, *, timeout_s: float) -> dict[str, str]:
         del timeout_s
@@ -5044,7 +5071,7 @@ def test_tmux_injections_are_serialized_per_bridge(
     assert first_injection_entered.wait(timeout=2)
     slash_thread.start()
 
-    time.sleep(0.05)
+    assert second_lock_acquire_started.wait(timeout=2)
     assert wait_call_threads == ["user-message"]
 
     release_first_injection.set()
