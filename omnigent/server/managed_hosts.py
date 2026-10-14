@@ -341,6 +341,13 @@ MANAGED_SANDBOX_LABEL_NAMESPACE = "omnigent.sandbox."
 # while an in-place agent switch keeps them — the sandbox is unchanged.
 MANAGED_REPO_LABEL_KEY = "omnigent.sandbox.repo"
 
+# Session label carrying the host id a create asked for (``managed_host_id``),
+# set when the create is accepted. The session row's ``host_id`` stays null until
+# the host binds, so clients route by this label until then. In the sandbox
+# namespace so a client cannot seed it, and per-session like the repo labels: a
+# fork launches its own sandbox, so it never inherits it.
+MANAGED_HOST_ID_LABEL_KEY = "omnigent.sandbox.host_id"
+
 
 def managed_repo_labels(workspaces: Sequence[str]) -> dict[str, str]:
     """
@@ -805,7 +812,12 @@ class ManagedSandboxDeployment:
         for config in self.configs:
             if config.managed_launch_supported and config.provider is not None:
                 launcher = config.launcher_factory()
-                caps[config.provider] = {"multi_repo": launcher.capabilities.multi_repo}
+                caps[config.provider] = {
+                    "multi_repo": launcher.capabilities.multi_repo,
+                    # The host registers under a create's managed_host_id, so the
+                    # create may be routed by that id.
+                    "shard_managed_sandbox": True,
+                }
                 from omnigent.inference_config import parse_inference_config
                 from omnigent.server.inference_catalog import ambient_gateway_providers
 
@@ -3461,6 +3473,7 @@ async def launch_managed_host(
     provider: str | None = None,
     agent_name: str | None = None,
     on_stage: Callable[[str], None] | None = None,
+    host_id: str | None = None,
 ) -> ManagedHostLaunch:
     """
     Provision a sandbox, start a host in it, and wait until it registers.
@@ -3502,6 +3515,8 @@ async def launch_managed_host(
         worker thread (the sandbox exec steps run via
         ``asyncio.to_thread``), so it must be thread-safe. ``None``
         disables progress reporting.
+    :param host_id: Id to register the host under — a create's
+        ``managed_host_id`` — or ``None`` to mint one.
     :returns: The registered host id + in-sandbox workspace path
         (the cloned repository directory when *repo* is set).
     :raises HTTPException: 400 when *provider* is not configured or the
@@ -3511,7 +3526,7 @@ async def launch_managed_host(
     entry = _select_provider_config(config, provider)
     launcher = entry.launcher_factory()
     repos = _apply_git_clone_options(launcher, repos, entry.git_clone)
-    host_id = uuid.uuid4().hex
+    host_id = host_id or uuid.uuid4().hex
     # Visible label in the host picker; (owner, name) is the hosts
     # table PK, so embed the host_id's leading hex for uniqueness
     # across a user's managed sandboxes.

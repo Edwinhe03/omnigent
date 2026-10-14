@@ -1396,6 +1396,9 @@ class SessionGitOptions(BaseModel):
 # abusive request.
 # ponytail: bump this one constant if larger repo sets ever need supporting.
 _MAX_MANAGED_WORKSPACES = 10
+# Shape of a server-minted host id (``uuid.uuid4().hex``); a caller-chosen
+# ``managed_host_id`` must match it.
+_MANAGED_HOST_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 class _SessionCreateRequestBase(BaseModel):
@@ -1443,6 +1446,16 @@ class _SessionCreateRequestBase(BaseModel):
         host launch flow (generate binding token, write runner_id,
         send launch frame). ``None`` for CLI-initiated sessions.
         Must be ``None`` when ``host_type`` is ``"managed"``.
+    :param managed_host_id: ``host_type: "managed"`` only — the host id
+        the caller asks the server to give the sandbox host, 32
+        lowercase hex characters (the shape of ``uuid.uuid4().hex``).
+        Choosing it client-side lets the caller route the create, and
+        every request after it, by that id from the start. Send it only
+        for a provider whose ``GET /v1/info`` capabilities report
+        ``shard_managed_sandbox``. The server registers the host under it
+        and records it in the ``omnigent.sandbox.host_id`` label; a
+        create naming an existing host fails with ``409``. ``None`` lets
+        the server mint one.
     :param sandbox_provider: Which configured sandbox provider to
         provision on, e.g. ``"modal"`` — one of the names ``GET /v1/info``
         reports in ``sandbox_providers``. Only valid with
@@ -1553,6 +1566,7 @@ class _SessionCreateRequestBase(BaseModel):
     sub_agent_name: str | None = None
     host_type: Literal["external", "managed"] = "external"
     host_id: str | None = None
+    managed_host_id: str | None = None
     sandbox_provider: str | None = None
     workspace: str | None = None
     workspaces: list[str] | None = None
@@ -1599,7 +1613,8 @@ class _SessionCreateRequestBase(BaseModel):
         caller's intent.
 
         :returns: The validated instance.
-        :raises ValueError: On ``"managed"`` + ``host_id``, a managed
+        :raises ValueError: On ``"managed"`` + ``host_id``, a malformed
+            ``managed_host_id`` (or one on an external create), a managed
             workspace/workspaces that isn't a valid repository URL,
             ``workspace`` and ``workspaces`` set together, too many
             ``workspaces``, or an external repository-URL workspace.
@@ -1615,6 +1630,10 @@ class _SessionCreateRequestBase(BaseModel):
                     "host_type 'managed' lets the server provision the host; "
                     "host_id must not be set"
                 )
+            if self.managed_host_id is not None and not _MANAGED_HOST_ID_RE.match(
+                self.managed_host_id
+            ):
+                raise ValueError("managed_host_id must be 32 lowercase hex characters")
             if self.workspace is not None and self.workspaces is not None:
                 raise ValueError(
                     "set either 'workspace' (one repository) or 'workspaces' "
@@ -1634,6 +1653,8 @@ class _SessionCreateRequestBase(BaseModel):
                         f"(optionally '#<branch>') as workspace(s): {exc}"
                     ) from exc
             return self
+        if self.managed_host_id is not None:
+            raise ValueError("managed_host_id only applies to host_type 'managed'")
         if self.sandbox_provider is not None:
             raise ValueError(
                 "sandbox_provider only applies to host_type 'managed' — "

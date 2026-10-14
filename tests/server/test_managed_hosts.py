@@ -2164,8 +2164,8 @@ def test_provider_ui_capabilities_reports_multi_repo_per_provider() -> None:
         )
     )
     assert deployment.provider_ui_capabilities() == {
-        "single": {"multi_repo": False},
-        "multi": {"multi_repo": True},
+        "single": {"multi_repo": False, "shard_managed_sandbox": True},
+        "multi": {"multi_repo": True, "shard_managed_sandbox": True},
     }
 
 
@@ -2192,9 +2192,13 @@ def test_provider_ui_capabilities_enable_inference_only_on_configured_target() -
         )
     )
     assert deployment.provider_ui_capabilities() == {
-        "kubernetes": {"multi_repo": False},
-        "modal": {"multi_repo": False},
-        "agent_sandbox": {"multi_repo": False, "inference_models": True},
+        "kubernetes": {"multi_repo": False, "shard_managed_sandbox": True},
+        "modal": {"multi_repo": False, "shard_managed_sandbox": True},
+        "agent_sandbox": {
+            "multi_repo": False,
+            "shard_managed_sandbox": True,
+            "inference_models": True,
+        },
     }
 
 
@@ -2246,12 +2250,12 @@ def test_provider_ui_capabilities_advertise_default_models_for_unbound_discovery
         )
     )
     assert deployment.provider_ui_capabilities() == {
-        "hooked": {"multi_repo": False, "default_models": True},
-        "discovered": {"multi_repo": False, "default_models": True},
-        "static": {"multi_repo": False},
-        "bound": {"multi_repo": False, "inference_models": True},
-        "malformed": {"multi_repo": False},
-        "malformed-inference": {"multi_repo": False},
+        "hooked": {"multi_repo": False, "shard_managed_sandbox": True, "default_models": True},
+        "discovered": {"multi_repo": False, "shard_managed_sandbox": True, "default_models": True},
+        "static": {"multi_repo": False, "shard_managed_sandbox": True},
+        "bound": {"multi_repo": False, "shard_managed_sandbox": True, "inference_models": True},
+        "malformed": {"multi_repo": False, "shard_managed_sandbox": True},
+        "malformed-inference": {"multi_repo": False, "shard_managed_sandbox": True},
     }
 
 
@@ -4581,6 +4585,41 @@ async def test_launch_defaults_to_first_provider(db_uri: str) -> None:
     host = host_store.get_host(result.host_id)
     assert host is not None
     assert host.sandbox_provider == "alpha"
+
+
+async def test_launch_registers_the_host_under_a_requested_id(db_uri: str) -> None:
+    """
+    A create's ``managed_host_id`` becomes the host id and picker name the
+    sandbox host starts under, through the unchanged start path.
+    """
+    host_store = HostStore(db_uri)
+    started: list[HostStartInvocation] = []
+
+    def _register(invocation: HostStartInvocation) -> None:
+        """Simulate the sandbox host connecting over the tunnel."""
+        started.append(invocation)
+        host_store.upsert_on_connect(
+            host_id=invocation.host_id,
+            name=invocation.host_name,
+            user_id=_OWNER,
+        )
+
+    launcher = FakeSandboxLauncher(on_host_start=_register)
+    config = ManagedSandboxDeployment.single(
+        ManagedSandboxConfig(
+            server_url="https://srv.example.com",
+            launcher_factory=lambda: launcher,
+            token_ttl_s=3600,
+        )
+    )
+    requested = "0123456789abcdef0123456789abcdef"
+
+    result = await launch_managed_host(
+        config=config, owner=_OWNER, host_store=host_store, host_id=requested
+    )
+
+    assert result.host_id == requested
+    assert [(i.host_id, i.host_name) for i in started] == [(requested, "managed-01234567")]
 
 
 async def test_launch_unknown_provider_rejects_before_provisioning(db_uri: str) -> None:

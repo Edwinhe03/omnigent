@@ -411,6 +411,7 @@ def register_core_routes(
         user_id: str | None,
         sandbox_provider: str | None,
         workspaces: list[str],
+        managed_host_id: str | None = None,
     ) -> None:
         """
         Provision a managed sandbox host for a just-created session.
@@ -444,8 +445,12 @@ def register_core_routes(
             parallel; empty for an empty sandbox. One repo becomes the
             session's working directory; several are cloned as siblings
             and the working directory is the parent that holds them.
-        :raises OmnigentError: If managed hosts aren't configured or the
-            provider isn't offered.
+        :param managed_host_id: Host id the caller chose for the sandbox
+            host, recorded in the ``omnigent.sandbox.host_id`` label, or
+            ``None`` to let the launch mint one.
+        :raises OmnigentError: If managed hosts aren't configured, the
+            provider isn't offered, or *managed_host_id* names an existing
+            host.
         """
         sandbox_config = getattr(request.app.state, "sandbox_config", None)
         host_store_for_managed = getattr(request.app.state, "host_store", None)
@@ -458,6 +463,7 @@ def register_core_routes(
             )
         from omnigent.server.auth import RESERVED_USER_LOCAL
         from omnigent.server.managed_hosts import (
+            MANAGED_HOST_ID_LABEL_KEY,
             managed_repo_labels,
             parse_repo_workspace,
         )
@@ -487,16 +493,31 @@ def register_core_routes(
         # launch clones inside the sandbox; parse each now so a malformed
         # URL is a synchronous 4xx, not a background failure.
         repos = [parse_repo_workspace(w) for w in workspaces]
+        # A caller-chosen id must not name an existing host. Not an idempotency
+        # key: the host row is written by the background launch, so a retry
+        # could not find the session it would replay.
+        if managed_host_id is not None and (
+            await asyncio.to_thread(host_store_for_managed.get_host, managed_host_id) is not None
+        ):
+            raise OmnigentError(
+                f"host {managed_host_id} already exists",
+                code=ErrorCode.ALREADY_EXISTS,
+            )
+        managed_labels: dict[str, str] = {}
+        if managed_host_id is not None:
+            managed_labels[MANAGED_HOST_ID_LABEL_KEY] = managed_host_id
         if workspaces:
             # The session row's workspace is overwritten with the CLONED path at
             # bind time; record the raw request value(s) so a sandbox relaunch
             # can re-clone the same repositories. Stored one label per repo (not
             # a single joined value) so the 256-char label-value cap can't
             # silently truncate the list and drop repos on relaunch.
+            managed_labels.update(managed_repo_labels(workspaces))
+        if managed_labels:
             await asyncio.to_thread(
                 conversation_store.set_labels,
                 session_id,
-                managed_repo_labels(workspaces),
+                managed_labels,
             )
         managed_launches.begin(session_id)
         # Seed the launch-progress indicator before the background task
@@ -520,6 +541,7 @@ def register_core_routes(
                 provider=sandbox_provider,
                 agent_store=agent_store,
                 agent_id=agent_id,
+                host_id=managed_host_id,
             )
         )
         _managed_launch_tasks.add(launch_task)
@@ -903,7 +925,14 @@ def register_core_routes(
                 user_id=user_id,
                 sandbox_provider=body.sandbox_provider,
                 workspaces=body.managed_repo_workspaces(),
+                managed_host_id=body.managed_host_id,
             )
+            if body.managed_host_id is not None:
+                from omnigent.server.managed_hosts import MANAGED_HOST_ID_LABEL_KEY
+
+                # The row's host_id stays null until the host binds; the caller
+                # routes by this label until then.
+                resp.labels[MANAGED_HOST_ID_LABEL_KEY] = body.managed_host_id
 
         # Host launch: if a host is targeted (caller-supplied or
         # managed) and no runner is bound yet, authorize (caller must

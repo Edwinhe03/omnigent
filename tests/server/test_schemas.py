@@ -837,6 +837,44 @@ def test_session_create_managed_rejects_host_id() -> None:
         SessionCreateRequest(agent_id="ag_x", host_type="managed", host_id="host_abc")
 
 
+def test_session_create_managed_accepts_a_minted_shape_host_id() -> None:
+    """
+    A managed create may name its sandbox host's id, in the shape the server
+    mints (``uuid.uuid4().hex``).
+    """
+    from omnigent.server.schemas import SessionCreateRequest
+
+    req = SessionCreateRequest(
+        agent_id="ag_x", host_type="managed", managed_host_id="0123456789abcdef0123456789abcdef"
+    )
+    assert req.managed_host_id == "0123456789abcdef0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    "managed_host_id",
+    [
+        "0123456789ABCDEF0123456789ABCDEF",
+        "0123456789abcdef0123456789abcde",
+        "01234567-89ab-cdef-0123-456789abcdef",
+        "",
+    ],
+)
+def test_session_create_managed_rejects_malformed_host_id(managed_host_id: str) -> None:
+    """A ``managed_host_id`` the server would never mint is a 422."""
+    from omnigent.server.schemas import SessionCreateRequest
+
+    with pytest.raises(ValidationError, match="32 lowercase hex"):
+        SessionCreateRequest(agent_id="ag_x", host_type="managed", managed_host_id=managed_host_id)
+
+
+def test_session_create_external_rejects_managed_host_id() -> None:
+    """``managed_host_id`` names a server-provisioned host, so it is managed-only."""
+    from omnigent.server.schemas import SessionCreateRequest
+
+    with pytest.raises(ValidationError, match="only applies to host_type 'managed'"):
+        SessionCreateRequest(agent_id="ag_x", managed_host_id="0123456789abcdef0123456789abcdef")
+
+
 def test_session_create_managed_rejects_path_workspace() -> None:
     """
     ``host_type="managed"`` + a PATH workspace is a contradiction —

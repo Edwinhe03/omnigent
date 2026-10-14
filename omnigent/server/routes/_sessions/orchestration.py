@@ -4031,6 +4031,7 @@ async def _run_managed_launch(
     provider: str | None = None,
     agent_store: AgentStore | None = None,
     agent_id: str | None = None,
+    host_id: str | None = None,
 ) -> None:
     """
     Provision a managed sandbox for a session in the background.
@@ -4095,6 +4096,8 @@ async def _run_managed_launch(
     :param agent_id: Agent the session is bound to, resolved through the
         built-in gate into the runner Pod's ``omnigent.ai/agent``
         classifier, or ``None`` to leave it unstamped.
+    :param host_id: Host id a create asked for (``managed_host_id``), or
+        ``None`` to mint one. Ignored on a relaunch.
     """
     from omnigent.server.managed_hosts import (
         deployment_with_inference_snapshot,
@@ -4127,6 +4130,7 @@ async def _run_managed_launch(
             relaunch_host=relaunch_host,
             provider=provider,
             agent_name=agent_name,
+            host_id=host_id,
         )
         if managed is None:
             return
