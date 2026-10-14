@@ -1398,7 +1398,7 @@ class SessionGitOptions(BaseModel):
 _MAX_MANAGED_WORKSPACES = 10
 # Shape of a server-minted host id (``uuid.uuid4().hex``); a caller-chosen
 # ``managed_host_id`` must match it.
-_MANAGED_HOST_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_MANAGED_HOST_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 
 class _SessionCreateRequestBase(BaseModel):
@@ -1455,7 +1455,8 @@ class _SessionCreateRequestBase(BaseModel):
         ``shard_managed_sandbox``. The server registers the host under it
         and records it in the ``omnigent.sandbox.host_id`` label; a
         create naming an existing host fails with ``409``. ``None`` lets
-        the server mint one.
+        the server mint one. JSON creates only; ignored when the session
+        reuses its parent's runner.
     :param sandbox_provider: Which configured sandbox provider to
         provision on, e.g. ``"modal"`` — one of the names ``GET /v1/info``
         reports in ``sandbox_providers``. Only valid with
@@ -1630,7 +1631,7 @@ class _SessionCreateRequestBase(BaseModel):
                     "host_type 'managed' lets the server provision the host; "
                     "host_id must not be set"
                 )
-            if self.managed_host_id is not None and not _MANAGED_HOST_ID_RE.match(
+            if self.managed_host_id is not None and not _MANAGED_HOST_ID_RE.fullmatch(
                 self.managed_host_id
             ):
                 raise ValueError("managed_host_id must be 32 lowercase hex characters")

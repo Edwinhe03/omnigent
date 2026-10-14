@@ -341,11 +341,8 @@ MANAGED_SANDBOX_LABEL_NAMESPACE = "omnigent.sandbox."
 # while an in-place agent switch keeps them — the sandbox is unchanged.
 MANAGED_REPO_LABEL_KEY = "omnigent.sandbox.repo"
 
-# Session label carrying the host id a create asked for (``managed_host_id``),
-# set when the create is accepted. The session row's ``host_id`` stays null until
-# the host binds, so clients route by this label until then. In the sandbox
-# namespace so a client cannot seed it, and per-session like the repo labels: a
-# fork launches its own sandbox, so it never inherits it.
+# Server-owned routing id from a create's ``managed_host_id``: available before
+# the host binds, and omitted from forks.
 MANAGED_HOST_ID_LABEL_KEY = "omnigent.sandbox.host_id"
 
 

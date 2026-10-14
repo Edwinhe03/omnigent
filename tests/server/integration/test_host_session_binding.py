@@ -586,10 +586,9 @@ async def test_managed_session_create_with_host_id_registers_under_it(
 ) -> None:
     """
     ``POST /v1/sessions`` with a ``managed_host_id`` records it in the
-    ``omnigent.sandbox.host_id`` label (on the 201 and the row) and the
-    sandbox host registers under it, so a client can route the create and
-    every later request by that id before the host binds. A second create
-    naming the same host is a 409.
+    ``omnigent.sandbox.host_id`` label (on the 201, the row, and the
+    snapshot) and the session eventually binds to a host registered under it.
+    A second create naming the same host is a 409 that creates no session.
     """
     env = managed_session_env
     monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
@@ -635,12 +634,14 @@ async def test_managed_session_create_with_host_id_registers_under_it(
     assert snapshot.status_code == 200, snapshot.text
     assert snapshot.json()["labels"]["omnigent.sandbox.host_id"] == host_id
 
+    sessions_before = env.conv_store.list_conversations(limit=100)
     duplicate = await env.client.post(
         "/v1/sessions",
         json={"agent_id": agent["id"], "host_type": "managed", "managed_host_id": host_id},
     )
     assert duplicate.status_code == 409, duplicate.text
     assert duplicate.json()["error"]["code"] == "already_exists"
+    assert env.conv_store.list_conversations(limit=100) == sessions_before
     del tunnels
 
 

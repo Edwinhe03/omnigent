@@ -448,9 +448,8 @@ def register_core_routes(
         :param managed_host_id: Host id the caller chose for the sandbox
             host, recorded in the ``omnigent.sandbox.host_id`` label, or
             ``None`` to let the launch mint one.
-        :raises OmnigentError: If managed hosts aren't configured, the
-            provider isn't offered, or *managed_host_id* names an existing
-            host.
+        :raises OmnigentError: If managed hosts aren't configured or the
+            provider isn't offered.
         """
         sandbox_config = getattr(request.app.state, "sandbox_config", None)
         host_store_for_managed = getattr(request.app.state, "host_store", None)
@@ -493,16 +492,6 @@ def register_core_routes(
         # launch clones inside the sandbox; parse each now so a malformed
         # URL is a synchronous 4xx, not a background failure.
         repos = [parse_repo_workspace(w) for w in workspaces]
-        # A caller-chosen id must not name an existing host. Not an idempotency
-        # key: the host row is written by the background launch, so a retry
-        # could not find the session it would replay.
-        if managed_host_id is not None and (
-            await asyncio.to_thread(host_store_for_managed.get_host, managed_host_id) is not None
-        ):
-            raise OmnigentError(
-                f"host {managed_host_id} already exists",
-                code=ErrorCode.ALREADY_EXISTS,
-            )
         managed_labels: dict[str, str] = {}
         if managed_host_id is not None:
             managed_labels[MANAGED_HOST_ID_LABEL_KEY] = managed_host_id
@@ -800,6 +789,21 @@ def register_core_routes(
             # message survives in each entry's `msg`.
             raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
 
+        # A caller-chosen host id must not name an existing host. Checked before
+        # the session exists so a rejected create leaves nothing behind. Not an
+        # idempotency key: the host row is written by the background launch, so a
+        # retry could not find the session it would replay.
+        host_store_for_managed = getattr(request.app.state, "host_store", None)
+        if (
+            body.managed_host_id is not None
+            and host_store_for_managed is not None
+            and await asyncio.to_thread(host_store_for_managed.get_host, body.managed_host_id)
+            is not None
+        ):
+            raise OmnigentError(
+                f"host {body.managed_host_id} already exists",
+                code=ErrorCode.ALREADY_EXISTS,
+            )
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
             conversation_store,

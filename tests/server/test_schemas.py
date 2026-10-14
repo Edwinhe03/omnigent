@@ -856,6 +856,7 @@ def test_session_create_managed_accepts_a_minted_shape_host_id() -> None:
         "0123456789ABCDEF0123456789ABCDEF",
         "0123456789abcdef0123456789abcde",
         "01234567-89ab-cdef-0123-456789abcdef",
+        "0123456789abcdef0123456789abcdef\n",
         "",
     ],
 )
