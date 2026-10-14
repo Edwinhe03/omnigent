@@ -7,9 +7,10 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -642,6 +643,60 @@ async def test_managed_session_create_with_host_id_registers_under_it(
     assert duplicate.status_code == 409, duplicate.text
     assert duplicate.json()["error"]["code"] == "already_exists"
     assert env.conv_store.list_conversations(limit=100) == sessions_before
+    del tunnels
+
+
+async def test_managed_session_create_ignores_host_id_the_provider_cannot_honor(
+    managed_session_env: ManagedSessionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A provider that does not declare ``shard_managed_sandbox`` keeps its own
+    host identity: the create still succeeds, with no
+    ``omnigent.sandbox.host_id`` label, and the launch mints the id.
+    """
+    env = managed_session_env
+    monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S", 0.2
+    )
+    loop = asyncio.get_running_loop()
+    host_futures: list[asyncio.Future[ApplicationCommunicator]] = []
+
+    def _start_fake_sandbox_host(invocation: HostStartInvocation) -> None:
+        """Spawn the fake sandbox host when the launcher 'starts' it."""
+        future = asyncio.run_coroutine_threadsafe(
+            _fake_sandbox_host(
+                env.app, invocation.host_id, invocation.host_name, invocation.token
+            ),
+            loop,
+        )
+        host_futures.append(asyncio.wrap_future(future, loop=loop))
+
+    class _SelfIdentifyingFake(FakeSandboxLauncher):
+        @property
+        def capabilities(self) -> Any:
+            return replace(super().capabilities, shard_managed_sandbox=False)
+
+    install_fake_modal_launcher(
+        monkeypatch, _SelfIdentifyingFake(on_host_start=_start_fake_sandbox_host)
+    )
+    host_id = "0123456789abcdef0123456789abcdef"
+
+    agent = await create_test_agent(env.client, name="managed-unsharded-agent")
+    resp = await env.client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "host_type": "managed", "managed_host_id": host_id},
+    )
+    assert resp.status_code == 201, resp.text
+    assert "omnigent.sandbox.host_id" not in resp.json()["labels"]
+
+    conv = await _wait_for_managed_binding(env, resp.json()["id"])
+    tunnels = [await future for future in host_futures]
+    assert len(tunnels) == 1
+    assert conv.host_id is not None
+    assert conv.host_id != host_id
+    assert "omnigent.sandbox.host_id" not in conv.labels
     del tunnels
 
 

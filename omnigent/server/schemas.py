@@ -1456,7 +1456,8 @@ class _SessionCreateRequestBase(BaseModel):
         and records it in the ``omnigent.sandbox.host_id`` label; a
         create naming an existing host fails with ``409``. ``None`` lets
         the server mint one. JSON creates only; ignored when the session
-        reuses its parent's runner.
+        reuses its parent's runner or the provider does not report
+        ``shard_managed_sandbox``.
     :param sandbox_provider: Which configured sandbox provider to
         provision on, e.g. ``"modal"`` — one of the names ``GET /v1/info``
         reports in ``sandbox_providers``. Only valid with

@@ -94,6 +94,11 @@ class SandboxCapabilities:
         handed a multi-repo request; providers opt in explicitly.
     :param git_clone_options: Provider honors ``RepoWorkspace.git_clone``
         when creating checkouts. Custom materializers must opt in.
+    :param shard_managed_sandbox: A managed host this provider starts
+        registers under the host id the server hands it, so a create may
+        choose that id (``managed_host_id``) and be routed by it. On by
+        default: the managed start path passes the id to ``start_host``. A
+        provider whose sandbox picks its own host identity turns it off.
     """
 
     cli_bootstrap: bool = False
@@ -110,6 +115,7 @@ class SandboxCapabilities:
     snapshot_restore: bool = False
     multi_repo: bool = False
     git_clone_options: bool = False
+    shard_managed_sandbox: bool = True
 
 
 @dataclass(frozen=True)

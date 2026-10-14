@@ -2169,6 +2169,38 @@ def test_provider_ui_capabilities_reports_multi_repo_per_provider() -> None:
     }
 
 
+def test_provider_ui_capabilities_report_each_providers_sharding_support() -> None:
+    """A provider whose sandbox picks its own host identity reports
+    ``shard_managed_sandbox: False``, so clients don't key its creates."""
+
+    class _SelfIdentifyingFake(FakeSandboxLauncher):
+        @property
+        def capabilities(self) -> Any:
+            return replace(super().capabilities, shard_managed_sandbox=False)
+
+    sharded = FakeSandboxLauncher()
+    self_identifying = _SelfIdentifyingFake()
+    deployment = ManagedSandboxDeployment(
+        configs=(
+            ManagedSandboxConfig(
+                server_url="https://s",
+                provider="sharded",
+                token_ttl_s=3600,
+                launcher_factory=lambda: sharded,
+            ),
+            ManagedSandboxConfig(
+                server_url="https://s",
+                provider="self-identifying",
+                token_ttl_s=3600,
+                launcher_factory=lambda: self_identifying,
+            ),
+        )
+    )
+    caps = deployment.provider_ui_capabilities()
+    assert caps["sharded"]["shard_managed_sandbox"] is True
+    assert caps["self-identifying"]["shard_managed_sandbox"] is False
+
+
 def test_provider_ui_capabilities_enable_inference_only_on_configured_target() -> None:
     launcher = FakeSandboxLauncher()
     profile = {

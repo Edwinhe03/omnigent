@@ -811,9 +811,7 @@ class ManagedSandboxDeployment:
                 launcher = config.launcher_factory()
                 caps[config.provider] = {
                     "multi_repo": launcher.capabilities.multi_repo,
-                    # The host registers under a create's managed_host_id, so the
-                    # create may be routed by that id.
-                    "shard_managed_sandbox": True,
+                    "shard_managed_sandbox": launcher.capabilities.shard_managed_sandbox,
                 }
                 from omnigent.inference_config import parse_inference_config
                 from omnigent.server.inference_catalog import ambient_gateway_providers
