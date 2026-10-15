@@ -52,10 +52,12 @@ def managed_replicas(
     """
     Start isolated product replicas, the real host launcher and a keyed ingress.
 
-    Indirect param: whether the ingress strips the create's chosen host id,
-    as for a client that doesn't choose one (default off).
+    Indirect param ``(strip_host_id, legacy_host)``: whether the ingress strips
+    the create's chosen host id, as for a client that doesn't choose one, and
+    whether the sandbox host keys by its id regardless of the launch (default
+    neither).
     """
-    strip_host_id = getattr(request, "param", False)
+    strip_host_id, legacy_host = getattr(request, "param", (False, False))
     ports = {role: _find_free_port() for role in ("a", "b", "ingress", "ui")}
     urls = {role: f"http://127.0.0.1:{port}" for role, port in ports.items()}
     config = tmp_path / "config"
@@ -120,6 +122,7 @@ def managed_replicas(
                     "--replica-b",
                     urls["b"],
                     *(["--strip-host-id"] if strip_host_id else []),
+                    *(["--legacy-host"] if legacy_host else []),
                 ]
                 cwd, process_env = _REPO_ROOT, env
             with log_path.open("w") as log:
@@ -154,7 +157,7 @@ def managed_replicas(
 
 
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize("managed_replicas", [True], indirect=True)
+@pytest.mark.parametrize("managed_replicas", [(True, True)], indirect=True)
 def test_managed_first_message_rebinds_live_stream_across_replicas(
     managed_replicas: ManagedReplicas,
     mock_llm_server_url: str,
@@ -163,7 +166,8 @@ def test_managed_first_message_rebinds_live_stream_across_replicas(
     Create and send through the UI; recover both POST and SSE without navigation.
 
     The create carries no host id, so the message and stream start on the
-    default replica.
+    default replica, while the host keys by its own id as an older sandbox
+    does.
     """
     configure_mock_llm(
         mock_llm_server_url,
@@ -352,21 +356,31 @@ _SHARDED_REPLY = "The managed message reached the host replica first try."
 
 
 @pytest.mark.timeout(300)
-def test_managed_create_with_chosen_host_id_routes_to_host_replica(
+@pytest.mark.parametrize(
+    ("managed_replicas", "keyed"),
+    [((False, False), True), ((True, False), False)],
+    indirect=["managed_replicas"],
+)
+def test_managed_create_lands_on_its_hosts_replica(
     managed_replicas: ManagedReplicas,
     mock_llm_server_url: str,
+    keyed: bool,
 ) -> None:
-    """A create with a chosen host id keys everything by it from the start."""
+    """
+    A create with a chosen host id keys everything by it from the start; one
+    without (an older client) stays on the default replica, where the host it
+    launches connects too. Either way the first message lands on the first try.
+    """
     configure_mock_llm(
         mock_llm_server_url,
         [{"text": _SHARDED_REPLY, "stream": True, "block": True}],
         key="managed-sharded-routing",
         match=_SHARDED_PROMPT,
     )
-    _run_in_fresh_loop(_drive_sharded(managed_replicas, mock_llm_server_url))
+    _run_in_fresh_loop(_drive_sharded(managed_replicas, mock_llm_server_url, keyed=keyed))
 
 
-async def _drive_sharded(rig: ManagedReplicas, model_url: str) -> None:
+async def _drive_sharded(rig: ManagedReplicas, model_url: str, *, keyed: bool) -> None:
     async with (
         async_playwright() as playwright,
         httpx.AsyncClient(timeout=10, trust_env=False) as client,
@@ -416,18 +430,20 @@ async def _drive_sharded(rig: ManagedReplicas, model_url: str) -> None:
             create = created(rows)
             assert create is not None
             session_prefix = f"/v1/sessions/{json.loads(create['body'])['id']}"
-            host_id = json.loads(create["request"])["host_id"]
-            assert re.fullmatch(r"[0-9a-f]{32}", host_id)
-            assert create["key"] == host_id and create["replica"] == "b"
+            replica, replica_url = ("b", rig.b) if keyed else ("a", rig.a)
+            host_id = json.loads(create["request"]).get("host_id")
+            assert create["replica"] == replica and create["key"] == host_id
             assert create["status"] == 201
             labels = json.loads(create["body"])["labels"]
-            assert labels["omnigent.sandbox.requested_host_id"] == host_id
+            assert labels.get("omnigent.sandbox.requested_host_id") == host_id
+            if keyed:
+                assert host_id is not None and re.fullmatch(r"[0-9a-f]{32}", host_id)
             # The message waits on the launch on the replica that will hold the
-            # host's tunnel, instead of failing over from the default replica.
-            assert posts(rows)[0]["key"] == host_id and posts(rows)[0]["replica"] == "b"
+            # host's tunnel, instead of failing over from another replica.
+            assert posts(rows)[0]["key"] == host_id and posts(rows)[0]["replica"] == replica
 
-            # The keyed create launched on B, so B holds the provisioning gate.
-            (await client.post(f"{rig.b}/__test/provision/release")).raise_for_status()
+            # The create launched there, so that replica holds the provisioning gate.
+            (await client.post(f"{replica_url}/__test/provision/release")).raise_for_status()
             rows = await _poll(
                 client,
                 network_url,
@@ -435,20 +451,29 @@ async def _drive_sharded(rig: ManagedReplicas, model_url: str) -> None:
                 timeout=90,
             )
             assert len(posts(rows)) == 1, "the first message was re-sent"
-            snapshot = (await client.get(rig.b + session_prefix)).json()
-            assert snapshot["host_id"] == host_id and snapshot["runner_id"]
+            snapshot = (await client.get(replica_url + session_prefix)).json()
+            assert snapshot["host_id"] and snapshot["runner_id"]
+            state = (
+                await client.get(
+                    f"{replica_url}/__test/state", params={"host_id": snapshot["host_id"]}
+                )
+            ).json()
+            assert state["host_local"] is True, "the host connected to another replica"
+            if keyed:
+                assert snapshot["host_id"] == host_id
             await _poll(client, f"{model_url}/gate/pending", lambda body: body["pending"])
             (await client.post(f"{model_url}/gate/release")).raise_for_status()
             assistant = page.locator('[data-testid="message-bubble"][data-role="assistant"]')
             await expect(assistant.filter(has_text=_SHARDED_REPLY)).to_be_visible(timeout=20_000)
 
-            rows = (await client.get(network_url)).json()
-            session_rows = [row for row in rows if row["path"].startswith(session_prefix)]
-            assert session_rows
-            assert all(row["key"] == host_id for row in session_rows), session_rows
-            assert not [row for row in rows if '"wrong_replica"' in row["body"]], (
-                "a request reached a replica without the host's tunnel"
-            )
+            if keyed:
+                rows = (await client.get(network_url)).json()
+                session_rows = [row for row in rows if row["path"].startswith(session_prefix)]
+                assert session_rows
+                assert all(row["key"] == host_id for row in session_rows), session_rows
+                assert not [row for row in rows if '"wrong_replica"' in row["body"]], (
+                    "a request reached a replica without the host's tunnel"
+                )
         finally:
             rows = (await client.get(network_url)).json()
             (rig.logs / "network.json").write_text(json.dumps(rows, indent=2))

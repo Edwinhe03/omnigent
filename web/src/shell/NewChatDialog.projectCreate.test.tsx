@@ -514,7 +514,7 @@ describe("NewChatLandingScreen project-aware create (first-class project_id)", (
     expect(body.workspace).toBeNull();
     expect("git" in body).toBe(true);
     expect(body.git).toBeNull();
-    expect(body.host_id).toMatch(/^[0-9a-f]{32}$/);
+    expect("host_id" in body).toBe(false);
     // The untouched config agent is still omitted for default-fill.
     expect("agent_id" in body).toBe(false);
   });

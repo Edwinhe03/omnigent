@@ -1449,7 +1449,9 @@ class _SessionCreateRequestBase(BaseModel):
         With ``host_type: "managed"`` it instead names the NEW sandbox
         host: 32 lowercase hex characters (the shape of
         ``uuid.uuid4().hex``), so the caller can route the create, and
-        every request after it, by that id from the start. The server
+        every request after it, by that id from the start. Send it only
+        when ``GET /v1/info`` reports ``request_managed_sandbox_host_id``;
+        older servers reject it. The server
         registers the host under it and records it in the
         ``omnigent.sandbox.requested_host_id`` label, since the
         session's ``host_id`` stays null until the host binds. ``None``

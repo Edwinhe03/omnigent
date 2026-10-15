@@ -6250,6 +6250,7 @@ async def _provision_managed_sandbox(
     provider: str | None = None,
     agent_name: str | None = None,
     host_id: str | None = None,
+    relaunch_slice_key_enabled: bool = False,
 ) -> ManagedHostLaunch | None:
     """
     Run the provision phase of a background managed launch.
@@ -6276,6 +6277,8 @@ async def _provision_managed_sandbox(
     :param host_id: Host id a managed create asked for, or
         ``None`` to mint one. Ignored on a relaunch, which keeps the host's
         identity.
+    :param relaunch_slice_key_enabled: On a relaunch, whether the host routes
+        by its own id, as at its first launch.
     :returns: The launch result, or ``None`` when the launch failed
         (the tracker entry is already settled with the reason).
     """
@@ -6302,6 +6305,7 @@ async def _provision_managed_sandbox(
                 repos=repos,
                 agent_name=agent_name,
                 on_stage=_on_stage,
+                slice_key_enabled=relaunch_slice_key_enabled,
             )
         return await launch_managed_host(
             config=sandbox_config,

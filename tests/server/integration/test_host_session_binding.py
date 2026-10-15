@@ -418,9 +418,11 @@ async def _wait_for_managed_binding(
     )
 
 
+@pytest.mark.parametrize("requested_host_id", [None, "0123456789abcdef0123456789abcdef"])
 async def test_managed_session_create_end_to_end(
     managed_session_env: ManagedSessionEnv,
     monkeypatch: pytest.MonkeyPatch,
+    requested_host_id: str | None,
 ) -> None:
     """
     ``POST /v1/sessions`` with ``host_type="managed"`` returns
@@ -428,7 +430,9 @@ async def test_managed_session_create_end_to_end(
     provisioned, the sandbox host registers over the REAL tunnel with
     the minted token, and the session ends up bound to that host with
     a runner launched on it — everything but the sandbox is production
-    code.
+    code. A create that names the host's id gets a host registered under
+    it, recorded in the ``omnigent.sandbox.requested_host_id`` label until
+    the host binds.
     """
     env = managed_session_env
     # A healthy fake host registers in well under a second; shrink the
@@ -465,14 +469,15 @@ async def test_managed_session_create_end_to_end(
     install_fake_modal_launcher(monkeypatch, fake)
 
     agent = await create_test_agent(env.client, name="managed-host-agent")
-    resp = await env.client.post(
-        "/v1/sessions",
-        json={"agent_id": agent["id"], "host_type": "managed"},
-    )
+    body: dict[str, object] = {"agent_id": agent["id"], "host_type": "managed"}
+    if requested_host_id is not None:
+        body["host_id"] = requested_host_id
+    resp = await env.client.post("/v1/sessions", json=body)
     assert resp.status_code == 201, resp.text
     # The non-blocking contract: the create response carries no host
     # binding — provisioning is still running in the background.
     assert resp.json()["host_id"] is None
+    assert resp.json()["labels"].get("omnigent.sandbox.requested_host_id") == requested_host_id
     session_id = resp.json()["id"]
 
     # The background launch binds the session row: sandbox host,
@@ -483,6 +488,9 @@ async def test_managed_session_create_end_to_end(
     tunnels = [await future for future in host_futures]
     assert len(tunnels) == 1
     assert conv.host_id is not None
+    if requested_host_id is not None:
+        assert conv.host_id == requested_host_id
+    assert conv.labels.get("omnigent.sandbox.requested_host_id") == requested_host_id
     assert conv.workspace == "/root/workspace"
     assert conv.runner_id is not None
     assert conv.runner_id.startswith("runner_token_")
@@ -496,6 +504,7 @@ async def test_managed_session_create_end_to_end(
     assert host.status == "online"
     assert host.sandbox_provider == "modal"
     assert host.sandbox_id == "sb-fake-1"
+    assert host.name == f"managed-{conv.host_id[:8]}"
 
     # Deleting the managed session tears the sandbox down: the
     # provider terminate fires and the host row is deleted — which
@@ -580,69 +589,26 @@ async def test_managed_session_create_with_repo_workspace_binds_cloned_dir(
     del tunnels
 
 
-async def test_managed_session_create_with_host_id_registers_under_it(
+async def test_managed_session_create_rejects_a_taken_host_id(
     managed_session_env: ManagedSessionEnv,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    A managed ``POST /v1/sessions`` with a ``host_id`` records it in the
-    ``omnigent.sandbox.requested_host_id`` label (on the 201, the row, and the
-    snapshot) and the session eventually binds to a host registered under it.
-    A second create naming the same host is a 409 that creates no session.
-    """
+    """A managed create naming an existing host is a 409 that creates no session."""
     env = managed_session_env
-    monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
-    monkeypatch.setattr(
-        "omnigent.server.routes.sessions._HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S", 0.2
-    )
-    loop = asyncio.get_running_loop()
-    host_futures: list[asyncio.Future[ApplicationCommunicator]] = []
-
-    def _start_fake_sandbox_host(invocation: HostStartInvocation) -> None:
-        """Spawn the fake sandbox host when the launcher 'starts' it."""
-        future = asyncio.run_coroutine_threadsafe(
-            _fake_sandbox_host(
-                env.app, invocation.host_id, invocation.host_name, invocation.token
-            ),
-            loop,
-        )
-        host_futures.append(asyncio.wrap_future(future, loop=loop))
-
-    fake = FakeSandboxLauncher(on_host_start=_start_fake_sandbox_host)
-    install_fake_modal_launcher(monkeypatch, fake)
     host_id = "0123456789abcdef0123456789abcdef"
+    env.host_store.upsert_on_connect(
+        host_id=host_id, name="managed-01234567", user_id=RESERVED_USER_LOCAL
+    )
+    agent = await create_test_agent(env.client, name="managed-taken-host-agent")
+    sessions_before = env.conv_store.list_conversations(limit=100)
 
-    agent = await create_test_agent(env.client, name="managed-host-id-agent")
     resp = await env.client.post(
         "/v1/sessions",
         json={"agent_id": agent["id"], "host_type": "managed", "host_id": host_id},
     )
-    assert resp.status_code == 201, resp.text
-    assert resp.json()["host_id"] is None
-    assert resp.json()["labels"]["omnigent.sandbox.requested_host_id"] == host_id
-    session_id = resp.json()["id"]
 
-    conv = await _wait_for_managed_binding(env, session_id)
-    tunnels = [await future for future in host_futures]
-    assert len(tunnels) == 1
-    assert conv.host_id == host_id
-    assert conv.labels["omnigent.sandbox.requested_host_id"] == host_id
-    host = env.host_store.get_host(host_id)
-    assert host is not None
-    assert host.name == "managed-01234567"
-    snapshot = await env.client.get(f"/v1/sessions/{session_id}")
-    assert snapshot.status_code == 200, snapshot.text
-    assert snapshot.json()["labels"]["omnigent.sandbox.requested_host_id"] == host_id
-
-    sessions_before = env.conv_store.list_conversations(limit=100)
-    duplicate = await env.client.post(
-        "/v1/sessions",
-        json={"agent_id": agent["id"], "host_type": "managed", "host_id": host_id},
-    )
-    assert duplicate.status_code == 409, duplicate.text
-    assert duplicate.json()["error"]["code"] == "already_exists"
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "already_exists"
     assert env.conv_store.list_conversations(limit=100) == sessions_before
-    del tunnels
 
 
 async def test_managed_multipart_bundle_create_end_to_end(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 from pathlib import Path
 
@@ -9,6 +10,8 @@ import pytest
 import yaml
 
 from omnigent.host.identity import (
+    HOST_SLICE_KEY_ENABLED_ENV_VAR,
+    export_configured_slice_key,
     host_identity_env_override_active,
     load_host_identity_if_present,
     load_or_create_host_identity,
@@ -434,3 +437,32 @@ def test_host_identity_env_override_active_reflects_env(
     monkeypatch.delenv("OMNIGENT_HOST_ID", raising=False)
     monkeypatch.setenv("OMNIGENT_HOST_NAME", "managed-host")
     assert host_identity_env_override_active() is True
+
+
+@pytest.mark.parametrize(
+    ("env", "config", "expected"),
+    [
+        (None, {"host": {"slice_key_enabled": True}}, "1"),
+        (None, {"host": {"slice_key_enabled": False}}, "0"),
+        (None, {"host": {"name": "box"}}, None),
+        ("0", {"host": {"slice_key_enabled": True}}, "0"),
+    ],
+)
+def test_export_configured_slice_key_defers_to_the_env_var(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env: str | None,
+    config: dict[str, object],
+    expected: str | None,
+) -> None:
+    """The config's ``host.slice_key_enabled`` becomes the env var, unless one is set."""
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    if env is None:
+        monkeypatch.delenv(HOST_SLICE_KEY_ENABLED_ENV_VAR, raising=False)
+    else:
+        monkeypatch.setenv(HOST_SLICE_KEY_ENABLED_ENV_VAR, env)
+
+    export_configured_slice_key(path)
+
+    assert os.environ.get(HOST_SLICE_KEY_ENABLED_ENV_VAR) == expected

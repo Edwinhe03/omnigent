@@ -5675,7 +5675,9 @@ export function NewChatLandingScreen() {
                   ...(sandboxProvider !== null ? { sandbox_provider: sandboxProvider } : {}),
                   // The new sandbox host's id, in the server's minted shape;
                   // keys the create and the session's requests until it binds.
-                  host_id: randomUUID().replace(/-/g, ""),
+                  ...(info !== "loading" && info.request_managed_sandbox_host_id
+                    ? { host_id: randomUUID().replace(/-/g, "") }
+                    : {}),
                   ...(sandboxPreviewEnabled && sandboxModels.data?.configuration_revision
                     ? {
                         inference_configuration_revision: sandboxModels.data.configuration_revision,

@@ -4101,6 +4101,7 @@ async def _run_managed_launch(
     """
     from omnigent.server.managed_hosts import (
         deployment_with_inference_snapshot,
+        host_slice_key_enabled,
         resolve_managed_agent_label,
     )
 
@@ -4131,6 +4132,11 @@ async def _run_managed_launch(
             provider=provider,
             agent_name=agent_name,
             host_id=host_id,
+            relaunch_slice_key_enabled=(
+                relaunch_host is not None
+                and saved_conversation is not None
+                and host_slice_key_enabled(saved_conversation.labels, relaunch_host.host_id)
+            ),
         )
         if managed is None:
             return
@@ -4962,6 +4968,7 @@ async def _run_managed_wake(
     from omnigent.onboarding.sandboxes.base import SandboxGoneError
     from omnigent.server.managed_hosts import (
         deployment_with_inference_snapshot,
+        host_slice_key_enabled,
         resolve_managed_agent_label,
         resume_managed_host,
     )
@@ -5015,6 +5022,7 @@ async def _run_managed_wake(
                 force=True,
                 on_stage=_on_stage,
                 agent_name=agent_name,
+                slice_key_enabled=host_slice_key_enabled(conv.labels, host_id),
             )
         except SandboxGoneError:
             _logger.info(

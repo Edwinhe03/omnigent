@@ -2405,10 +2405,14 @@ async def test_info_reports_enabled_for_injected_custom_launcher(
 # ── launch_managed_host ─────────────────────────────────────
 
 
-async def test_launch_success_registers_host_and_returns_workspace(db_uri: str) -> None:
+@pytest.mark.parametrize("requested_host_id", [None, "0123456789abcdef0123456789abcdef"])
+async def test_launch_success_registers_host_and_returns_workspace(
+    db_uri: str, requested_host_id: str | None
+) -> None:
     """
     Golden path: provision → pre-register the host row with its token
-    → start host → host online.
+    → start host → host online. A requested id is the one the host starts
+    under, and only then does the host route by it.
 
     The launcher arrives through the config's factory seam (no
     patching), and the fake's ``on_host_start`` connects exactly as
@@ -2432,9 +2436,17 @@ async def test_launch_success_registers_host_and_returns_workspace(db_uri: str) 
         config=_injected_config(fake),
         owner=_OWNER,
         host_store=host_store,
+        host_id=requested_host_id,
     )
 
     assert fake.prepared is True
+    # Only a requested id needs the host to key off its default here.
+    config_writes = [cmd for cmd in fake.commands if cmd.startswith("python3 -c")]
+    if requested_host_id is None:
+        assert config_writes == []
+    else:
+        slice_key = {"host": {"slice_key_enabled": True}}
+        assert config_writes == [render_host_config_write_command(slice_key)]
     # The workspace was created in the sandbox's home and returned.
     assert result.workspace == "/root/workspace"
     assert any("mkdir -p /root/workspace" in cmd for cmd in fake.commands)
@@ -2442,6 +2454,9 @@ async def test_launch_success_registers_host_and_returns_workspace(db_uri: str) 
     start = fake.host_starts[0]
     assert "--server https://srv.example.com" in start.command
     assert result.host_id == start.host_id
+    assert start.host_name == f"managed-{start.host_id[:8]}"
+    if requested_host_id is not None:
+        assert start.host_id == requested_host_id
     # The hosts row carries the managed binding with full content; the
     # provider comes from the LAUNCHER (not config), so injected custom
     # launchers record their own name.
@@ -4583,39 +4598,37 @@ async def test_launch_defaults_to_first_provider(db_uri: str) -> None:
     assert host.sandbox_provider == "alpha"
 
 
-async def test_launch_registers_the_host_under_a_requested_id(db_uri: str) -> None:
+@pytest.mark.parametrize(
+    ("server_url", "enabled", "expected"),
+    [
+        ("https://srv.example.com", False, None),
+        ("https://srv.example.com", True, {"host": {"slice_key_enabled": True}}),
+        ("https://ws.example.com/api/2.0/omnigent", True, None),
+        ("https://ws.example.com/api/2.0/omnigent", False, {"host": {"slice_key_enabled": False}}),
+    ],
+)
+def test_host_slice_key_is_injected_only_to_override_the_hosts_default(
+    server_url: str, enabled: bool, expected: dict[str, object] | None
+) -> None:
     """
-    A managed create's ``host_id`` becomes the host id and picker name the
-    sandbox host starts under, through the unchanged start path.
+    A host keys by default only on the workspace mount, so a launch adds the
+    setting only to change that, leaving legacy launchers an unchanged call.
     """
-    host_store = HostStore(db_uri)
-    started: list[HostStartInvocation] = []
+    from omnigent.server.managed_hosts import _with_host_slice_key
 
-    def _register(invocation: HostStartInvocation) -> None:
-        """Simulate the sandbox host connecting over the tunnel."""
-        started.append(invocation)
-        host_store.upsert_on_connect(
-            host_id=invocation.host_id,
-            name=invocation.host_name,
-            user_id=_OWNER,
-        )
+    assert _with_host_slice_key(None, enabled, server_url) == expected
 
-    launcher = FakeSandboxLauncher(on_host_start=_register)
-    config = ManagedSandboxDeployment.single(
-        ManagedSandboxConfig(
-            server_url="https://srv.example.com",
-            launcher_factory=lambda: launcher,
-            token_ttl_s=3600,
-        )
-    )
-    requested = "0123456789abcdef0123456789abcdef"
 
-    result = await launch_managed_host(
-        config=config, owner=_OWNER, host_store=host_store, host_id=requested
-    )
+def test_host_slice_key_keeps_the_deployments_host_section() -> None:
+    from omnigent.server.managed_hosts import _with_host_slice_key
 
-    assert result.host_id == requested
-    assert [(i.host_id, i.host_name) for i in started] == [(requested, "managed-01234567")]
+    config = {"host": {"name": "kept"}, "runner": {"idle_timeout_s": 60}}
+
+    assert _with_host_slice_key(config, True, "https://srv.example.com") == {
+        "host": {"name": "kept", "slice_key_enabled": True},
+        "runner": {"idle_timeout_s": 60},
+    }
+    assert config["host"] == {"name": "kept"}
 
 
 async def test_launch_unknown_provider_rejects_before_provisioning(db_uri: str) -> None:
