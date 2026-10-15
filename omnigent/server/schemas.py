@@ -2661,6 +2661,10 @@ class SessionForkRequest(BaseModel):
         provision on ``host_type: "managed"`` (one of the server's
         ``sandbox_providers``); ``None`` takes the server's first. Only
         valid with ``host_type: "managed"``.
+    :param host_id: Id for the fork's new sandbox host, with the same shape,
+        capability gate, label and ``409`` as a managed create's ``host_id``.
+        ``None`` lets the server mint one. Only valid with
+        ``host_type: "managed"``.
     :param workspace: Git repository URL (optionally ``#<branch>``) the
         server clones into the fork's sandbox as its working directory,
         e.g. ``"https://github.com/org/repo#release-1.2"``. **Omitting**
@@ -2680,6 +2684,7 @@ class SessionForkRequest(BaseModel):
     codex_bypass_sandbox: bool = False
     host_type: Literal["external", "managed"] = "external"
     sandbox_provider: str | None = None
+    host_id: str | None = None
     workspace: str | None = None
     # Marks the fork as a side chat: it is stamped with the side-chat label so
     # it is hidden from the left sidebar (it surfaces only as a Workspace-rail
@@ -2704,7 +2709,8 @@ class SessionForkRequest(BaseModel):
 
         :returns: The validated instance.
         :raises ValueError: On a managed workspace that isn't a valid
-            repository URL, or ``sandbox_provider`` / ``workspace`` without
+            repository URL, a malformed managed ``host_id``, or
+            ``host_id`` / ``sandbox_provider`` / ``workspace`` without
             ``host_type: "managed"``.
         """
         # Lazy import: schemas is imported by nearly every module, so
@@ -2713,6 +2719,10 @@ class SessionForkRequest(BaseModel):
         from omnigent.server.managed_hosts import parse_repo_workspace
 
         if self.host_type == "managed":
+            if self.host_id is not None and not _MANAGED_HOST_ID_RE.fullmatch(self.host_id):
+                raise ValueError(
+                    "host_type 'managed' takes a host_id of 32 lowercase hex characters"
+                )
             if self.workspace is not None:
                 try:
                     parse_repo_workspace(self.workspace)
@@ -2722,6 +2732,11 @@ class SessionForkRequest(BaseModel):
                         f"(optionally '#<branch>') as workspace: {exc}"
                     ) from exc
             return self
+        if self.host_id is not None:
+            raise ValueError(
+                "host_id only applies to host_type 'managed' — an external "
+                "fork binds its host afterwards"
+            )
         if self.sandbox_provider is not None:
             raise ValueError(
                 "sandbox_provider only applies to host_type 'managed' — "

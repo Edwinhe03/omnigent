@@ -3348,7 +3348,8 @@ def register_core_routes(
         exists — and the sandbox is registered to the FORKING caller, not
         to the source session's owner. The fork's workspace is the
         repository named by ``body.workspace``, or the one the source
-        recorded when that field is omitted.
+        recorded when that field is omitted. ``body.host_id`` names the
+        fork's new sandbox host, as on a managed create.
 
         :param request: The incoming FastAPI request (for auth).
         :param source_id: Session/conversation identifier of the
@@ -3362,7 +3363,8 @@ def register_core_routes(
             owns a session-scoped ``body.agent_id``; 400 if the source
             has no agent binding, ``body.up_to_response_id`` names
             no response in the source session, or a managed fork asks
-            for a sandbox this server has not configured; 410 if the
+            for a sandbox this server has not configured; 409 if
+            ``body.host_id`` is already in use; 410 if the
             source's agent was removed or a required bundle copy finds
             its source missing.
         """
@@ -3748,6 +3750,9 @@ def register_core_routes(
                     sizes=[stored.bytes for stored in filesystem_sources],
                 )
 
+        if body.host_id is not None:
+            await _check_requested_host_id(request, body.host_id, user_id)
+
         # Copied last, after every validation above; the copy row itself is
         # inserted inside fork_conversation's transaction.
         fork_agent_id = base_agent.id
@@ -3900,6 +3905,7 @@ def register_core_routes(
                 user_id=user_id,
                 sandbox_provider=body.sandbox_provider,
                 workspaces=fork_workspaces,
+                requested_host_id=body.host_id,
             )
         # Default-public grant only after the managed launch was accepted (see
         # the create paths). A side chat is a private scratch fork of the
@@ -3926,7 +3932,7 @@ def register_core_routes(
             order="desc",
         )
         level = await _get_permission_level(user_id, new_conv.id, permission_store)
-        return _build_session_response(
+        resp = _build_session_response(
             new_conv,
             list(reversed(fork_items.data)),
             "idle",
@@ -3934,6 +3940,12 @@ def register_core_routes(
             last_task_error=None,
             agent_name=base_agent.name,
         )
+        if body.host_id is not None:
+            from omnigent.server.managed_hosts import REQUESTED_HOST_ID_LABEL_KEY
+
+            # new_conv predates the launch's label write; see the create path.
+            resp.labels[REQUESTED_HOST_ID_LABEL_KEY] = body.host_id
+        return resp
 
     # ── POST /sessions/{session_id}/switch-agent (reserved) ──────
     # Placeholder: in-place agent switching was retired and will return with a

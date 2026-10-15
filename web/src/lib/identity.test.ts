@@ -502,6 +502,42 @@ describe("authenticatedFetch", () => {
       const headers = new Headers((fetchMock.mock.calls[0][1] as RequestInit).headers);
       expect(headers.get("X-Databricks-Omnigent-Slice-Key")).toBe("host_target");
     });
+
+    it.each([
+      [{ host_type: "managed", host_id: "host_fork" }, "host_fork"],
+      [{ host_type: "managed" }, "host_source"],
+    ])("keys a fork by the host it names, else the source's (%j)", async (body, key) => {
+      // A managed fork's launch runs on the replica it lands on, so it must
+      // land where its own new host will connect, not on the source's.
+      vi.doMock("./sessionHost", () => ({
+        getSessionHost: vi.fn(() => "host_source"),
+        setSessionHost: vi.fn(),
+        isHostKeyless: vi.fn(() => false),
+        markHostKeyless: vi.fn(),
+        clearHostKeyless: vi.fn(),
+        modalHostId: vi.fn(() => "host_modal"),
+        resolveModalHost: vi.fn(),
+        isModalHostResolved: vi.fn(() => true),
+      }));
+      vi.doMock("./host", () => ({
+        getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
+        hostFetch: fetchMock,
+        isDatabricksWorkspace: vi.fn(() => true),
+        isHostRoutingEnabled: vi.fn(() => true),
+      }));
+
+      fetchMock.mockResolvedValueOnce(mockJsonResponse({}));
+      const { authenticatedFetch } = await import("./identity");
+
+      await authenticatedFetch("/v1/sessions/conv_src/fork", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const headers = new Headers((fetchMock.mock.calls[0][1] as RequestInit).headers);
+      expect(headers.get("X-Databricks-Omnigent-Slice-Key")).toBe(key);
+    });
   });
 });
 

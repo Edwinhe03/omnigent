@@ -1139,6 +1139,27 @@ def test_session_fork_managed_accepts_provider_and_repo_workspace() -> None:
     assert req.workspace == "https://github.com/org/repo#release-1.2"
 
 
+@pytest.mark.parametrize(
+    ("host_type", "host_id", "error"),
+    [
+        ("managed", "0123456789abcdef0123456789abcdef", None),
+        ("managed", "host_abc", "32 lowercase hex characters"),
+        ("external", "0123456789abcdef0123456789abcdef", "host_id only applies"),
+    ],
+)
+def test_session_fork_host_id_names_only_a_managed_forks_host(
+    host_type: str, host_id: str, error: str | None
+) -> None:
+    """A fork's ``host_id`` takes a managed create's shape and only on a managed fork."""
+    from omnigent.server.schemas import SessionForkRequest
+
+    if error is None:
+        assert SessionForkRequest(host_type=host_type, host_id=host_id).host_id == host_id
+        return
+    with pytest.raises(ValidationError, match=error):
+        SessionForkRequest(host_type=host_type, host_id=host_id)
+
+
 def test_session_fork_managed_rejects_path_workspace() -> None:
     """
     A managed fork's ``workspace`` is a repository URL, not a path — the

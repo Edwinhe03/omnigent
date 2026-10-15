@@ -1193,6 +1193,14 @@ Request body matches `SessionForkRequest`:
     server's `sandbox_providers`); null takes the server's first.
     Only valid with `host_type: "managed"` (422 otherwise).
 
+  host_id (string | null, optional)
+    Id for the fork's new sandbox host: 32 lowercase hex characters,
+    sent only when `GET /v1/info` reports
+    `request_managed_sandbox_host_id`. Recorded in the
+    `omnigent.sandbox.requested_host_id` label until the host binds;
+    null lets the server mint one. Only valid with
+    `host_type: "managed"` (422 otherwise).
+
   workspace (string | null, optional)
     Git repository URL, optionally `#<branch>`, cloned into the
     fork's sandbox as its working directory. Omitting the field
@@ -1217,9 +1225,11 @@ Request body matches `SessionForkRequest`:
   server has not configured
 404 Not Found — no session with that source_id, or the source's
   agent row is missing
-422 Unprocessable Entity — sandbox_provider / workspace without
-  `host_type: "managed"`, or a managed workspace that is not a
-  repository URL
+409 Conflict — host_id names an existing host, or its
+  `managed-<first 8 hex>` name is already taken
+422 Unprocessable Entity — host_id / sandbox_provider / workspace without
+  `host_type: "managed"`, a malformed host_id, or a managed
+  workspace that is not a repository URL
 ```
 
 Creates a new session by deep-copying every item from the source

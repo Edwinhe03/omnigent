@@ -237,6 +237,9 @@ function beginSessionHostResolve(url: string): Promise<void> | null {
 // {@link hostScopeForUrl} can't see it: the session create (POST /v1/sessions)
 // and the host-mediated local import (POST /v1/imports/local[/stream]).
 const BODY_HOST_KEYED_RE = /\/v1\/(?:sessions(?:\?|$)|imports\/local(?:[/?]|$))/;
+// A managed fork may name its new sandbox host in the body; that host, not the
+// source session's, is where the fork's launch must run.
+const FORK_RE = /\/v1\/sessions\/[^/?#]+\/fork(?:\?|$)/;
 
 /**
  * Recover the target host_id from a JSON request body for a body-host-keyed
@@ -256,7 +259,7 @@ const BODY_HOST_KEYED_RE = /\/v1\/(?:sessions(?:\?|$)|imports\/local(?:[/?]|$))/
  */
 function hostIdFromBody(url: string, body: BodyInit | null | undefined): string | null {
   if (typeof body !== "string") return null;
-  if (!BODY_HOST_KEYED_RE.test(url)) return null;
+  if (!BODY_HOST_KEYED_RE.test(url) && !FORK_RE.test(url)) return null;
   try {
     const hostId = (JSON.parse(body) as { host_id?: unknown }).host_id;
     return typeof hostId === "string" && hostId ? hostId : null;
@@ -499,7 +502,10 @@ export async function authenticatedFetch(
     // it is keyable ONLY by that body host_id (a managed create with none stays
     // unkeyed).
     const scope = hostScopeForUrl(url);
-    if (scope.scoped) {
+    const forkHostId = FORK_RE.test(url) ? hostIdFromBody(url, init?.body) : null;
+    if (forkHostId !== null) {
+      derivedHostId = forkHostId;
+    } else if (scope.scoped) {
       derivedHostId = scope.hostId;
     } else if (isBodyHostKeyedRequest(url, init?.body)) {
       derivedHostId = hostIdFromBody(url, init?.body);
