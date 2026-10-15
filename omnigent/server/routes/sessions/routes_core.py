@@ -549,9 +549,9 @@ def register_core_routes(
         :param managed_host_id: The create's ``managed_host_id``.
         :param sandbox_provider: The create's provider, or ``None`` for the
             server's default.
-        :raises OmnigentError: ``INVALID_INPUT`` if the provider does not
-            report ``shard_managed_sandbox``; ``ALREADY_EXISTS`` if a host
-            already has the id.
+        :raises OmnigentError: ``MANAGED_HOST_ID_UNSUPPORTED`` if the provider
+            does not report ``shard_managed_sandbox``; ``ALREADY_EXISTS`` if a
+            host already has the id.
         """
         sandbox_config = getattr(request.app.state, "sandbox_config", None)
         if sandbox_config is not None:
@@ -562,7 +562,7 @@ def register_core_routes(
                 raise OmnigentError(
                     f"sandbox provider '{resolved}' does not support managed_host_id; "
                     "retry without it",
-                    code=ErrorCode.INVALID_INPUT,
+                    code=ErrorCode.MANAGED_HOST_ID_UNSUPPORTED,
                 )
         host_store = getattr(request.app.state, "host_store", None)
         if (

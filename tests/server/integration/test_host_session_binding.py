@@ -676,7 +676,7 @@ async def test_managed_session_create_rejects_host_id_the_provider_cannot_honor(
         },
     )
     assert resp.status_code == 400, resp.text
-    assert resp.json()["error"]["code"] == "invalid_input"
+    assert resp.json()["error"]["code"] == "managed_host_id_unsupported"
     assert env.conv_store.list_conversations(limit=100) == sessions_before
     assert started == []
 

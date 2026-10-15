@@ -1458,7 +1458,8 @@ class _SessionCreateRequestBase(BaseModel):
         ``parent_session_id`` (a child runs on its parent's host). A
         create naming an existing host fails with ``409``; one whose
         provider does not report ``shard_managed_sandbox`` fails with
-        ``400``. A caller with stale capabilities can retry without it.
+        ``400 managed_host_id_unsupported``, which a caller with stale
+        capabilities resends without the id.
         The id is not checked against deleted hosts still awaiting
         sandbox cleanup; reusing one fails the background launch.
     :param sandbox_provider: Which configured sandbox provider to

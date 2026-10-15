@@ -739,6 +739,9 @@ export function sessionsSharingDirectory(
   );
 }
 
+// The server's 400 for a managed_host_id the provider can't honor.
+const MANAGED_HOST_ID_UNSUPPORTED_CODE = "managed_host_id_unsupported";
+
 /**
  * Best-effort human-readable message for a failed POST /v1/sessions.
  *
@@ -5760,7 +5763,15 @@ export function NewChatLandingScreen() {
           const response = await authenticatedFetch("/v1/sessions", createInit);
           if (managedHostId === null || response.status !== 400) return response;
           // Capabilities read at page load can be stale: the provider may no
-          // longer take the id. Without it the create routes as before.
+          // longer take the id. Only that rejection is resent (without the id,
+          // the create routes as before); other 400s can follow a persisted
+          // session, and resending them would start a second one.
+          const code = await response
+            .clone()
+            .json()
+            .then((body: { error?: { code?: unknown } }) => body.error?.code)
+            .catch(() => null);
+          if (code !== MANAGED_HOST_ID_UNSUPPORTED_CODE) return response;
           const { managed_host_id: _unused, ...withoutHostId } = JSON.parse(createInit.body);
           return authenticatedFetch("/v1/sessions", {
             ...createInit,

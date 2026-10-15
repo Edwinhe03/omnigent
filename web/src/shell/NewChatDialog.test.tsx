@@ -7558,20 +7558,24 @@ describe("NewChatLandingScreen", () => {
   );
 
   it.each([
-    [400, 2],
-    [409, 1],
+    [400, "managed_host_id_unsupported", 2],
+    [400, "invalid_input", 1],
+    [409, "already_exists", 1],
   ])(
-    "retries a create whose chosen host id got %s without it only on a 400",
-    async (status, calls) => {
-      // A 400 means the page's capabilities went stale; the same create without
-      // the id routes as before. A 409 means the id is taken, usually by a
-      // duplicate of this create, so retrying would start a second session.
+    "resends a create whose chosen host id got %s %s without it only on the unsupported code",
+    async (status, code, calls) => {
+      // managed_host_id_unsupported means the page's capabilities went stale,
+      // and the server rejected the create before writing anything. Any other
+      // 400 can follow a persisted session, and a 409 means the id is taken,
+      // usually by a duplicate of this create; resending either would start a
+      // second session.
+      const rejection = {
+        ok: false,
+        status,
+        json: async () => ({ error: { code, message: "rejected" } }),
+      };
       authenticatedFetchMock
-        .mockResolvedValueOnce({
-          ok: false,
-          status,
-          json: async () => ({ error: { message: "rejected" } }),
-        } as unknown as Response)
+        .mockResolvedValueOnce({ ...rejection, clone: () => rejection } as unknown as Response)
         .mockResolvedValue({
           ok: true,
           status: 201,
@@ -7594,6 +7598,9 @@ describe("NewChatLandingScreen", () => {
       if (calls === 2) {
         const { managed_host_id: _sent, ...rest } = bodies[0];
         expect(bodies[1]).toEqual(rest);
+      } else {
+        await waitFor(() => expect(screen.getByText("rejected")).toBeTruthy());
+        expect(authenticatedFetchMock).toHaveBeenCalledTimes(1);
       }
     },
   );

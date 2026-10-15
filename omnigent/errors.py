@@ -233,6 +233,13 @@ class ErrorCode:
         indistinguishable from a completed enumeration, so the caller
         silently loses the remaining rows. The caller's remedy is to
         restart the enumeration without the cursor.
+    :cvar MANAGED_HOST_ID_UNSUPPORTED: A managed create named its sandbox
+        host's id (``managed_host_id``) for a provider that does not report
+        ``shard_managed_sandbox`` (HTTP 400). Raised before the session
+        exists, so the caller's remedy is to resend the same create without
+        the id. Distinct from ``INVALID_INPUT`` so a client resends only on
+        this: other 400s can follow a persisted session, and resending those
+        would start a second one.
     """
 
     UNAUTHORIZED = "unauthorized"
@@ -254,6 +261,7 @@ class ErrorCode:
     UPSTREAM_CANCELLED = "upstream_cancelled"
     UPSTREAM_PERMISSION_DENIED = "upstream_permission_denied"
     STALE_CURSOR = "stale_cursor"
+    MANAGED_HOST_ID_UNSUPPORTED = "managed_host_id_unsupported"
 
 
 # Client-facing text for ``SESSION_AGENT_MISSING``: the session's agent was
@@ -310,6 +318,8 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     # succeed — the fix is to restart the enumeration without the cursor. The
     # distinct code is what a paging client keys that restart off.
     ErrorCode.STALE_CURSOR: 400,
+    # 400: this create can't succeed as sent; the same create without the id can.
+    ErrorCode.MANAGED_HOST_ID_UNSUPPORTED: 400,
 }
 
 
@@ -350,6 +360,7 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     # A stale reference: the cursor row was deleted (often by the same user
     # in another client) between two page fetches.
     ErrorCode.STALE_CURSOR: ErrorCategory.USER,
+    ErrorCode.MANAGED_HOST_ID_UNSUPPORTED: ErrorCategory.USER,
 }
 
 
@@ -393,6 +404,7 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     ErrorCode.ALREADY_EXISTS: ErrorImpact.BENIGN,
     ErrorCode.CONFLICT: ErrorImpact.BENIGN,
     ErrorCode.STALE_CURSOR: ErrorImpact.BENIGN,
+    ErrorCode.MANAGED_HOST_ID_UNSUPPORTED: ErrorImpact.BENIGN,
 }
 
 
@@ -432,6 +444,7 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     ErrorCode.UPSTREAM_CANCELLED: ErrorPhase.UNKNOWN,
     ErrorCode.UPSTREAM_PERMISSION_DENIED: ErrorPhase.UNKNOWN,
     ErrorCode.STALE_CURSOR: ErrorPhase.REQUEST,
+    ErrorCode.MANAGED_HOST_ID_UNSUPPORTED: ErrorPhase.REQUEST,
 }
 
 
