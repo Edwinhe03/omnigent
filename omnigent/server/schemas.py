@@ -1457,9 +1457,10 @@ class _SessionCreateRequestBase(BaseModel):
         session's ``host_id`` stays null until the host binds. ``None``
         lets the server mint one. JSON creates only, and not with
         ``parent_session_id`` (a child runs on its parent's host). An id
-        naming an existing host fails with ``409``. It is not checked
-        against deleted hosts still awaiting sandbox cleanup; reusing
-        one fails the background launch.
+        naming an existing host, or sharing its ``managed-<first 8 hex>``
+        name with one of the caller's hosts, fails with ``409``. Neither is
+        checked against deleted hosts still awaiting sandbox cleanup;
+        colliding with one fails the background launch.
     :param sandbox_provider: Which configured sandbox provider to
         provision on, e.g. ``"modal"`` — one of the names ``GET /v1/info``
         reports in ``sandbox_providers``. Only valid with
