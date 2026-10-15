@@ -1157,6 +1157,88 @@ def test_prune_orphaned_bridge_dirs_keeps_live_and_unmarked_bridges(
     assert unmarked_dir.exists()
 
 
+def _make_unmarked_bridge(root: Path, *, inactive_since: float) -> tuple[Path, Path]:
+    """Create a pre-marker bridge dir whose every entry was last written at *inactive_since*."""
+    bridge_dir = root / ("a" * 32)
+    rollout = (
+        bridge_dir
+        / "codex-home"
+        / "sessions"
+        / "2026"
+        / "08"
+        / "30"
+        / "rollout-2026-08-30T00-00-00-thread.jsonl"
+    )
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+    (bridge_dir / "bridge.json").write_text("secret", encoding="utf-8")
+    for path in (rollout, bridge_dir / "bridge.json", bridge_dir / "codex-home", bridge_dir):
+        os.utime(path, (inactive_since, inactive_since))
+    return bridge_dir, rollout
+
+
+def test_prune_orphaned_bridge_dirs_removes_expired_unmarked_bridge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-marker bridge inactive for 7 days is removed instead of kept forever."""
+    root = tmp_path / "codex-native"
+    root.mkdir(parents=True)
+    monkeypatch.setattr("omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", root)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(codex_native_bridge.time, "time", lambda: now)
+    expired_at = now - codex_native_bridge._ORPHAN_RETENTION_SECONDS - 1
+    bridge_dir, _rollout = _make_unmarked_bridge(root, inactive_since=expired_at)
+
+    assert codex_native_bridge.prune_orphaned_bridge_dirs() == 1
+    assert not bridge_dir.exists()
+
+
+def test_prune_orphaned_bridge_dirs_keeps_unmarked_bridge_with_recent_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recent top-level file or rollout keeps an otherwise old unmarked bridge."""
+    root = tmp_path / "codex-native"
+    root.mkdir(parents=True)
+    monkeypatch.setattr("omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", root)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(codex_native_bridge.time, "time", lambda: now)
+    expired_at = now - codex_native_bridge._ORPHAN_RETENTION_SECONDS - 1
+    bridge_dir, rollout = _make_unmarked_bridge(root, inactive_since=expired_at)
+
+    relay = bridge_dir / "tool_relay.json"
+    relay.write_text("{}", encoding="utf-8")
+    os.utime(relay, (now - 60, now - 60))
+    os.utime(bridge_dir, (expired_at, expired_at))
+    assert codex_native_bridge.prune_orphaned_bridge_dirs() == 0
+    assert bridge_dir.exists()
+
+    os.utime(relay, (expired_at, expired_at))
+    os.utime(rollout, (now - 60, now - 60))
+    assert codex_native_bridge.prune_orphaned_bridge_dirs() == 0
+    assert bridge_dir.exists()
+
+
+def test_prune_orphaned_bridge_dirs_keeps_unmarked_non_bridge_siblings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Old unmarked dirs not named like a bridge digest, e.g. process-owners, stay."""
+    root = tmp_path / "codex-native"
+    root.mkdir(parents=True)
+    monkeypatch.setattr("omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", root)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(codex_native_bridge.time, "time", lambda: now)
+    expired_at = now - codex_native_bridge._ORPHAN_RETENTION_SECONDS - 1
+    process_owners = root / "process-owners"
+    process_owners.mkdir()
+    os.utime(process_owners, (expired_at, expired_at))
+
+    assert codex_native_bridge.prune_orphaned_bridge_dirs() == 0
+    assert process_owners.exists()
+
+
 def test_mirror_applied_codex_settings_records_failed_writes_until_the_config_changes(
     bridge_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

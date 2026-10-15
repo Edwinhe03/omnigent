@@ -133,6 +133,68 @@ def test_prune_retains_entry_reclaimed_during_eligibility_check(
     assert bridge_dir.exists()
 
 
+def test_prune_unmarked_dirs_only_through_the_unmarked_predicate(tmp_path: Path) -> None:
+    """Only marker-less dirs reach the unmarked predicate; bad markers stay put."""
+    root = tmp_path / "bridge-root"
+    accepted = root / "accepted"
+    rejected = root / "rejected"
+    bad = root / "badmarker"
+    for bridge_dir in (accepted, rejected, bad):
+        bridge_dir.mkdir(parents=True)
+    (bad / native_bridge_common.OWNER_PID_FILENAME).write_text("not-an-int", encoding="utf-8")
+    seen: list[str] = []
+
+    def _should_prune_unmarked(bridge_dir: Path) -> bool:
+        seen.append(bridge_dir.name)
+        return bridge_dir == accepted
+
+    pruned = native_bridge_common.prune_orphaned_dirs(
+        root, should_prune_unmarked=_should_prune_unmarked
+    )
+
+    assert pruned == 1
+    assert sorted(seen) == ["accepted", "rejected"]
+    assert not accepted.exists()
+    assert rejected.exists()
+    assert bad.exists()
+
+
+def test_prune_retains_unmarked_entry_adopted_during_eligibility_check(tmp_path: Path) -> None:
+    """A runner writing owner.pid while the predicate runs keeps the dir."""
+    root = tmp_path / "bridge-root"
+    bridge_dir = root / "adopted"
+    bridge_dir.mkdir(parents=True)
+
+    def _adopt(_bridge_dir: Path) -> bool:
+        native_bridge_common.write_owner_pid_marker(bridge_dir)
+        return True
+
+    assert native_bridge_common.prune_orphaned_dirs(root, should_prune_unmarked=_adopt) == 0
+    assert bridge_dir.exists()
+
+
+def test_prune_retains_unmarked_entry_when_eligibility_check_fails(tmp_path: Path) -> None:
+    """A raising unmarked predicate keeps that dir and does not stop the sweep."""
+    root = tmp_path / "bridge-root"
+    failing_dir = root / "failing"
+    eligible_dir = root / "eligible"
+    for bridge_dir in (failing_dir, eligible_dir):
+        bridge_dir.mkdir(parents=True)
+
+    def _should_prune_unmarked(bridge_dir: Path) -> bool:
+        if bridge_dir == failing_dir:
+            raise OSError("unreadable activity timestamp")
+        return True
+
+    pruned = native_bridge_common.prune_orphaned_dirs(
+        root, should_prune_unmarked=_should_prune_unmarked
+    )
+
+    assert pruned == 1
+    assert failing_dir.exists()
+    assert not eligible_dir.exists()
+
+
 def test_reap_invokes_prune_for_every_native_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     """The dynamic sweep calls each native agent's module-level prune once."""
     agents = (
