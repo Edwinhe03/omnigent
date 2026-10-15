@@ -590,6 +590,7 @@ async def test_managed_session_create_with_repo_workspace_binds_cloned_dir(
     del tunnels
 
 
+@pytest.mark.parametrize("pending_cleanup", [False, True])
 @pytest.mark.parametrize(
     "host_id",
     [
@@ -599,15 +600,25 @@ async def test_managed_session_create_with_repo_workspace_binds_cloned_dir(
     ],
 )
 async def test_managed_session_create_rejects_a_taken_host_id(
-    managed_session_env: ManagedSessionEnv, host_id: str
+    managed_session_env: ManagedSessionEnv, host_id: str, pending_cleanup: bool
 ) -> None:
-    """A managed create the launch couldn't register is a 409 that creates no session."""
+    """
+    A managed create the launch couldn't register is a 409 that creates no
+    session, including against a deleted host whose sandbox awaits cleanup.
+    """
     env = managed_session_env
-    env.host_store.upsert_on_connect(
+    env.host_store.register_managed_host(
         host_id="0123456789abcdef0123456789abcdef",
         name="managed-01234567",
         user_id=RESERVED_USER_LOCAL,
+        token="tok-taken",
+        provider="modal",
+        sandbox_id="sb-taken",
+        token_expires_at=9_999_999_999,
     )
+    if pending_cleanup:
+        env.host_store.delete_host("0123456789abcdef0123456789abcdef")
+        assert env.host_store.get_host("0123456789abcdef0123456789abcdef") is None
     agent = await create_test_agent(env.client, name="managed-taken-host-agent")
     sessions_before = env.conv_store.list_conversations(limit=100)
 

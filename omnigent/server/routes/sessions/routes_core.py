@@ -557,18 +557,15 @@ def register_core_routes(
         host_store = getattr(request.app.state, "host_store", None)
         if host_store is None:
             return
-        if await asyncio.to_thread(host_store.get_host, requested_host_id) is not None:
-            raise OmnigentError(
-                f"host {requested_host_id} already exists",
-                code=ErrorCode.ALREADY_EXISTS,
-            )
         name = managed_host_name(requested_host_id)
-        owned = await asyncio.to_thread(
-            host_store.list_hosts, user_id if user_id is not None else RESERVED_USER_LOCAL
-        )
-        if any(host.name == name for host in owned):
+        if await asyncio.to_thread(
+            host_store.host_keys_taken,
+            host_id=requested_host_id,
+            user_id=user_id if user_id is not None else RESERVED_USER_LOCAL,
+            name=name,
+        ):
             raise OmnigentError(
-                f"host name {name} is taken; choose a host_id with different leading hex",
+                f"host {requested_host_id} or its name {name} is already in use",
                 code=ErrorCode.ALREADY_EXISTS,
             )
 
