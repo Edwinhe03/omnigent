@@ -72,7 +72,7 @@ def export_configured_slice_key(path: Path) -> None:
         with open(path) as f:
             cfg = yaml.safe_load(f) or {}
     except yaml.YAMLError:
-        # Identity comes from the env here; a bad file stays the host's to report.
+        # Malformed config is reported by the identity load, not here.
         return
     host_section = cfg.get("host") if isinstance(cfg, dict) else None
     enabled = host_section.get("slice_key_enabled") if isinstance(host_section, dict) else None
