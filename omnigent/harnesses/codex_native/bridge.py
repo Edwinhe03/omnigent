@@ -8,7 +8,6 @@ import json
 import logging
 import math
 import os
-import re
 import secrets
 import stat
 import sys
@@ -23,7 +22,6 @@ from typing import TYPE_CHECKING
 import tomllib
 
 from omnigent.harnesses.codex_egress import CertificateFailure
-from omnigent.harnesses.codex_native.state import LAUNCH_STATE_FILENAME
 from omnigent.native import native_bridge_common
 
 if TYPE_CHECKING:
@@ -93,7 +91,6 @@ _MCP_CONFIG_FILE = "bridge.json"
 _POLICY_HOOK_FILE = "policy_hook.json"
 _BRIDGE_ROOT = Path.home() / ".omnigent" / "codex-native"
 _ORPHAN_RETENTION_SECONDS = 7 * 24 * 60 * 60
-_BRIDGE_DIGEST_RE = re.compile(r"[0-9a-f]{32}")
 
 
 def _codex_composer_interactive(pane: str) -> bool:
@@ -274,10 +271,10 @@ def prune_orphaned_bridge_dirs() -> int:
 def _codex_orphan_retention_expired(bridge_dir: Path) -> bool:
     """Return whether a dead-owner or unmarked Codex bridge has been inactive for 7 days.
 
-    An unmarked bridge has no marker timestamp, so its latest top-level write
-    stands in for it. Only dirs named like a bridge digest qualify, which keeps
-    siblings such as the process-owner lock dir, and a dir holding nothing but
-    standalone launch state is kept.
+    An unmarked dir qualifies only if it holds bridge artifacts (``bridge.json``
+    or ``codex-home``), which keeps siblings that share this root such as the
+    process-owner locks and standalone launch state. Its latest top-level write
+    stands in for the missing marker timestamp.
     """
     activity_cutoff = time.time() - _ORPHAN_RETENTION_SECONDS
     owner_marker = bridge_dir / native_bridge_common.OWNER_PID_FILENAME
@@ -285,19 +282,17 @@ def _codex_orphan_retention_expired(bridge_dir: Path) -> bool:
         if owner_marker.stat().st_mtime > activity_cutoff:
             return False
     except FileNotFoundError:
-        if not _BRIDGE_DIGEST_RE.fullmatch(bridge_dir.name):
-            return False
         try:
-            children = list(bridge_dir.iterdir())
+            if not (
+                (bridge_dir / _MCP_CONFIG_FILE).exists()
+                or codex_home_for_bridge_dir(bridge_dir).exists()
+            ):
+                return False
             if bridge_dir.stat().st_mtime > activity_cutoff or any(
-                child.lstat().st_mtime > activity_cutoff for child in children
+                child.lstat().st_mtime > activity_cutoff for child in bridge_dir.iterdir()
             ):
                 return False
         except OSError:
-            return False
-        # Launch state shares this root and digest naming but is written once per
-        # session and never marked, so a dir holding only that is not a bridge.
-        if {child.name for child in children} <= {LAUNCH_STATE_FILENAME}:
             return False
     except OSError:
         return False
