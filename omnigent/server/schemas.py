@@ -24,6 +24,7 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 from omnigent.entities import (
     DEFAULT_GENERATED_TITLE_MAX_CHARS,
@@ -1396,8 +1397,8 @@ class SessionGitOptions(BaseModel):
 # abusive request.
 # ponytail: bump this one constant if larger repo sets ever need supporting.
 _MAX_MANAGED_WORKSPACES = 10
-# Shape of a server-minted host id (``uuid.uuid4().hex``); a caller-chosen
-# ``managed_host_id`` must match it.
+# Shape of a server-minted host id (``uuid.uuid4().hex``); a managed create's
+# ``host_id`` must match it.
 _MANAGED_HOST_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 
@@ -1445,19 +1446,18 @@ class _SessionCreateRequestBase(BaseModel):
         ``"host_a1b2c3d4..."``. When set, the server triggers the
         host launch flow (generate binding token, write runner_id,
         send launch frame). ``None`` for CLI-initiated sessions.
-        Must be ``None`` when ``host_type`` is ``"managed"``.
-    :param managed_host_id: ``host_type: "managed"`` only — the host id
-        the caller asks the server to give the sandbox host, 32
-        lowercase hex characters (the shape of ``uuid.uuid4().hex``).
-        Choosing it client-side lets the caller route the create, and
+        With ``host_type: "managed"`` it instead names the NEW sandbox
+        host: 32 lowercase hex characters (the shape of
+        ``uuid.uuid4().hex``), so the caller can route the create, and
         every request after it, by that id from the start. The server
         registers the host under it and records it in the
-        ``omnigent.sandbox.host_id`` label. ``None`` lets the server mint
-        one. JSON creates only, and not with ``parent_session_id`` (a
-        child runs on its parent's host). A create naming an existing
-        host fails with ``409``.
-        The id is not checked against deleted hosts still awaiting
-        sandbox cleanup; reusing one fails the background launch.
+        ``omnigent.sandbox.requested_host_id`` label, since the
+        session's ``host_id`` stays null until the host binds. ``None``
+        lets the server mint one. JSON creates only, and not with
+        ``parent_session_id`` (a child runs on its parent's host). An id
+        naming an existing host fails with ``409``. It is not checked
+        against deleted hosts still awaiting sandbox cleanup; reusing
+        one fails the background launch.
     :param sandbox_provider: Which configured sandbox provider to
         provision on, e.g. ``"modal"`` — one of the names ``GET /v1/info``
         reports in ``sandbox_providers``. Only valid with
@@ -1568,7 +1568,9 @@ class _SessionCreateRequestBase(BaseModel):
     sub_agent_name: str | None = None
     host_type: Literal["external", "managed"] = "external"
     host_id: str | None = None
-    managed_host_id: str | None = None
+    # A managed create's ``host_id``, moved here at validation so ``host_id``
+    # keeps meaning the caller's existing host everywhere downstream.
+    requested_host_id: SkipJsonSchema[str | None] = None
     sandbox_provider: str | None = None
     workspace: str | None = None
     workspaces: list[str] | None = None
@@ -1598,14 +1600,31 @@ class _SessionCreateRequestBase(BaseModel):
             raise ValueError("git worktree creation requires host_id")
         return self
 
+    @model_validator(mode="before")
+    @classmethod
+    def _move_managed_host_id(cls, data: Any) -> Any:
+        """
+        Move a managed create's ``host_id`` into ``requested_host_id``.
+
+        :param data: The raw request body.
+        :returns: The body, with a managed ``host_id`` moved.
+        """
+        if (
+            isinstance(data, dict)
+            and data.get("host_type") == "managed"
+            and data.get("host_id") is not None
+        ):
+            return {**data, "host_id": None, "requested_host_id": data["host_id"]}
+        return data
+
     @model_validator(mode="after")
     def _check_managed_host_fields(self) -> Self:
         """
         Enforce the per-``host_type`` workspace and host-id contract.
 
-        A managed session's host is chosen by the server (sandbox
-        provisioning), so a caller-supplied ``host_id`` is a
-        contradiction. Its ``workspace``, when given, must be a git
+        A managed session's host is provisioned by the server, so its
+        ``host_id`` (already moved to ``requested_host_id``) can only name
+        the new host. Its ``workspace``, when given, must be a git
         repository URL (optionally ``#<branch>``) the server clones
         into the sandbox — a path points at nothing in a sandbox that
         doesn't exist yet. Conversely, a repository-URL workspace on
@@ -1615,8 +1634,8 @@ class _SessionCreateRequestBase(BaseModel):
         caller's intent.
 
         :returns: The validated instance.
-        :raises ValueError: On ``"managed"`` + ``host_id``, a malformed
-            ``managed_host_id`` (or one on an external or child create), a managed
+        :raises ValueError: On a malformed managed ``host_id`` (or one on
+            a child create), a managed
             workspace/workspaces that isn't a valid repository URL,
             ``workspace`` and ``workspaces`` set together, too many
             ``workspaces``, or an external repository-URL workspace.
@@ -1627,18 +1646,15 @@ class _SessionCreateRequestBase(BaseModel):
         from omnigent.server.managed_hosts import is_repo_workspace, parse_repo_workspace
 
         if self.host_type == "managed":
-            if self.host_id is not None:
-                raise ValueError(
-                    "host_type 'managed' lets the server provision the host; "
-                    "host_id must not be set"
-                )
-            if self.managed_host_id is not None and not _MANAGED_HOST_ID_RE.fullmatch(
-                self.managed_host_id
+            if self.requested_host_id is not None and not _MANAGED_HOST_ID_RE.fullmatch(
+                self.requested_host_id
             ):
-                raise ValueError("managed_host_id must be 32 lowercase hex characters")
-            if self.managed_host_id is not None and self.parent_session_id is not None:
                 raise ValueError(
-                    "managed_host_id does not apply to a child session; "
+                    "host_type 'managed' takes a host_id of 32 lowercase hex characters"
+                )
+            if self.requested_host_id is not None and self.parent_session_id is not None:
+                raise ValueError(
+                    "host_id does not apply to a managed child session; "
                     "it runs on its parent's host"
                 )
             if self.workspace is not None and self.workspaces is not None:
@@ -1660,8 +1676,8 @@ class _SessionCreateRequestBase(BaseModel):
                         f"(optionally '#<branch>') as workspace(s): {exc}"
                     ) from exc
             return self
-        if self.managed_host_id is not None:
-            raise ValueError("managed_host_id only applies to host_type 'managed'")
+        if self.requested_host_id is not None:
+            raise ValueError("requested_host_id only applies to host_type 'managed'")
         if self.sandbox_provider is not None:
             raise ValueError(
                 "sandbox_provider only applies to host_type 'managed' — "

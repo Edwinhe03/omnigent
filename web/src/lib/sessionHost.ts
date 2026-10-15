@@ -46,7 +46,7 @@ export function setSessionHost(sessionId: string, hostId: string | null | undefi
 
 // A managed create that chose its sandbox host's id records it in this label;
 // the row's host_id stays null until the host binds.
-export const MANAGED_HOST_ID_LABEL = "omnigent.sandbox.host_id";
+export const REQUESTED_HOST_ID_LABEL = "omnigent.sandbox.requested_host_id";
 
 /**
  * The host id a session routes by: its bound host, else the id its managed
@@ -56,7 +56,7 @@ export function sessionRoutingHostId(
   hostId: string | null | undefined,
   labels: Record<string, string> | null | undefined,
 ): string | null {
-  return hostId || labels?.[MANAGED_HOST_ID_LABEL] || null;
+  return hostId || labels?.[REQUESTED_HOST_ID_LABEL] || null;
 }
 
 // A sub-agent or side chat runs on its parent's runner, whose tunnel lives on the

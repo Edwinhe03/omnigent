@@ -585,8 +585,8 @@ async def test_managed_session_create_with_host_id_registers_under_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    ``POST /v1/sessions`` with a ``managed_host_id`` records it in the
-    ``omnigent.sandbox.host_id`` label (on the 201, the row, and the
+    A managed ``POST /v1/sessions`` with a ``host_id`` records it in the
+    ``omnigent.sandbox.requested_host_id`` label (on the 201, the row, and the
     snapshot) and the session eventually binds to a host registered under it.
     A second create naming the same host is a 409 that creates no session.
     """
@@ -615,29 +615,29 @@ async def test_managed_session_create_with_host_id_registers_under_it(
     agent = await create_test_agent(env.client, name="managed-host-id-agent")
     resp = await env.client.post(
         "/v1/sessions",
-        json={"agent_id": agent["id"], "host_type": "managed", "managed_host_id": host_id},
+        json={"agent_id": agent["id"], "host_type": "managed", "host_id": host_id},
     )
     assert resp.status_code == 201, resp.text
     assert resp.json()["host_id"] is None
-    assert resp.json()["labels"]["omnigent.sandbox.host_id"] == host_id
+    assert resp.json()["labels"]["omnigent.sandbox.requested_host_id"] == host_id
     session_id = resp.json()["id"]
 
     conv = await _wait_for_managed_binding(env, session_id)
     tunnels = [await future for future in host_futures]
     assert len(tunnels) == 1
     assert conv.host_id == host_id
-    assert conv.labels["omnigent.sandbox.host_id"] == host_id
+    assert conv.labels["omnigent.sandbox.requested_host_id"] == host_id
     host = env.host_store.get_host(host_id)
     assert host is not None
     assert host.name == "managed-01234567"
     snapshot = await env.client.get(f"/v1/sessions/{session_id}")
     assert snapshot.status_code == 200, snapshot.text
-    assert snapshot.json()["labels"]["omnigent.sandbox.host_id"] == host_id
+    assert snapshot.json()["labels"]["omnigent.sandbox.requested_host_id"] == host_id
 
     sessions_before = env.conv_store.list_conversations(limit=100)
     duplicate = await env.client.post(
         "/v1/sessions",
-        json={"agent_id": agent["id"], "host_type": "managed", "managed_host_id": host_id},
+        json={"agent_id": agent["id"], "host_type": "managed", "host_id": host_id},
     )
     assert duplicate.status_code == 409, duplicate.text
     assert duplicate.json()["error"]["code"] == "already_exists"

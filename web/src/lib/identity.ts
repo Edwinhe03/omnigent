@@ -248,8 +248,8 @@ const BODY_HOST_KEYED_RE = /\/v1\/(?:sessions(?:\?|$)|imports\/local(?:[/?]|$))/
  * inline over its pod-local tunnel); an import fails "host is not connected"
  * (the import reads the host's transcripts over that same tunnel). Keying by the
  * body host_id pins both to the right replica like every other host-scoped
- * request. A managed-sandbox create keys by the ``managed_host_id`` it chose
- * for its sandbox host, so the launch runs where that host's tunnel will land.
+ * request. A managed-sandbox create's ``host_id`` is the id it chose for its
+ * new sandbox host, so the launch runs where that host's tunnel will land.
  * Bundled (multipart) creates are hostless here (non-string body), as is a
  * managed create without one; both yield null → unkeyed (see
  * {@link isBodyHostKeyedRequest}).
@@ -258,8 +258,7 @@ function hostIdFromBody(url: string, body: BodyInit | null | undefined): string 
   if (typeof body !== "string") return null;
   if (!BODY_HOST_KEYED_RE.test(url)) return null;
   try {
-    const parsed = JSON.parse(body) as { host_id?: unknown; managed_host_id?: unknown };
-    const hostId = parsed.host_id ?? parsed.managed_host_id;
+    const hostId = (JSON.parse(body) as { host_id?: unknown }).host_id;
     return typeof hostId === "string" && hostId ? hostId : null;
   } catch {
     return null;
@@ -272,10 +271,10 @@ function hostIdFromBody(url: string, body: BodyInit | null | undefined): string 
  * The modal host is a cache-affinity hint for reads, but these requests have a
  * side effect pinned to a replica and must key by their OWN target host:
  *
- * - A managed create keys by its chosen ``managed_host_id``. Without one it
- *   stays unkeyed: if the new host connects elsewhere, its first message must
- *   resolve the assigned host and re-address after wrong_replica. A create that
- *   names a host keeps that key.
+ * - A managed create keys by the host_id it chose for its sandbox host. One
+ *   without a host_id stays unkeyed: if the new host connects elsewhere, its
+ *   first message must resolve the assigned host and re-address after
+ *   wrong_replica. A create that names a host keeps that key.
  * - A local import reads the chosen host's transcripts over its tunnel, which is
  *   registered on the replica keyed by that host_id — never the importing user's
  *   modal host (null / a different host for a fresh user), which is why an

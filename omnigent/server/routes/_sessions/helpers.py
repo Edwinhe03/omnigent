@@ -6273,7 +6273,7 @@ async def _provision_managed_sandbox(
     :param agent_name: Server-resolved built-in agent name the session
         runs, stamped as the runner Pod's ``omnigent.ai/agent`` classifier
         (Kubernetes only), or ``None`` to leave it unstamped.
-    :param host_id: Host id a create asked for (``managed_host_id``), or
+    :param host_id: Host id a managed create asked for, or
         ``None`` to mint one. Ignored on a relaunch, which keeps the host's
         identity.
     :returns: The launch result, or ``None`` when the launch failed

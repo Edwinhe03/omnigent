@@ -218,14 +218,14 @@ _INSTANCE_SCOPED_LABEL_KEYS = frozenset(
 _SANDBOX_REPO_LABEL_KEY = "omnigent.sandbox.repo"
 # The host id a managed create asked for: a fork launches its own sandbox, so the
 # source's id would route the fork to the wrong host. Mirrors the server's
-# ``MANAGED_HOST_ID_LABEL_KEY`` (cross-checked by a store test).
-_SANDBOX_HOST_ID_LABEL_KEY = "omnigent.sandbox.host_id"
+# ``REQUESTED_HOST_ID_LABEL_KEY`` (cross-checked by a store test).
+_SANDBOX_REQUESTED_HOST_ID_LABEL_KEY = "omnigent.sandbox.requested_host_id"
 _FORK_ONLY_DROPPED_LABEL_KEYS = IMPORT_PROVENANCE_LABEL_KEYS | {
     ARCHIVED_AT_LABEL_KEY,
     SIDE_CHAT_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
     _SANDBOX_REPO_LABEL_KEY,
-    _SANDBOX_HOST_ID_LABEL_KEY,
+    _SANDBOX_REQUESTED_HOST_ID_LABEL_KEY,
 }
 
 

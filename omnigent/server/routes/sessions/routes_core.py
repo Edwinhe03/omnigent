@@ -411,7 +411,7 @@ def register_core_routes(
         user_id: str | None,
         sandbox_provider: str | None,
         workspaces: list[str],
-        managed_host_id: str | None = None,
+        requested_host_id: str | None = None,
     ) -> None:
         """
         Provision a managed sandbox host for a just-created session.
@@ -445,7 +445,7 @@ def register_core_routes(
             parallel; empty for an empty sandbox. One repo becomes the
             session's working directory; several are cloned as siblings
             and the working directory is the parent that holds them.
-        :param managed_host_id: Host id the caller chose for the sandbox
+        :param requested_host_id: Host id the caller chose for the sandbox
             host (already checked against existing hosts),
             or ``None`` to let the launch mint one.
         :raises OmnigentError: If managed hosts aren't configured or the
@@ -462,7 +462,7 @@ def register_core_routes(
             )
         from omnigent.server.auth import RESERVED_USER_LOCAL
         from omnigent.server.managed_hosts import (
-            MANAGED_HOST_ID_LABEL_KEY,
+            REQUESTED_HOST_ID_LABEL_KEY,
             managed_repo_labels,
             parse_repo_workspace,
         )
@@ -493,8 +493,8 @@ def register_core_routes(
         # URL is a synchronous 4xx, not a background failure.
         repos = [parse_repo_workspace(w) for w in workspaces]
         managed_labels: dict[str, str] = {}
-        if managed_host_id is not None:
-            managed_labels[MANAGED_HOST_ID_LABEL_KEY] = managed_host_id
+        if requested_host_id is not None:
+            managed_labels[REQUESTED_HOST_ID_LABEL_KEY] = requested_host_id
         if workspaces:
             # The session row's workspace is overwritten with the CLONED path at
             # bind time; record the raw request value(s) so a sandbox relaunch
@@ -530,13 +530,13 @@ def register_core_routes(
                 provider=sandbox_provider,
                 agent_store=agent_store,
                 agent_id=agent_id,
-                host_id=managed_host_id,
+                host_id=requested_host_id,
             )
         )
         _managed_launch_tasks.add(launch_task)
         launch_task.add_done_callback(_managed_launch_tasks.discard)
 
-    async def _check_managed_host_id(request: Request, managed_host_id: str) -> None:
+    async def _check_requested_host_id(request: Request, requested_host_id: str) -> None:
         """
         Reject a caller-chosen managed host id that another host already has.
 
@@ -544,16 +544,16 @@ def register_core_routes(
         launch, so a retry could not find the session it would replay.
 
         :param request: The originating request (for ``app.state`` lookups).
-        :param managed_host_id: The create's ``managed_host_id``.
+        :param requested_host_id: The create's ``requested_host_id``.
         :raises OmnigentError: ``ALREADY_EXISTS`` if a host already has the id.
         """
         host_store = getattr(request.app.state, "host_store", None)
         if (
             host_store is not None
-            and await asyncio.to_thread(host_store.get_host, managed_host_id) is not None
+            and await asyncio.to_thread(host_store.get_host, requested_host_id) is not None
         ):
             raise OmnigentError(
-                f"host {managed_host_id} already exists",
+                f"host {requested_host_id} already exists",
                 code=ErrorCode.ALREADY_EXISTS,
             )
 
@@ -812,8 +812,8 @@ def register_core_routes(
 
         # Checked before the session exists so a rejected create leaves nothing
         # behind.
-        if body.managed_host_id is not None:
-            await _check_managed_host_id(request, body.managed_host_id)
+        if body.requested_host_id is not None:
+            await _check_requested_host_id(request, body.requested_host_id)
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
             conversation_store,
@@ -939,14 +939,14 @@ def register_core_routes(
                 user_id=user_id,
                 sandbox_provider=body.sandbox_provider,
                 workspaces=body.managed_repo_workspaces(),
-                managed_host_id=body.managed_host_id,
+                requested_host_id=body.requested_host_id,
             )
-            if body.managed_host_id is not None:
-                from omnigent.server.managed_hosts import MANAGED_HOST_ID_LABEL_KEY
+            if body.requested_host_id is not None:
+                from omnigent.server.managed_hosts import REQUESTED_HOST_ID_LABEL_KEY
 
                 # The row's host_id stays null until the host binds; the caller
                 # routes by this label until then.
-                resp.labels[MANAGED_HOST_ID_LABEL_KEY] = body.managed_host_id
+                resp.labels[REQUESTED_HOST_ID_LABEL_KEY] = body.requested_host_id
 
         # Host launch: if a host is targeted (caller-supplied or
         # managed) and no runner is bound yet, authorize (caller must

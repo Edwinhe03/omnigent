@@ -182,7 +182,7 @@ def ingress_app(replica_a: str, replica_b: str, *, strip_host_id: bool = False) 
     """
     Forward keyless traffic to A and host-keyed traffic to B, including SSE.
 
-    With *strip_host_id*, a create loses its ``managed_host_id`` and key, as
+    With *strip_host_id*, a managed create loses its ``host_id`` and key, as
     one from a client that doesn't choose the id (the SDK, Slack).
     """
     exchanges: list[dict[str, Any]] = []
@@ -208,7 +208,7 @@ def ingress_app(replica_a: str, replica_b: str, *, strip_host_id: bool = False) 
         headers = {k: v for k, v in request.headers.items() if k not in _HOP_HEADERS}
         if strip_host_id and request.method == "POST" and request.url.path == "/v1/sessions":
             create = json.loads(body)
-            create.pop("managed_host_id", None)
+            create.pop("host_id", None)
             body = json.dumps(create).encode()
             key = None
             headers = {

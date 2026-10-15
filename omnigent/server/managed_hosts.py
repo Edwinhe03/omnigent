@@ -341,9 +341,9 @@ MANAGED_SANDBOX_LABEL_NAMESPACE = "omnigent.sandbox."
 # while an in-place agent switch keeps them — the sandbox is unchanged.
 MANAGED_REPO_LABEL_KEY = "omnigent.sandbox.repo"
 
-# Server-owned routing id from a create's ``managed_host_id``: available before
+# Server-owned routing id from a managed create's ``host_id``: available before
 # the host binds, and omitted from forks.
-MANAGED_HOST_ID_LABEL_KEY = "omnigent.sandbox.host_id"
+REQUESTED_HOST_ID_LABEL_KEY = "omnigent.sandbox.requested_host_id"
 
 
 def managed_repo_labels(workspaces: Sequence[str]) -> dict[str, str]:
@@ -3508,7 +3508,7 @@ async def launch_managed_host(
         ``asyncio.to_thread``), so it must be thread-safe. ``None``
         disables progress reporting.
     :param host_id: Id to register the host under — a create's
-        ``managed_host_id`` — or ``None`` to mint one.
+        ``host_id`` — or ``None`` to mint one.
     :returns: The registered host id + in-sandbox workspace path
         (the cloned repository directory when *repo* is set).
     :raises HTTPException: 400 when *provider* is not configured or the

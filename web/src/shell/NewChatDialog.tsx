@@ -5645,9 +5645,6 @@ export function NewChatLandingScreen() {
         const matchOwnCreate = (item: SessionListWireItem) =>
           item.parent_session_id == null &&
           item.labels?.[CLIENT_CREATE_TOKEN_LABEL] === createToken;
-        // Same shape as the server's minted ids; keys the create and the
-        // session's requests until its host binds.
-        const managedHostId = sandboxSelected ? randomUUID().replace(/-/g, "") : null;
         const createRequest = authenticatedFetch("/v1/sessions", {
           method: "POST",
           headers: {
@@ -5676,7 +5673,9 @@ export function NewChatLandingScreen() {
                   ...(createProjectId !== null ? { workspace: null, git: null } : {}),
                   // Omitted when null so a default create is unchanged.
                   ...(sandboxProvider !== null ? { sandbox_provider: sandboxProvider } : {}),
-                  ...(managedHostId !== null ? { managed_host_id: managedHostId } : {}),
+                  // The new sandbox host's id, in the server's minted shape;
+                  // keys the create and the session's requests until it binds.
+                  host_id: randomUUID().replace(/-/g, ""),
                   ...(sandboxPreviewEnabled && sandboxModels.data?.configuration_revision
                     ? {
                         inference_configuration_revision: sandboxModels.data.configuration_revision,

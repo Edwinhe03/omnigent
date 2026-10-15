@@ -257,11 +257,11 @@ describe("managed first-message routing", () => {
 describe("managed create routing by a chosen host id", () => {
   it.each([
     [
-      { host_type: "managed", managed_host_id: "0123456789abcdef0123456789abcdef" },
+      { host_type: "managed", host_id: "0123456789abcdef0123456789abcdef" },
       "0123456789abcdef0123456789abcdef",
     ],
     [{ host_type: "managed" }, null],
-  ])("keys POST /v1/sessions by the body's managed_host_id (%o)", async (body, key) => {
+  ])("keys a managed POST /v1/sessions by the body's host_id (%o)", async (body, key) => {
     const { authenticatedFetch } = await setup();
     fetchMock.mockResolvedValueOnce(Response.json({ id: "conv_new" }, { status: 201 }));
 
@@ -272,7 +272,7 @@ describe("managed create routing by a chosen host id", () => {
 
   it("routes a session by its chosen host id until the host binds", async () => {
     const { authenticatedFetch, sessionRoutingHostId, setSessionHost } = await setup();
-    const labels = { "omnigent.sandbox.host_id": "0123456789abcdef0123456789abcdef" };
+    const labels = { "omnigent.sandbox.requested_host_id": "0123456789abcdef0123456789abcdef" };
     setSessionHost(SESSION_ID, sessionRoutingHostId(null, labels));
     fetchMock.mockResolvedValue(Response.json({ queued: true }));
 

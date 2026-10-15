@@ -4585,7 +4585,7 @@ async def test_launch_defaults_to_first_provider(db_uri: str) -> None:
 
 async def test_launch_registers_the_host_under_a_requested_id(db_uri: str) -> None:
     """
-    A create's ``managed_host_id`` becomes the host id and picker name the
+    A managed create's ``host_id`` becomes the host id and picker name the
     sandbox host starts under, through the unchanged start path.
     """
     host_store = HostStore(db_uri)

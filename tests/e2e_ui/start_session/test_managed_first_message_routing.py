@@ -416,11 +416,12 @@ async def _drive_sharded(rig: ManagedReplicas, model_url: str) -> None:
             create = created(rows)
             assert create is not None
             session_prefix = f"/v1/sessions/{json.loads(create['body'])['id']}"
-            host_id = json.loads(create["request"])["managed_host_id"]
+            host_id = json.loads(create["request"])["host_id"]
             assert re.fullmatch(r"[0-9a-f]{32}", host_id)
             assert create["key"] == host_id and create["replica"] == "b"
             assert create["status"] == 201
-            assert json.loads(create["body"])["labels"]["omnigent.sandbox.host_id"] == host_id
+            labels = json.loads(create["body"])["labels"]
+            assert labels["omnigent.sandbox.requested_host_id"] == host_id
             # The message waits on the launch on the replica that will hold the
             # host's tunnel, instead of failing over from the default replica.
             assert posts(rows)[0]["key"] == host_id and posts(rows)[0]["replica"] == "b"

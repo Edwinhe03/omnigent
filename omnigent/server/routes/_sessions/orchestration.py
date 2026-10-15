@@ -4096,7 +4096,7 @@ async def _run_managed_launch(
     :param agent_id: Agent the session is bound to, resolved through the
         built-in gate into the runner Pod's ``omnigent.ai/agent``
         classifier, or ``None`` to leave it unstamped.
-    :param host_id: Host id a create asked for (``managed_host_id``), or
+    :param host_id: Host id a managed create asked for, or
         ``None`` to mint one. Ignored on a relaunch.
     """
     from omnigent.server.managed_hosts import (
