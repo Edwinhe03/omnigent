@@ -126,10 +126,17 @@ export interface ServerInfo {
    * ``{ agent_sandbox: { multi_repo: true } }``. The new-session repo picker
    * branches on these (multi-repo list vs single). A provider absent from the
    * map, or the map absent entirely, defaults every flag off.
+   * ``shard_managed_sandbox`` means a create may choose the sandbox host's id
+   * (``managed_host_id``).
    */
   sandbox_provider_capabilities?: Record<
     string,
-    { multi_repo?: boolean; inference_models?: boolean; default_models?: boolean }
+    {
+      multi_repo?: boolean;
+      inference_models?: boolean;
+      default_models?: boolean;
+      shard_managed_sandbox?: boolean;
+    }
   >;
   /**
    * Connection providers this deploy has wired (config + store present),

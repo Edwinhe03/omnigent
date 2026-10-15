@@ -101,6 +101,7 @@ import { backgroundSessionTitlesRequestHeaders } from "@/lib/backgroundSessionTi
 import { fetchGithubBranches, fetchGithubRepos, type GithubRepo } from "@/lib/githubIntegration";
 import { composerContextToLabels } from "@/lib/composerContextAdapters";
 import { randomUUID } from "@/lib/randomUUID";
+import { sessionRoutingHostId, setSessionHost } from "@/lib/sessionHost";
 import { readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
 import { ComposerAttachments } from "@/components/ComposerAttachments";
 import { recordOptimisticTitle } from "@/lib/optimisticTitles";
@@ -2469,6 +2470,12 @@ export function NewChatLandingScreen() {
     effectiveSandboxProvider !== null &&
     info.sandbox_provider_capabilities?.[effectiveSandboxProvider]?.multi_repo === true;
   const maxSandboxRepos = sandboxMultiRepo ? MAX_SANDBOX_REPOS : 1;
+  // Whether the launch provider registers its host under an id the create
+  // chooses, so the create can be routed by that id from the start.
+  const sandboxShardable =
+    info !== "loading" &&
+    effectiveSandboxProvider !== null &&
+    info.sandbox_provider_capabilities?.[effectiveSandboxProvider]?.shard_managed_sandbox === true;
   // Append a repo (deduped by URL — adding one already picked is a no-op),
   // remove one, or repoint its branch. Order is preserved so the list reads
   // the way the user built it.
@@ -5644,7 +5651,11 @@ export function NewChatLandingScreen() {
         const matchOwnCreate = (item: SessionListWireItem) =>
           item.parent_session_id == null &&
           item.labels?.[CLIENT_CREATE_TOKEN_LABEL] === createToken;
-        const createRequest = authenticatedFetch("/v1/sessions", {
+        // Same shape as the server's minted ids; keys the create and the
+        // session's requests until its host binds.
+        const managedHostId =
+          sandboxSelected && sandboxShardable ? randomUUID().replace(/-/g, "") : null;
+        const createInit = {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -5672,6 +5683,7 @@ export function NewChatLandingScreen() {
                   ...(createProjectId !== null ? { workspace: null, git: null } : {}),
                   // Omitted when null so a default create is unchanged.
                   ...(sandboxProvider !== null ? { sandbox_provider: sandboxProvider } : {}),
+                  ...(managedHostId !== null ? { managed_host_id: managedHostId } : {}),
                   ...(sandboxPreviewEnabled && sandboxModels.data?.configuration_revision
                     ? {
                         inference_configuration_revision: sandboxModels.data.configuration_revision,
@@ -5743,7 +5755,18 @@ export function NewChatLandingScreen() {
             smart_routing_message:
               smartRoutingHarnessSelected || pinnedNativeRoutes ? initialPrompt : undefined,
           }),
-        });
+        };
+        const createRequest = (async () => {
+          const response = await authenticatedFetch("/v1/sessions", createInit);
+          if (managedHostId === null || response.status !== 400) return response;
+          // Capabilities read at page load can be stale: the provider may no
+          // longer take the id. Without it the create routes as before.
+          const { managed_host_id: _unused, ...withoutHostId } = JSON.parse(createInit.body);
+          return authenticatedFetch("/v1/sessions", {
+            ...createInit,
+            body: JSON.stringify(withoutHostId),
+          });
+        })();
         // Managed launch validation continues after the row is announced, so
         // only its HTTP response can resolve the temp chat.
         const abortPush = new AbortController();
@@ -5767,7 +5790,11 @@ export function NewChatLandingScreen() {
           }
           const created = (await response.json()) as {
             id: string;
+            labels?: Record<string, string>;
           };
+          // Route the new session's first requests by its chosen host id
+          // before any snapshot of it loads.
+          setSessionHost(created.id, sessionRoutingHostId(null, created.labels));
           return { id: created.id };
         })();
         // Once the create answers, its id is authoritative — stop listening.

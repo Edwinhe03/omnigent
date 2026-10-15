@@ -46,8 +46,16 @@ class ManagedReplicas:
 
 
 @pytest.fixture
-def managed_replicas(tmp_path: Path, mock_llm_server_url: str) -> Iterator[ManagedReplicas]:
-    """Start isolated product replicas, the real host launcher and a keyed ingress."""
+def managed_replicas(
+    request: pytest.FixtureRequest, tmp_path: Path, mock_llm_server_url: str
+) -> Iterator[ManagedReplicas]:
+    """
+    Start isolated product replicas, the real host launcher and a keyed ingress.
+
+    Indirect param: whether the launcher reports ``shard_managed_sandbox``
+    (default off, so the create is unkeyed).
+    """
+    shard = getattr(request, "param", False)
     ports = {role: _find_free_port() for role in ("a", "b", "ingress", "ui")}
     urls = {role: f"http://127.0.0.1:{port}" for role, port in ports.items()}
     config = tmp_path / "config"
@@ -111,6 +119,7 @@ def managed_replicas(tmp_path: Path, mock_llm_server_url: str) -> Iterator[Manag
                     urls["a"],
                     "--replica-b",
                     urls["b"],
+                    *(["--shard"] if shard else []),
                 ]
                 cwd, process_env = _REPO_ROOT, env
             with log_path.open("w") as log:
@@ -328,5 +337,117 @@ async def _drive(rig: ManagedReplicas, model_url: str) -> None:
             await page.screenshot(path=str(rig.logs / "final.png"))
             await page.context.tracing.stop(path=str(rig.logs / "trace.zip"))
             await client.post(f"{rig.a}/__test/provision/release")
+            await client.post(f"{model_url}/gate/release")
+            await browser.close()
+
+
+_SHARDED_PROMPT = "Confirm this managed message went straight to the host replica."
+_SHARDED_REPLY = "The managed message reached the host replica first try."
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("managed_replicas", [True], indirect=True)
+def test_managed_create_with_chosen_host_id_routes_to_host_replica(
+    managed_replicas: ManagedReplicas,
+    mock_llm_server_url: str,
+) -> None:
+    """A provider with ``shard_managed_sandbox`` keys everything by the chosen id."""
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": _SHARDED_REPLY, "stream": True, "block": True}],
+        key="managed-sharded-routing",
+        match=_SHARDED_PROMPT,
+    )
+    _run_in_fresh_loop(_drive_sharded(managed_replicas, mock_llm_server_url))
+
+
+async def _drive_sharded(rig: ManagedReplicas, model_url: str) -> None:
+    async with (
+        async_playwright() as playwright,
+        httpx.AsyncClient(timeout=10, trust_env=False) as client,
+    ):
+        browser = await playwright.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1440, "height": 960})
+        network_url = f"{rig.ingress}/__test/network"
+        try:
+            await page.goto(rig.ui)
+            await expect(page.get_by_test_id("new-chat-landing-input")).to_be_visible()
+            agents = (await client.get(f"{rig.a}/v1/agents")).json()["data"]
+            agent_id = next(agent["id"] for agent in agents if agent["name"] == "routing_probe")
+            await page.get_by_test_id("new-chat-landing-agent-select").click()
+            await page.get_by_test_id(f"new-chat-landing-agent-{agent_id}").click()
+            await page.get_by_test_id("new-chat-landing-input").fill(_SHARDED_PROMPT)
+            await expect(page.get_by_test_id("new-chat-landing-submit")).to_be_enabled()
+            await page.get_by_test_id("new-chat-landing-submit").click()
+
+            # The page URL can still name the optimistic chat; the create's
+            # response carries the server's session id.
+            def created(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+                return next(
+                    (
+                        row
+                        for row in rows
+                        if row["path"] == "/v1/sessions"
+                        and row["method"] == "POST"
+                        and row["status"] is not None
+                        and row["closed"]
+                    ),
+                    None,
+                )
+
+            def posts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                create = created(rows)
+                if create is None:
+                    return []
+                events_path = f"/v1/sessions/{json.loads(create['body'])['id']}/events"
+                return [
+                    row
+                    for row in rows
+                    if row["path"] == events_path
+                    and json.loads(row["request"])["type"] == "message"
+                ]
+
+            rows = await _poll(client, network_url, lambda rows: bool(posts(rows)))
+            create = created(rows)
+            assert create is not None
+            session_prefix = f"/v1/sessions/{json.loads(create['body'])['id']}"
+            host_id = json.loads(create["request"])["managed_host_id"]
+            assert re.fullmatch(r"[0-9a-f]{32}", host_id)
+            assert create["key"] == host_id and create["replica"] == "b"
+            assert create["status"] == 201
+            assert json.loads(create["body"])["labels"]["omnigent.sandbox.host_id"] == host_id
+            # The message waits on the launch on the replica that will hold the
+            # host's tunnel, instead of failing over from the default replica.
+            assert posts(rows)[0]["key"] == host_id and posts(rows)[0]["replica"] == "b"
+
+            # The keyed create launched on B, so B holds the provisioning gate.
+            (await client.post(f"{rig.b}/__test/provision/release")).raise_for_status()
+            rows = await _poll(
+                client,
+                network_url,
+                lambda rows: posts(rows)[0]["status"] == 202,
+                timeout=90,
+            )
+            assert len(posts(rows)) == 1, "the first message was re-sent"
+            snapshot = (await client.get(rig.b + session_prefix)).json()
+            assert snapshot["host_id"] == host_id and snapshot["runner_id"]
+            await _poll(client, f"{model_url}/gate/pending", lambda body: body["pending"])
+            (await client.post(f"{model_url}/gate/release")).raise_for_status()
+            assistant = page.locator('[data-testid="message-bubble"][data-role="assistant"]')
+            await expect(assistant.filter(has_text=_SHARDED_REPLY)).to_be_visible(timeout=20_000)
+
+            rows = (await client.get(network_url)).json()
+            session_rows = [row for row in rows if row["path"].startswith(session_prefix)]
+            assert session_rows
+            assert all(row["key"] == host_id for row in session_rows), session_rows
+            assert not [row for row in rows if '"wrong_replica"' in row["body"]], (
+                "a request reached a replica without the host's tunnel"
+            )
+        finally:
+            rows = (await client.get(network_url)).json()
+            (rig.logs / "network.json").write_text(json.dumps(rows, indent=2))
+            await page.screenshot(path=str(rig.logs / "final.png"))
+            for url in (rig.a, rig.b):
+                await client.post(f"{url}/__test/provision/release")
             await client.post(f"{model_url}/gate/release")
             await browser.close()
