@@ -167,6 +167,7 @@ def test_prune_retains_unmarked_entry_adopted_during_eligibility_check(tmp_path:
 
     assert native_bridge_common.prune_orphaned_dirs(root, should_prune=_adopt) == 0
     assert bridge_dir.exists()
+    assert (bridge_dir / native_bridge_common.OWNER_PID_FILENAME).exists()
 
 
 def test_reap_invokes_prune_for_every_native_agent(monkeypatch: pytest.MonkeyPatch) -> None:
