@@ -5776,8 +5776,10 @@ export function NewChatLandingScreen() {
             labels?: Record<string, string>;
           };
           // Route the new session's first requests by its chosen host id
-          // before any snapshot of it loads.
-          setSessionHost(created.id, sessionRoutingHostId(null, created.labels));
+          // before any snapshot of it loads. Only seeds: a null here would
+          // erase a host the session's snapshot already recorded.
+          const requestedHostId = sessionRoutingHostId(null, created.labels);
+          if (requestedHostId !== null) setSessionHost(created.id, requestedHostId);
           return { id: created.id };
         })();
         // Once the create answers, its id is authoritative — stop listening.

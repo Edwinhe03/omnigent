@@ -68,8 +68,12 @@ def export_configured_slice_key(path: Path) -> None:
     """
     if os.environ.get(HOST_SLICE_KEY_ENABLED_ENV_VAR) is not None or not path.exists():
         return
-    with open(path) as f:
-        cfg = yaml.safe_load(f) or {}
+    try:
+        with open(path) as f:
+            cfg = yaml.safe_load(f) or {}
+    except yaml.YAMLError:
+        # Identity comes from the env here; a bad file stays the host's to report.
+        return
     host_section = cfg.get("host") if isinstance(cfg, dict) else None
     enabled = host_section.get("slice_key_enabled") if isinstance(host_section, dict) else None
     if isinstance(enabled, bool):

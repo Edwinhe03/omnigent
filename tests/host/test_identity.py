@@ -458,10 +458,10 @@ def test_export_configured_slice_key_defers_to_the_env_var(
     """The config's ``host.slice_key_enabled`` becomes the env var, unless one is set."""
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(config))
+    # Set first so teardown restores the variable the export may write.
+    monkeypatch.setenv(HOST_SLICE_KEY_ENABLED_ENV_VAR, env or "")
     if env is None:
-        monkeypatch.delenv(HOST_SLICE_KEY_ENABLED_ENV_VAR, raising=False)
-    else:
-        monkeypatch.setenv(HOST_SLICE_KEY_ENABLED_ENV_VAR, env)
+        monkeypatch.delenv(HOST_SLICE_KEY_ENABLED_ENV_VAR)
 
     export_configured_slice_key(path)
 

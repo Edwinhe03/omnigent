@@ -2615,6 +2615,45 @@ async def test_resume_rematerializes_host_config_before_host_restart(db_uri: str
     assert write_index < host_index
 
 
+def test_host_slice_key_enabled_only_for_the_requested_host() -> None:
+    """Relaunch and wake key only the host the create named, so a later host can't inherit it."""
+    from omnigent.server.managed_hosts import host_slice_key_enabled
+
+    requested = {"omnigent.sandbox.requested_host_id": "0123456789abcdef0123456789abcdef"}
+
+    assert host_slice_key_enabled(requested, "0123456789abcdef0123456789abcdef") is True
+    assert host_slice_key_enabled(requested, "fedcba9876543210fedcba9876543210") is False
+    assert host_slice_key_enabled({}, "0123456789abcdef0123456789abcdef") is False
+
+
+async def test_resume_keeps_the_hosts_slice_key(db_uri: str) -> None:
+    """A wake re-materializes the keying the caller derived from the session."""
+    host_store = HostStore(db_uri)
+
+    def _register(invocation: HostStartInvocation) -> None:
+        host_store.upsert_on_connect(
+            host_id=invocation.host_id,
+            name=invocation.host_name,
+            user_id=_OWNER,
+        )
+
+    fake = FakeSandboxLauncher(on_host_start=_register, can_resume=True)
+    config = _injected_config(fake)
+    result = await launch_managed_host(
+        config=config,
+        owner=_OWNER,
+        host_store=host_store,
+        host_id="0123456789abcdef0123456789abcdef",
+    )
+    host_store.set_offline(result.host_id)
+    commands_before = len(fake.commands)
+
+    await resume_managed_host(result.host_id, host_store, config, slice_key_enabled=True)
+
+    slice_key = render_host_config_write_command({"host": {"slice_key_enabled": True}})
+    assert slice_key in fake.commands[commands_before:]
+
+
 async def test_launch_without_host_config_writes_no_config(db_uri: str) -> None:
     """No host_config → the launch issues no config-write command at all."""
     host_store = HostStore(db_uri)
@@ -4620,6 +4659,7 @@ def test_host_slice_key_is_injected_only_to_override_the_hosts_default(
 
 
 def test_host_slice_key_keeps_the_deployments_host_section() -> None:
+    """The setting joins an operator's ``host`` section without mutating it."""
     from omnigent.server.managed_hosts import _with_host_slice_key
 
     config = {"host": {"name": "kept"}, "runner": {"idle_timeout_s": 60}}
