@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 import tomllib
 
 from omnigent.harnesses.codex_egress import CertificateFailure
+from omnigent.harnesses.codex_native.state import LAUNCH_STATE_FILENAME
 from omnigent.native import native_bridge_common
 
 if TYPE_CHECKING:
@@ -275,7 +276,8 @@ def _codex_orphan_retention_expired(bridge_dir: Path) -> bool:
 
     An unmarked bridge has no marker timestamp, so its latest top-level write
     stands in for it. Only dirs named like a bridge digest qualify, which keeps
-    siblings such as the process-owner lock dir.
+    siblings such as the process-owner lock dir, and a dir holding nothing but
+    standalone launch state is kept.
     """
     activity_cutoff = time.time() - _ORPHAN_RETENTION_SECONDS
     owner_marker = bridge_dir / native_bridge_common.OWNER_PID_FILENAME
@@ -286,11 +288,16 @@ def _codex_orphan_retention_expired(bridge_dir: Path) -> bool:
         if not _BRIDGE_DIGEST_RE.fullmatch(bridge_dir.name):
             return False
         try:
+            children = list(bridge_dir.iterdir())
             if bridge_dir.stat().st_mtime > activity_cutoff or any(
-                child.lstat().st_mtime > activity_cutoff for child in bridge_dir.iterdir()
+                child.lstat().st_mtime > activity_cutoff for child in children
             ):
                 return False
         except OSError:
+            return False
+        # Launch state shares this root and digest naming but is written once per
+        # session and never marked, so a dir holding only that is not a bridge.
+        if {child.name for child in children} <= {LAUNCH_STATE_FILENAME}:
             return False
     except OSError:
         return False

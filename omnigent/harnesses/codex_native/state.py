@@ -24,7 +24,7 @@ from omnigent.process_logging import data_dir
 
 _STATE_ROOT_ENV_VAR = "OMNIGENT_CODEX_NATIVE_STATE_DIR"
 _logger = logging.getLogger(__name__)
-_LAUNCH_FILE = "launch.json"
+LAUNCH_STATE_FILENAME = "launch.json"
 _ID_HASH_CHARS = 32
 
 
@@ -114,7 +114,7 @@ def write_launch_state(conversation_id: str, working_directory: str) -> None:
         )
         return
     state_dir.mkdir(parents=True, exist_ok=True)
-    target = state_dir / _LAUNCH_FILE
+    target = state_dir / LAUNCH_STATE_FILENAME
     payload = {
         "conversation_id": conversation_id,
         "working_directory": working_directory,
@@ -135,7 +135,7 @@ def read_launch_state(conversation_id: str) -> CodexNativeLaunchState | None:
         ``"conv_abc123"``.
     :returns: Parsed state, or ``None`` if missing / malformed.
     """
-    target = _state_dir_for_conversation_id(conversation_id) / _LAUNCH_FILE
+    target = _state_dir_for_conversation_id(conversation_id) / LAUNCH_STATE_FILENAME
     try:
         raw = target.read_text(encoding="utf-8")
     except FileNotFoundError:
