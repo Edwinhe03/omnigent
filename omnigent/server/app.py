@@ -200,8 +200,8 @@ class ServerInfoResponse(BaseModel):
     dictation_available: bool
     # The archive PATCH accepts ``delete_worktree``; older servers reject it.
     archive_worktree_cleanup: bool = True
-    # A managed create accepts ``host_id`` naming its new sandbox host; older
-    # servers reject it.
+    # A managed create or fork accepts ``host_id`` naming its new sandbox host;
+    # older servers reject it.
     request_managed_sandbox_host_id: bool = True
     # User agents (`omnigent agent add`, GET /v1/agents?scope=user); absent on
     # older servers, which clients treat as unsupported.

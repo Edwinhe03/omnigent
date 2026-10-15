@@ -505,10 +505,12 @@ describe("authenticatedFetch", () => {
 
     it.each([
       [{ host_type: "managed", host_id: "host_fork" }, "host_fork"],
-      [{ host_type: "managed" }, "host_source"],
-    ])("keys a fork by the host it names, else the source's (%j)", async (body, key) => {
+      [{ host_type: "managed" }, null],
+      [{}, "host_source"],
+    ])("keys a managed fork only by the host it names (%j)", async (body, key) => {
       // A managed fork's launch runs on the replica it lands on, so it must
-      // land where its own new host will connect, not on the source's.
+      // land where its own new host will connect (unkeyed without an id),
+      // never on the source's; any other fork keeps the source's key.
       vi.doMock("./sessionHost", () => ({
         getSessionHost: vi.fn(() => "host_source"),
         setSessionHost: vi.fn(),

@@ -341,8 +341,8 @@ MANAGED_SANDBOX_LABEL_NAMESPACE = "omnigent.sandbox."
 # while an in-place agent switch keeps them — the sandbox is unchanged.
 MANAGED_REPO_LABEL_KEY = "omnigent.sandbox.repo"
 
-# Server-owned routing id from a managed create's ``host_id``: available before
-# the host binds, and omitted from forks.
+# Server-owned routing id from a managed create's or fork's ``host_id``:
+# available before the host binds, and never copied from a fork's source.
 REQUESTED_HOST_ID_LABEL_KEY = "omnigent.sandbox.requested_host_id"
 
 
@@ -363,7 +363,7 @@ def host_slice_key_enabled(labels: Mapping[str, str], host_id: str) -> bool:
     """
     Whether a session's managed host routes by its own id.
 
-    Only when the create chose this host id, so the caller routes by it from
+    Only when the create or fork chose this host id, so the caller routes by it from
     the start; otherwise the host stays on the caller's default replica.
 
     :param labels: The session's labels.
