@@ -1450,16 +1450,12 @@ class _SessionCreateRequestBase(BaseModel):
         the caller asks the server to give the sandbox host, 32
         lowercase hex characters (the shape of ``uuid.uuid4().hex``).
         Choosing it client-side lets the caller route the create, and
-        every request after it, by that id from the start. Send it only
-        for a provider whose ``GET /v1/info`` capabilities report
-        ``shard_managed_sandbox``. The server registers the host under it
-        and records it in the ``omnigent.sandbox.host_id`` label. ``None``
-        lets the server mint one. JSON creates only, and not with
-        ``parent_session_id`` (a child runs on its parent's host). A
-        create naming an existing host fails with ``409``; one whose
-        provider does not report ``shard_managed_sandbox`` fails with
-        ``400 managed_host_id_unsupported``, which a caller with stale
-        capabilities resends without the id.
+        every request after it, by that id from the start. The server
+        registers the host under it and records it in the
+        ``omnigent.sandbox.host_id`` label. ``None`` lets the server mint
+        one. JSON creates only, and not with ``parent_session_id`` (a
+        child runs on its parent's host). A create naming an existing
+        host fails with ``409``.
         The id is not checked against deleted hosts still awaiting
         sandbox cleanup; reusing one fails the background launch.
     :param sandbox_provider: Which configured sandbox provider to

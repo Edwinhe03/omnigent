@@ -52,10 +52,10 @@ def managed_replicas(
     """
     Start isolated product replicas, the real host launcher and a keyed ingress.
 
-    Indirect param: whether the launcher reports ``shard_managed_sandbox``
-    (default off, so the create is unkeyed).
+    Indirect param: whether the ingress strips the create's chosen host id,
+    as for a client that doesn't choose one (default off).
     """
-    shard = getattr(request, "param", False)
+    strip_host_id = getattr(request, "param", False)
     ports = {role: _find_free_port() for role in ("a", "b", "ingress", "ui")}
     urls = {role: f"http://127.0.0.1:{port}" for role, port in ports.items()}
     config = tmp_path / "config"
@@ -119,7 +119,7 @@ def managed_replicas(
                     urls["a"],
                     "--replica-b",
                     urls["b"],
-                    *(["--shard"] if shard else []),
+                    *(["--strip-host-id"] if strip_host_id else []),
                 ]
                 cwd, process_env = _REPO_ROOT, env
             with log_path.open("w") as log:
@@ -154,11 +154,17 @@ def managed_replicas(
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.parametrize("managed_replicas", [True], indirect=True)
 def test_managed_first_message_rebinds_live_stream_across_replicas(
     managed_replicas: ManagedReplicas,
     mock_llm_server_url: str,
 ) -> None:
-    """Create and send through the UI; recover both POST and SSE without navigation."""
+    """
+    Create and send through the UI; recover both POST and SSE without navigation.
+
+    The create carries no host id, so the message and stream start on the
+    default replica.
+    """
     configure_mock_llm(
         mock_llm_server_url,
         [{"text": _REPLY, "stream": True, "block": True}],
@@ -346,12 +352,11 @@ _SHARDED_REPLY = "The managed message reached the host replica first try."
 
 
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize("managed_replicas", [True], indirect=True)
 def test_managed_create_with_chosen_host_id_routes_to_host_replica(
     managed_replicas: ManagedReplicas,
     mock_llm_server_url: str,
 ) -> None:
-    """A provider with ``shard_managed_sandbox`` keys everything by the chosen id."""
+    """A create with a chosen host id keys everything by it from the start."""
     configure_mock_llm(
         mock_llm_server_url,
         [{"text": _SHARDED_REPLY, "stream": True, "block": True}],

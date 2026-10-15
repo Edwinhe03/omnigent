@@ -446,7 +446,7 @@ def register_core_routes(
             session's working directory; several are cloned as siblings
             and the working directory is the parent that holds them.
         :param managed_host_id: Host id the caller chose for the sandbox
-            host (already checked against the provider and existing hosts),
+            host (already checked against existing hosts),
             or ``None`` to let the launch mint one.
         :raises OmnigentError: If managed hosts aren't configured or the
             provider isn't offered.
@@ -536,34 +536,17 @@ def register_core_routes(
         _managed_launch_tasks.add(launch_task)
         launch_task.add_done_callback(_managed_launch_tasks.discard)
 
-    async def _check_managed_host_id(
-        request: Request, managed_host_id: str, sandbox_provider: str | None
-    ) -> None:
+    async def _check_managed_host_id(request: Request, managed_host_id: str) -> None:
         """
-        Reject a caller-chosen managed host id the create cannot honor.
+        Reject a caller-chosen managed host id that another host already has.
 
         Not an idempotency key: the host row is written by the background
         launch, so a retry could not find the session it would replay.
 
         :param request: The originating request (for ``app.state`` lookups).
         :param managed_host_id: The create's ``managed_host_id``.
-        :param sandbox_provider: The create's provider, or ``None`` for the
-            server's default.
-        :raises OmnigentError: ``MANAGED_HOST_ID_UNSUPPORTED`` if the provider
-            does not report ``shard_managed_sandbox``; ``ALREADY_EXISTS`` if a
-            host already has the id.
+        :raises OmnigentError: ``ALREADY_EXISTS`` if a host already has the id.
         """
-        sandbox_config = getattr(request.app.state, "sandbox_config", None)
-        if sandbox_config is not None:
-            resolved = sandbox_provider or sandbox_config.default.provider
-            caps = sandbox_config.provider_ui_capabilities().get(resolved or "")
-            # An unknown provider fails later with its own error.
-            if caps is not None and not caps.get("shard_managed_sandbox", False):
-                raise OmnigentError(
-                    f"sandbox provider '{resolved}' does not support managed_host_id; "
-                    "retry without it",
-                    code=ErrorCode.MANAGED_HOST_ID_UNSUPPORTED,
-                )
         host_store = getattr(request.app.state, "host_store", None)
         if (
             host_store is not None
@@ -830,7 +813,7 @@ def register_core_routes(
         # Checked before the session exists so a rejected create leaves nothing
         # behind.
         if body.managed_host_id is not None:
-            await _check_managed_host_id(request, body.managed_host_id, body.sandbox_provider)
+            await _check_managed_host_id(request, body.managed_host_id)
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
             conversation_store,

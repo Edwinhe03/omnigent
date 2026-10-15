@@ -11,13 +11,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import signal
 import subprocess
 import sys
 import threading
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -27,7 +27,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import StreamingResponse
 
 from omnigent.onboarding.sandboxes.base import SandboxHostLauncher
-from omnigent.onboarding.sandboxes.types import RepoWorkspace, SandboxCapabilities
+from omnigent.onboarding.sandboxes.types import RepoWorkspace
 
 SLICE_KEY = "x-databricks-omnigent-slice-key"
 _HOP_HEADERS = {"host", "connection", "keep-alive", "transfer-encoding"}
@@ -50,16 +50,11 @@ class LocalManagedHost(SandboxHostLauncher):
 
     provider: ClassVar[str] = "modal"
 
-    def __init__(self, root: Path, *, shard: bool) -> None:
+    def __init__(self, root: Path) -> None:
         self.root = root
-        self.shard = shard
         self.gate = threading.Event()
         self.provisioning = threading.Event()
         self.process: subprocess.Popen[bytes] | None = None
-
-    @property
-    def capabilities(self) -> SandboxCapabilities:
-        return replace(super().capabilities, shard_managed_sandbox=self.shard)
 
     def prepare(self) -> None:
         pass
@@ -115,9 +110,7 @@ class LocalManagedHost(SandboxHostLauncher):
             self.process = None
 
 
-def replica_app(
-    root: Path, replica: str, runner_url: str, *, shard: bool
-) -> tuple[FastAPI, LocalManagedHost]:
+def replica_app(root: Path, replica: str, runner_url: str) -> tuple[FastAPI, LocalManagedHost]:
     """Build the product app with shared durable stores, never shared registries."""
     from omnigent.runtime import init
     from omnigent.runtime.agent_cache import AgentCache
@@ -142,7 +135,7 @@ def replica_app(
         artifact_store=artifacts,
         agent_cache=cache,
     )
-    launcher = LocalManagedHost(root, shard=shard)
+    launcher = LocalManagedHost(root)
     control = APIRouter()
 
     @control.post("/provision/release")
@@ -185,8 +178,13 @@ def replica_app(
     return app, launcher
 
 
-def ingress_app(replica_a: str, replica_b: str) -> FastAPI:
-    """Forward keyless traffic to A and host-keyed traffic to B, including SSE."""
+def ingress_app(replica_a: str, replica_b: str, *, strip_host_id: bool = False) -> FastAPI:
+    """
+    Forward keyless traffic to A and host-keyed traffic to B, including SSE.
+
+    With *strip_host_id*, a create loses its ``managed_host_id`` and key, as
+    one from a client that doesn't choose the id (the SDK, Slack).
+    """
     exchanges: list[dict[str, Any]] = []
 
     @contextlib.asynccontextmanager
@@ -206,8 +204,17 @@ def ingress_app(replica_a: str, replica_b: str) -> FastAPI:
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
     async def forward(request: Request, path: str) -> StreamingResponse:
         key = request.headers.get(SLICE_KEY)
-        target = replica_b if key else replica_a
         body = await request.body()
+        headers = {k: v for k, v in request.headers.items() if k not in _HOP_HEADERS}
+        if strip_host_id and request.method == "POST" and request.url.path == "/v1/sessions":
+            create = json.loads(body)
+            create.pop("managed_host_id", None)
+            body = json.dumps(create).encode()
+            key = None
+            headers = {
+                k: v for k, v in headers.items() if k.lower() not in {SLICE_KEY, "content-length"}
+            }
+        target = replica_b if key else replica_a
         record: dict[str, Any] = {
             "path": request.url.path,
             "method": request.method,
@@ -225,7 +232,7 @@ def ingress_app(replica_a: str, replica_b: str) -> FastAPI:
                 request.method,
                 f"{target}/{path}",
                 params=request.query_params,
-                headers={k: v for k, v in request.headers.items() if k not in _HOP_HEADERS},
+                headers=headers,
                 content=body,
             ),
             stream=True,
@@ -257,13 +264,13 @@ def main() -> None:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--replica-a", required=True)
     parser.add_argument("--replica-b", required=True)
-    parser.add_argument("--shard", action="store_true")
+    parser.add_argument("--strip-host-id", action="store_true")
     args = parser.parse_args()
     launcher = None
     if args.role == "ingress":
-        app = ingress_app(args.replica_a, args.replica_b)
+        app = ingress_app(args.replica_a, args.replica_b, strip_host_id=args.strip_host_id)
     else:
-        app, launcher = replica_app(args.root, args.role, args.replica_b, shard=args.shard)
+        app, launcher = replica_app(args.root, args.role, args.replica_b)
     try:
         uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="info")
     finally:

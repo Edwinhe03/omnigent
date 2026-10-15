@@ -809,10 +809,7 @@ class ManagedSandboxDeployment:
         for config in self.configs:
             if config.managed_launch_supported and config.provider is not None:
                 launcher = config.launcher_factory()
-                caps[config.provider] = {
-                    "multi_repo": launcher.capabilities.multi_repo,
-                    "shard_managed_sandbox": launcher.capabilities.shard_managed_sandbox,
-                }
+                caps[config.provider] = {"multi_repo": launcher.capabilities.multi_repo}
                 from omnigent.inference_config import parse_inference_config
                 from omnigent.server.inference_catalog import ambient_gateway_providers
 

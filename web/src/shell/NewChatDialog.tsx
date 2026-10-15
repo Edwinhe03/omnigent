@@ -739,9 +739,6 @@ export function sessionsSharingDirectory(
   );
 }
 
-// The server's 400 for a managed_host_id the provider can't honor.
-const MANAGED_HOST_ID_UNSUPPORTED_CODE = "managed_host_id_unsupported";
-
 /**
  * Best-effort human-readable message for a failed POST /v1/sessions.
  *
@@ -2473,12 +2470,6 @@ export function NewChatLandingScreen() {
     effectiveSandboxProvider !== null &&
     info.sandbox_provider_capabilities?.[effectiveSandboxProvider]?.multi_repo === true;
   const maxSandboxRepos = sandboxMultiRepo ? MAX_SANDBOX_REPOS : 1;
-  // Whether the launch provider registers its host under an id the create
-  // chooses, so the create can be routed by that id from the start.
-  const sandboxShardable =
-    info !== "loading" &&
-    effectiveSandboxProvider !== null &&
-    info.sandbox_provider_capabilities?.[effectiveSandboxProvider]?.shard_managed_sandbox === true;
   // Append a repo (deduped by URL — adding one already picked is a no-op),
   // remove one, or repoint its branch. Order is preserved so the list reads
   // the way the user built it.
@@ -5656,9 +5647,8 @@ export function NewChatLandingScreen() {
           item.labels?.[CLIENT_CREATE_TOKEN_LABEL] === createToken;
         // Same shape as the server's minted ids; keys the create and the
         // session's requests until its host binds.
-        const managedHostId =
-          sandboxSelected && sandboxShardable ? randomUUID().replace(/-/g, "") : null;
-        const createInit = {
+        const managedHostId = sandboxSelected ? randomUUID().replace(/-/g, "") : null;
+        const createRequest = authenticatedFetch("/v1/sessions", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -5758,26 +5748,7 @@ export function NewChatLandingScreen() {
             smart_routing_message:
               smartRoutingHarnessSelected || pinnedNativeRoutes ? initialPrompt : undefined,
           }),
-        };
-        const createRequest = (async () => {
-          const response = await authenticatedFetch("/v1/sessions", createInit);
-          if (managedHostId === null || response.status !== 400) return response;
-          // Capabilities read at page load can be stale: the provider may no
-          // longer take the id. Only that rejection is resent (without the id,
-          // the create routes as before); other 400s can follow a persisted
-          // session, and resending them would start a second one.
-          const code = await response
-            .clone()
-            .json()
-            .then((body: { error?: { code?: unknown } }) => body.error?.code)
-            .catch(() => null);
-          if (code !== MANAGED_HOST_ID_UNSUPPORTED_CODE) return response;
-          const { managed_host_id: _unused, ...withoutHostId } = JSON.parse(createInit.body);
-          return authenticatedFetch("/v1/sessions", {
-            ...createInit,
-            body: JSON.stringify(withoutHostId),
-          });
-        })();
+        });
         // Managed launch validation continues after the row is announced, so
         // only its HTTP response can resolve the temp chat.
         const abortPush = new AbortController();

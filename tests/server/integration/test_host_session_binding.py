@@ -7,10 +7,9 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -644,41 +643,6 @@ async def test_managed_session_create_with_host_id_registers_under_it(
     assert duplicate.json()["error"]["code"] == "already_exists"
     assert env.conv_store.list_conversations(limit=100) == sessions_before
     del tunnels
-
-
-async def test_managed_session_create_rejects_host_id_the_provider_cannot_honor(
-    managed_session_env: ManagedSessionEnv,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    A provider that does not declare ``shard_managed_sandbox`` keeps its own
-    host identity, so a create naming one is a 400 that leaves no session and
-    launches nothing; the caller retries without it.
-    """
-    env = managed_session_env
-    started: list[HostStartInvocation] = []
-
-    class _SelfIdentifyingFake(FakeSandboxLauncher):
-        @property
-        def capabilities(self) -> Any:
-            return replace(super().capabilities, shard_managed_sandbox=False)
-
-    install_fake_modal_launcher(monkeypatch, _SelfIdentifyingFake(on_host_start=started.append))
-
-    agent = await create_test_agent(env.client, name="managed-unsharded-agent")
-    sessions_before = env.conv_store.list_conversations(limit=100)
-    resp = await env.client.post(
-        "/v1/sessions",
-        json={
-            "agent_id": agent["id"],
-            "host_type": "managed",
-            "managed_host_id": "0123456789abcdef0123456789abcdef",
-        },
-    )
-    assert resp.status_code == 400, resp.text
-    assert resp.json()["error"]["code"] == "managed_host_id_unsupported"
-    assert env.conv_store.list_conversations(limit=100) == sessions_before
-    assert started == []
 
 
 async def test_managed_multipart_bundle_create_end_to_end(

@@ -7524,86 +7524,39 @@ describe("NewChatLandingScreen", () => {
     expect(body.sandbox_provider).toBe("e2b");
   });
 
-  it.each([
-    [true, true],
-    [false, false],
-  ])(
-    "chooses the sandbox host's id only when the provider supports it (shard=%s)",
-    async (shard, sendsId) => {
-      // A provider that registers its host under the create's id lets the
-      // create, and the session's requests, route by that id from the start.
-      authenticatedFetchMock.mockResolvedValue({
-        ok: true,
-        json: async () => ({ id: "conv_new" }),
-      } as unknown as Response);
-      renderLanding({
-        managed_sandboxes_enabled: true,
-        sandbox_provider: "modal",
-        sandbox_provider_capabilities: { modal: { shard_managed_sandbox: shard } },
-      });
-      fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
-        target: { value: "audit the repo" },
-      });
-      fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
-      await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
-      const [, init] = authenticatedFetchMock.mock.calls[0];
-      const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
-      expect(body.host_type).toBe("managed");
-      if (sendsId) {
-        expect(body.managed_host_id).toMatch(/^[0-9a-f]{32}$/);
-      } else {
-        expect(body).not.toHaveProperty("managed_host_id");
-      }
-    },
-  );
+  it("chooses the sandbox host's id so the create routes by it", async () => {
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    renderLanding({ managed_sandboxes_enabled: true, sandbox_provider: "modal" });
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "audit the repo" },
+    });
+    fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+    await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = authenticatedFetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+    expect(body.host_type).toBe("managed");
+    expect(body.managed_host_id).toMatch(/^[0-9a-f]{32}$/);
+  });
 
-  it.each([
-    [400, "managed_host_id_unsupported", 2],
-    [400, "invalid_input", 1],
-    [409, "already_exists", 1],
-  ])(
-    "resends a create whose chosen host id got %s %s without it only on the unsupported code",
-    async (status, code, calls) => {
-      // managed_host_id_unsupported means the page's capabilities went stale,
-      // and the server rejected the create before writing anything. Any other
-      // 400 can follow a persisted session, and a 409 means the id is taken,
-      // usually by a duplicate of this create; resending either would start a
-      // second session.
-      const rejection = {
-        ok: false,
-        status,
-        json: async () => ({ error: { code, message: "rejected" } }),
-      };
-      authenticatedFetchMock
-        .mockResolvedValueOnce({ ...rejection, clone: () => rejection } as unknown as Response)
-        .mockResolvedValue({
-          ok: true,
-          status: 201,
-          json: async () => ({ id: "conv_new" }),
-        } as unknown as Response);
-      renderLanding({
-        managed_sandboxes_enabled: true,
-        sandbox_provider: "modal",
-        sandbox_provider_capabilities: { modal: { shard_managed_sandbox: true } },
-      });
-      fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
-        target: { value: "audit the repo" },
-      });
-      fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
-      await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(calls));
-      const bodies = authenticatedFetchMock.mock.calls.map(
-        ([, init]) => JSON.parse((init as RequestInit).body as string) as Record<string, unknown>,
-      );
-      expect(bodies[0].managed_host_id).toMatch(/^[0-9a-f]{32}$/);
-      if (calls === 2) {
-        const { managed_host_id: _sent, ...rest } = bodies[0];
-        expect(bodies[1]).toEqual(rest);
-      } else {
-        await waitFor(() => expect(screen.getByText("rejected")).toBeTruthy());
-        expect(authenticatedFetchMock).toHaveBeenCalledTimes(1);
-      }
-    },
-  );
+  it("does not resend a create whose chosen host id is taken", async () => {
+    // A 409 usually means a duplicate of this create already holds the id;
+    // resending would start a second session.
+    authenticatedFetchMock.mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: { code: "already_exists", message: "rejected" } }),
+    } as unknown as Response);
+    renderLanding({ managed_sandboxes_enabled: true, sandbox_provider: "modal" });
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "audit the repo" },
+    });
+    fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+    await waitFor(() => expect(screen.getByText("rejected")).toBeTruthy());
+    expect(authenticatedFetchMock).toHaveBeenCalledTimes(1);
+  });
 
   it("reopens on the last-picked provider and highlights its row", async () => {
     // The sticky pick: choosing e2b persists it, so a fresh landing (module
