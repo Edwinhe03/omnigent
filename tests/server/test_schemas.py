@@ -876,6 +876,19 @@ def test_session_create_external_rejects_managed_host_id() -> None:
         SessionCreateRequest(agent_id="ag_x", managed_host_id="0123456789abcdef0123456789abcdef")
 
 
+def test_session_create_child_rejects_managed_host_id() -> None:
+    """A child session runs on its parent's host, so it cannot name one."""
+    from omnigent.server.schemas import SessionCreateRequest
+
+    with pytest.raises(ValidationError, match="does not apply to a child session"):
+        SessionCreateRequest(
+            agent_id="ag_x",
+            host_type="managed",
+            parent_session_id="conv_parent",
+            managed_host_id="0123456789abcdef0123456789abcdef",
+        )
+
+
 def test_session_create_managed_rejects_path_workspace() -> None:
     """
     ``host_type="managed"`` + a PATH workspace is a contradiction —

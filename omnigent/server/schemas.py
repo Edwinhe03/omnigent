@@ -1453,11 +1453,14 @@ class _SessionCreateRequestBase(BaseModel):
         every request after it, by that id from the start. Send it only
         for a provider whose ``GET /v1/info`` capabilities report
         ``shard_managed_sandbox``. The server registers the host under it
-        and records it in the ``omnigent.sandbox.host_id`` label; a
-        create naming an existing host fails with ``409``. ``None`` lets
-        the server mint one. JSON creates only; ignored when the session
-        reuses its parent's runner or the provider does not report
-        ``shard_managed_sandbox``.
+        and records it in the ``omnigent.sandbox.host_id`` label. ``None``
+        lets the server mint one. JSON creates only, and not with
+        ``parent_session_id`` (a child runs on its parent's host). A
+        create naming an existing host fails with ``409``; one whose
+        provider does not report ``shard_managed_sandbox`` fails with
+        ``400``. A caller with stale capabilities can retry without it.
+        The id is not checked against deleted hosts still awaiting
+        sandbox cleanup; reusing one fails the background launch.
     :param sandbox_provider: Which configured sandbox provider to
         provision on, e.g. ``"modal"`` — one of the names ``GET /v1/info``
         reports in ``sandbox_providers``. Only valid with
@@ -1616,7 +1619,7 @@ class _SessionCreateRequestBase(BaseModel):
 
         :returns: The validated instance.
         :raises ValueError: On ``"managed"`` + ``host_id``, a malformed
-            ``managed_host_id`` (or one on an external create), a managed
+            ``managed_host_id`` (or one on an external or child create), a managed
             workspace/workspaces that isn't a valid repository URL,
             ``workspace`` and ``workspaces`` set together, too many
             ``workspaces``, or an external repository-URL workspace.
@@ -1636,6 +1639,11 @@ class _SessionCreateRequestBase(BaseModel):
                 self.managed_host_id
             ):
                 raise ValueError("managed_host_id must be 32 lowercase hex characters")
+            if self.managed_host_id is not None and self.parent_session_id is not None:
+                raise ValueError(
+                    "managed_host_id does not apply to a child session; "
+                    "it runs on its parent's host"
+                )
             if self.workspace is not None and self.workspaces is not None:
                 raise ValueError(
                     "set either 'workspace' (one repository) or 'workspaces' "

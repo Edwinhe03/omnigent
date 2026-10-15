@@ -412,7 +412,7 @@ def register_core_routes(
         sandbox_provider: str | None,
         workspaces: list[str],
         managed_host_id: str | None = None,
-    ) -> str | None:
+    ) -> None:
         """
         Provision a managed sandbox host for a just-created session.
 
@@ -446,10 +446,8 @@ def register_core_routes(
             session's working directory; several are cloned as siblings
             and the working directory is the parent that holds them.
         :param managed_host_id: Host id the caller chose for the sandbox
-            host, or ``None`` to let the launch mint one. Ignored when the
-            provider does not declare ``shard_managed_sandbox``.
-        :returns: *managed_host_id* when the host will register under it
-            (recorded in the ``omnigent.sandbox.host_id`` label), else ``None``.
+            host (already checked against the provider and existing hosts),
+            or ``None`` to let the launch mint one.
         :raises OmnigentError: If managed hosts aren't configured or the
             provider isn't offered.
         """
@@ -490,12 +488,6 @@ def register_core_routes(
                     "select a single repository or choose a provider that supports several",
                     code=ErrorCode.INVALID_INPUT,
                 )
-        # A provider whose sandbox picks its own host identity cannot honor the id.
-        if managed_host_id is not None:
-            resolved = sandbox_provider or sandbox_config.default.provider
-            caps = sandbox_config.provider_ui_capabilities().get(resolved or "", {})
-            if not caps.get("shard_managed_sandbox", False):
-                managed_host_id = None
         # A managed workspace is a repository URL (schema-validated) the
         # launch clones inside the sandbox; parse each now so a malformed
         # URL is a synchronous 4xx, not a background failure.
@@ -543,7 +535,44 @@ def register_core_routes(
         )
         _managed_launch_tasks.add(launch_task)
         launch_task.add_done_callback(_managed_launch_tasks.discard)
-        return managed_host_id
+
+    async def _check_managed_host_id(
+        request: Request, managed_host_id: str, sandbox_provider: str | None
+    ) -> None:
+        """
+        Reject a caller-chosen managed host id the create cannot honor.
+
+        Not an idempotency key: the host row is written by the background
+        launch, so a retry could not find the session it would replay.
+
+        :param request: The originating request (for ``app.state`` lookups).
+        :param managed_host_id: The create's ``managed_host_id``.
+        :param sandbox_provider: The create's provider, or ``None`` for the
+            server's default.
+        :raises OmnigentError: ``INVALID_INPUT`` if the provider does not
+            report ``shard_managed_sandbox``; ``ALREADY_EXISTS`` if a host
+            already has the id.
+        """
+        sandbox_config = getattr(request.app.state, "sandbox_config", None)
+        if sandbox_config is not None:
+            resolved = sandbox_provider or sandbox_config.default.provider
+            caps = sandbox_config.provider_ui_capabilities().get(resolved or "")
+            # An unknown provider fails later with its own error.
+            if caps is not None and not caps.get("shard_managed_sandbox", False):
+                raise OmnigentError(
+                    f"sandbox provider '{resolved}' does not support managed_host_id; "
+                    "retry without it",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+        host_store = getattr(request.app.state, "host_store", None)
+        if (
+            host_store is not None
+            and await asyncio.to_thread(host_store.get_host, managed_host_id) is not None
+        ):
+            raise OmnigentError(
+                f"host {managed_host_id} already exists",
+                code=ErrorCode.ALREADY_EXISTS,
+            )
 
     async def _bind_and_launch_on_caller_host(
         request: Request,
@@ -798,21 +827,10 @@ def register_core_routes(
             # message survives in each entry's `msg`.
             raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
 
-        # A caller-chosen host id must not name an existing host. Checked before
-        # the session exists so a rejected create leaves nothing behind. Not an
-        # idempotency key: the host row is written by the background launch, so a
-        # retry could not find the session it would replay.
-        host_store_for_managed = getattr(request.app.state, "host_store", None)
-        if (
-            body.managed_host_id is not None
-            and host_store_for_managed is not None
-            and await asyncio.to_thread(host_store_for_managed.get_host, body.managed_host_id)
-            is not None
-        ):
-            raise OmnigentError(
-                f"host {body.managed_host_id} already exists",
-                code=ErrorCode.ALREADY_EXISTS,
-            )
+        # Checked before the session exists so a rejected create leaves nothing
+        # behind.
+        if body.managed_host_id is not None:
+            await _check_managed_host_id(request, body.managed_host_id, body.sandbox_provider)
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
             conversation_store,
@@ -931,7 +949,7 @@ def register_core_routes(
         # synchronously.
         launch_host_id = body.host_id
         if body.host_type == "managed" and resp.runner_id is None:
-            managed_host_id = await _schedule_managed_launch(
+            await _schedule_managed_launch(
                 request,
                 session_id=resp.id,
                 agent_id=conv.agent_id if conv is not None else None,
@@ -940,12 +958,12 @@ def register_core_routes(
                 workspaces=body.managed_repo_workspaces(),
                 managed_host_id=body.managed_host_id,
             )
-            if managed_host_id is not None:
+            if body.managed_host_id is not None:
                 from omnigent.server.managed_hosts import MANAGED_HOST_ID_LABEL_KEY
 
                 # The row's host_id stays null until the host binds; the caller
                 # routes by this label until then.
-                resp.labels[MANAGED_HOST_ID_LABEL_KEY] = managed_host_id
+                resp.labels[MANAGED_HOST_ID_LABEL_KEY] = body.managed_host_id
 
         # Host launch: if a host is targeted (caller-supplied or
         # managed) and no runner is bound yet, authorize (caller must
