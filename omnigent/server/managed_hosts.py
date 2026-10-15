@@ -352,10 +352,12 @@ def host_slice_key_enabled(labels: Mapping[str, str], host_id: str) -> bool:
 
     Only a host whose id the create chose: the caller routes by that id from
     the start. Otherwise the caller's requests are unkeyed, so the host must be
-    too to land on the same replica. That includes sessions created before the
-    label existed, whose host goes unkeyed on its next launch or wake; a web
-    client still keys a bound session by its host id, so its first request then
-    takes one ``wrong_replica`` retry before it routes that host unkeyed.
+    too to land on the same replica. On the workspace mount, where hosts key by
+    default, that includes sessions created before the label existed: their
+    host goes unkeyed on its next launch or wake (once the sandbox's omnigent
+    reads the setting). A web client still keys a bound session by its host id,
+    so after each page load its requests take a ``wrong_replica`` keyless retry
+    until it routes that host unkeyed.
 
     :param labels: The session's labels.
     :param host_id: The session's managed host.

@@ -3144,7 +3144,7 @@ async def test_relaunch_rolls_sandbox_generation_under_same_host(db_uri: str) ->
     relaunched = await relaunch_managed_host(
         config=config, host=gen1, host_store=host_store, slice_key_enabled=True
     )
-    # The new generation keeps the host's keying.
+    # The relaunch applies the keying its caller derived from the session.
     slice_key = render_host_config_write_command({"host": {"slice_key_enabled": True}})
     assert slice_key in fake.commands[commands_before:]
 
