@@ -258,8 +258,7 @@ def prune_orphaned_bridge_dirs() -> int:
     A runner restart is a normal Codex resume boundary, so owner death alone
     cannot imply that the local rollout is disposable. Keep the whole bridge
     for 7 days after its latest bridge preparation or rollout activity, then
-    remove it intact. Unmarked bridges get the same 7 days, measured from their
-    latest top-level or rollout write.
+    remove it intact. A bridge with no owner marker gets the same 7 days.
     Explicit session deletion remains immediate. Global maintenance calls this via
     ``native_bridge_common.reap_orphaned_native_bridge_dirs`` at startup.
 
@@ -268,40 +267,31 @@ def prune_orphaned_bridge_dirs() -> int:
     return native_bridge_common.prune_orphaned_dirs(
         bridge_root(),
         should_prune=_codex_orphan_retention_expired,
-        should_prune_unmarked=_codex_unmarked_retention_expired,
     )
 
 
 def _codex_orphan_retention_expired(bridge_dir: Path) -> bool:
-    """Return whether a dead-owner Codex bridge has been inactive for 7 days."""
+    """Return whether a dead-owner or unmarked Codex bridge has been inactive for 7 days.
+
+    An unmarked bridge has no marker timestamp, so its latest top-level write
+    stands in for it. Only dirs named like a bridge digest qualify, which keeps
+    siblings such as the process-owner lock dir.
+    """
     activity_cutoff = time.time() - _ORPHAN_RETENTION_SECONDS
     owner_marker = bridge_dir / native_bridge_common.OWNER_PID_FILENAME
     try:
         if owner_marker.stat().st_mtime > activity_cutoff:
             return False
-    except OSError:
-        return False
-    return _codex_rollouts_inactive_since(bridge_dir, activity_cutoff)
-
-
-def _codex_unmarked_retention_expired(bridge_dir: Path) -> bool:
-    """Return whether an unmarked Codex bridge has been inactive for 7 days.
-
-    Bridges prepared before the owner marker existed, and dirs created by paths
-    that never prepare a bridge, have no owner to prove dead. Only dirs named
-    like a bridge digest qualify, so siblings such as the process-owner lock
-    dir are never touched, and any recent write at the top level or in a
-    rollout keeps the bridge.
-    """
-    if not _BRIDGE_DIGEST_RE.fullmatch(bridge_dir.name):
-        return False
-    activity_cutoff = time.time() - _ORPHAN_RETENTION_SECONDS
-    try:
-        if bridge_dir.stat().st_mtime > activity_cutoff:
+    except FileNotFoundError:
+        if not _BRIDGE_DIGEST_RE.fullmatch(bridge_dir.name):
             return False
-        for child in bridge_dir.iterdir():
-            if child.lstat().st_mtime > activity_cutoff:
+        try:
+            if bridge_dir.stat().st_mtime > activity_cutoff or any(
+                child.lstat().st_mtime > activity_cutoff for child in bridge_dir.iterdir()
+            ):
                 return False
+        except OSError:
+            return False
     except OSError:
         return False
     return _codex_rollouts_inactive_since(bridge_dir, activity_cutoff)
