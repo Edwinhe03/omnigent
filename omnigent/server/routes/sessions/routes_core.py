@@ -536,24 +536,39 @@ def register_core_routes(
         _managed_launch_tasks.add(launch_task)
         launch_task.add_done_callback(_managed_launch_tasks.discard)
 
-    async def _check_requested_host_id(request: Request, requested_host_id: str) -> None:
+    async def _check_requested_host_id(
+        request: Request, requested_host_id: str, user_id: str | None
+    ) -> None:
         """
-        Reject a caller-chosen managed host id that another host already has.
+        Reject a caller-chosen managed host id the launch could not register.
 
         Not an idempotency key: the host row is written by the background
         launch, so a retry could not find the session it would replay.
 
         :param request: The originating request (for ``app.state`` lookups).
         :param requested_host_id: The create's ``requested_host_id``.
-        :raises OmnigentError: ``ALREADY_EXISTS`` if a host already has the id.
+        :param user_id: The caller, who will own the host.
+        :raises OmnigentError: ``ALREADY_EXISTS`` if a host already has the id,
+            or one of the caller's hosts already has its derived name.
         """
+        from omnigent.server.auth import RESERVED_USER_LOCAL
+        from omnigent.server.managed_hosts import managed_host_name
+
         host_store = getattr(request.app.state, "host_store", None)
-        if (
-            host_store is not None
-            and await asyncio.to_thread(host_store.get_host, requested_host_id) is not None
-        ):
+        if host_store is None:
+            return
+        if await asyncio.to_thread(host_store.get_host, requested_host_id) is not None:
             raise OmnigentError(
                 f"host {requested_host_id} already exists",
+                code=ErrorCode.ALREADY_EXISTS,
+            )
+        name = managed_host_name(requested_host_id)
+        owned = await asyncio.to_thread(
+            host_store.list_hosts, user_id if user_id is not None else RESERVED_USER_LOCAL
+        )
+        if any(host.name == name for host in owned):
+            raise OmnigentError(
+                f"host name {name} is taken; choose a host_id with different leading hex",
                 code=ErrorCode.ALREADY_EXISTS,
             )
 
@@ -813,7 +828,7 @@ def register_core_routes(
         # Checked before the session exists so a rejected create leaves nothing
         # behind.
         if body.requested_host_id is not None:
-            await _check_requested_host_id(request, body.requested_host_id)
+            await _check_requested_host_id(request, body.requested_host_id, user_id)
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
             conversation_store,

@@ -346,6 +346,19 @@ MANAGED_REPO_LABEL_KEY = "omnigent.sandbox.repo"
 REQUESTED_HOST_ID_LABEL_KEY = "omnigent.sandbox.requested_host_id"
 
 
+def managed_host_name(host_id: str) -> str:
+    """
+    The host-picker name of the managed host *host_id*, e.g. ``"managed-a1b2c3d4"``.
+
+    ``(owner, name)`` is unique in the hosts table, so the name embeds the id's
+    leading hex; a create that chooses its id must avoid an owner's taken name.
+
+    :param host_id: The managed host's id.
+    :returns: Its display name.
+    """
+    return f"managed-{host_id[:8]}"
+
+
 def host_slice_key_enabled(labels: Mapping[str, str], host_id: str) -> bool:
     """
     Whether a session's managed host routes by its own id.
@@ -3571,10 +3584,7 @@ async def launch_managed_host(
     repos = _apply_git_clone_options(launcher, repos, entry.git_clone)
     slice_key_enabled = host_id is not None
     host_id = host_id or uuid.uuid4().hex
-    # Visible label in the host picker; (owner, name) is the hosts
-    # table PK, so embed the host_id's leading hex for uniqueness
-    # across a user's managed sandboxes.
-    host_name = f"managed-{host_id[:8]}"
+    host_name = managed_host_name(host_id)
     try:
         await asyncio.to_thread(launcher.prepare_for_launch, agent_name=agent_name)
         await asyncio.to_thread(launcher.prepare)

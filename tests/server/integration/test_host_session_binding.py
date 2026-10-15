@@ -27,6 +27,7 @@ from omnigent.host.frames import (
     decode_host_frame,
     encode_host_frame,
 )
+from omnigent.onboarding.sandboxes.base import render_host_config_write_command
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.auth import RESERVED_USER_LOCAL
@@ -589,14 +590,23 @@ async def test_managed_session_create_with_repo_workspace_binds_cloned_dir(
     del tunnels
 
 
+@pytest.mark.parametrize(
+    "host_id",
+    [
+        "0123456789abcdef0123456789abcdef",
+        # A different id whose derived name (``managed-01234567``) is taken.
+        "01234567ffffffffffffffffffffffff",
+    ],
+)
 async def test_managed_session_create_rejects_a_taken_host_id(
-    managed_session_env: ManagedSessionEnv,
+    managed_session_env: ManagedSessionEnv, host_id: str
 ) -> None:
-    """A managed create naming an existing host is a 409 that creates no session."""
+    """A managed create the launch couldn't register is a 409 that creates no session."""
     env = managed_session_env
-    host_id = "0123456789abcdef0123456789abcdef"
     env.host_store.upsert_on_connect(
-        host_id=host_id, name="managed-01234567", user_id=RESERVED_USER_LOCAL
+        host_id="0123456789abcdef0123456789abcdef",
+        name="managed-01234567",
+        user_id=RESERVED_USER_LOCAL,
     )
     agent = await create_test_agent(env.client, name="managed-taken-host-agent")
     sessions_before = env.conv_store.list_conversations(limit=100)
@@ -1071,9 +1081,11 @@ async def test_subagent_session_reuses_managed_sandbox_runner(
     del tunnels
 
 
+@pytest.mark.parametrize("requested_host_id", [None, "0123456789abcdef0123456789abcdef"])
 async def test_message_relaunches_dead_managed_sandbox(
     managed_session_env: ManagedSessionEnv,
     monkeypatch: pytest.MonkeyPatch,
+    requested_host_id: str | None,
 ) -> None:
     """
     A message to a session whose managed sandbox died provisions a new
@@ -1119,10 +1131,10 @@ async def test_message_relaunches_dead_managed_sandbox(
     install_fake_modal_launcher(monkeypatch, fake)
 
     agent = await create_test_agent(env.client, name="managed-relaunch-agent")
-    resp = await env.client.post(
-        "/v1/sessions",
-        json={"agent_id": agent["id"], "host_type": "managed"},
-    )
+    create: dict[str, object] = {"agent_id": agent["id"], "host_type": "managed"}
+    if requested_host_id is not None:
+        create["host_id"] = requested_host_id
+    resp = await env.client.post("/v1/sessions", json=create)
     assert resp.status_code == 201, resp.text
     session_id = resp.json()["id"]
     conv = await _wait_for_managed_binding(env, session_id)
@@ -1197,6 +1209,9 @@ async def test_message_relaunches_dead_managed_sandbox(
     assert len(fake.host_starts) == 2
     assert fake.host_starts[1].host_id == conv.host_id
     assert fake.host_starts[1].token != fake.host_starts[0].token
+    # The relaunch keeps the keying the session's create chose.
+    slice_key = render_host_config_write_command({"host": {"slice_key_enabled": True}})
+    assert fake.commands.count(slice_key) == (2 if requested_host_id else 0)
     assert env.host_store.is_online(conv.host_id) is True
     # The session row was re-bound to a fresh runner binding for the
     # new generation.
