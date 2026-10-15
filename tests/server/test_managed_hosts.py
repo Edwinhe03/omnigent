@@ -2585,7 +2585,9 @@ async def test_resume_rematerializes_host_config_before_host_restart(db_uri: str
     Waking a dormant sandbox re-runs the config write before re-execing the
     host — resume_managed_host bypasses _register_and_start_host, so this is a
     distinct wiring point, and re-materializing is what lets an operator's
-    host_config change land on the next wake without a new sandbox.
+    host_config change land on the next wake without a new sandbox. The wake
+    also re-materializes the host's keying, which the caller derives from the
+    session.
     """
     host_store = HostStore(db_uri)
 
@@ -2604,11 +2606,13 @@ async def test_resume_rematerializes_host_config_before_host_restart(db_uri: str
     host_store.set_offline(result.host_id)
     commands_before = len(fake.commands)
 
-    await resume_managed_host(result.host_id, host_store, config)
+    await resume_managed_host(result.host_id, host_store, config, slice_key_enabled=True)
 
     assert fake.resumed == ["sb-fake-1"]
     resumed_commands = fake.commands[commands_before:]
-    write_index = resumed_commands.index(render_host_config_write_command(host_config))
+    write_index = resumed_commands.index(
+        render_host_config_write_command({**host_config, "host": {"slice_key_enabled": True}})
+    )
     host_index = next(
         i for i, cmd in enumerate(resumed_commands) if "omnigent host --server" in cmd
     )
@@ -2624,34 +2628,6 @@ def test_host_slice_key_enabled_only_for_the_requested_host() -> None:
     assert host_slice_key_enabled(requested, "0123456789abcdef0123456789abcdef") is True
     assert host_slice_key_enabled(requested, "fedcba9876543210fedcba9876543210") is False
     assert host_slice_key_enabled({}, "0123456789abcdef0123456789abcdef") is False
-
-
-async def test_resume_keeps_the_hosts_slice_key(db_uri: str) -> None:
-    """A wake re-materializes the keying the caller derived from the session."""
-    host_store = HostStore(db_uri)
-
-    def _register(invocation: HostStartInvocation) -> None:
-        host_store.upsert_on_connect(
-            host_id=invocation.host_id,
-            name=invocation.host_name,
-            user_id=_OWNER,
-        )
-
-    fake = FakeSandboxLauncher(on_host_start=_register, can_resume=True)
-    config = _injected_config(fake)
-    result = await launch_managed_host(
-        config=config,
-        owner=_OWNER,
-        host_store=host_store,
-        host_id="0123456789abcdef0123456789abcdef",
-    )
-    host_store.set_offline(result.host_id)
-    commands_before = len(fake.commands)
-
-    await resume_managed_host(result.host_id, host_store, config, slice_key_enabled=True)
-
-    slice_key = render_host_config_write_command({"host": {"slice_key_enabled": True}})
-    assert slice_key in fake.commands[commands_before:]
 
 
 async def test_launch_without_host_config_writes_no_config(db_uri: str) -> None:
@@ -3164,7 +3140,13 @@ async def test_relaunch_rolls_sandbox_generation_under_same_host(db_uri: str) ->
     assert gen1 is not None
     gen1_token = fake.host_starts[0].token
 
-    relaunched = await relaunch_managed_host(config=config, host=gen1, host_store=host_store)
+    commands_before = len(fake.commands)
+    relaunched = await relaunch_managed_host(
+        config=config, host=gen1, host_store=host_store, slice_key_enabled=True
+    )
+    # The new generation keeps the host's keying.
+    slice_key = render_host_config_write_command({"host": {"slice_key_enabled": True}})
+    assert slice_key in fake.commands[commands_before:]
 
     # Same identity, new generation: the session's host binding (which
     # references host_id) survives the roll.

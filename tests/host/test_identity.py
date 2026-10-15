@@ -445,6 +445,8 @@ def test_host_identity_env_override_active_reflects_env(
         (None, {"host": {"slice_key_enabled": True}}, "1"),
         (None, {"host": {"slice_key_enabled": False}}, "0"),
         (None, {"host": {"name": "box"}}, None),
+        (None, {"host": {"slice_key_enabled": "yes"}}, None),
+        (None, "host: [unclosed", None),
         ("0", {"host": {"slice_key_enabled": True}}, "0"),
     ],
 )
@@ -452,12 +454,15 @@ def test_export_configured_slice_key_defers_to_the_env_var(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     env: str | None,
-    config: dict[str, object],
+    config: dict[str, object] | str,
     expected: str | None,
 ) -> None:
-    """The config's ``host.slice_key_enabled`` becomes the env var, unless one is set."""
+    """
+    The config's boolean ``host.slice_key_enabled`` becomes the env var, unless
+    one is set; a non-boolean value or malformed YAML exports nothing.
+    """
     path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump(config))
+    path.write_text(config if isinstance(config, str) else yaml.safe_dump(config))
     # Set first so teardown restores the variable the export may write.
     monkeypatch.setenv(HOST_SLICE_KEY_ENABLED_ENV_VAR, env or "")
     if env is None:
