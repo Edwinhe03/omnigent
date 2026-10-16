@@ -871,7 +871,7 @@ class HostStore:
                 return None
             return _row_to_host(row)
 
-    def host_keys_taken(self, *, host_id: str, user_id: str, name: str) -> bool:
+    def host_identity_taken(self, *, host_id: str, user_id: str, name: str) -> bool:
         """
         Whether a host row already holds *host_id*, or *name* for *user_id*.
 
@@ -883,7 +883,7 @@ class HostStore:
         :param name: The would-be display name, e.g. ``"managed-a1b2c3d4"``.
         :returns: ``True`` when either key is taken in this workspace.
         """
-        with self._session("select_host_keys_taken") as session:
+        with self._session("select_host_identity_taken") as session:
             row = session.execute(
                 select(SqlHost.host_id)
                 .where(

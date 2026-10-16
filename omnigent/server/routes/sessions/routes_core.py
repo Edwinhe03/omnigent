@@ -559,7 +559,7 @@ def register_core_routes(
             return
         name = managed_host_name(requested_host_id)
         if await asyncio.to_thread(
-            host_store.host_keys_taken,
+            host_store.host_identity_taken,
             host_id=requested_host_id,
             user_id=user_id if user_id is not None else RESERVED_USER_LOCAL,
             name=name,

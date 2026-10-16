@@ -1925,17 +1925,17 @@ async def test_fork_managed_schedules_sandbox_launch(
     assert conv_store.label_writes == []
 
 
-class _HostKeysStore:
+class _HostIdentityStore:
     """Host store answering only the requested-host-id collision check."""
 
     def __init__(self, *, taken: bool) -> None:
         """
-        :param taken: What ``host_keys_taken`` reports for every lookup.
+        :param taken: What ``host_identity_taken`` reports for every lookup.
         """
         self.taken = taken
         self.lookups: list[dict[str, str]] = []
 
-    def host_keys_taken(self, *, host_id: str, user_id: str, name: str) -> bool:
+    def host_identity_taken(self, *, host_id: str, user_id: str, name: str) -> bool:
         """Record the lookup and report the configured answer."""
         self.lookups.append({"host_id": host_id, "user_id": user_id, "name": name})
         return self.taken
@@ -1956,7 +1956,7 @@ async def test_fork_managed_launches_its_requested_host_id(
     conv_store = _ConversationStore(conversations={"e9f8f58523cec9a57d3bdf93be543e8c": conv})
     app = _build_app(conv_store)
     launches = _arm_managed_app(app, monkeypatch)
-    app.state.host_store = host_store = _HostKeysStore(taken=taken)
+    app.state.host_store = host_store = _HostIdentityStore(taken=taken)
     client = TestClient(app)
 
     resp = client.post(
