@@ -1073,6 +1073,24 @@ def test_publish_origin_identity_probes_and_stores_workspace_id(
     assert dl.publish_origin_identity(_HOSTED_API) == "1965859176160743"
 
 
+def test_publish_origin_identity_publishes_when_store_fails(
+    _data_dir: Path, origin_identity_probe: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A read-only state dir loses only the cache, never this process's attribution.
+    def read_only(server_url: str, org_id: str) -> None:
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda url, **kwargs: httpx.Response(401, headers={"x-databricks-org-id": "7"}),
+    )
+    monkeypatch.setattr("omnigent.cli_auth.store_databricks_org_id", read_only)
+
+    assert dl.publish_origin_identity(_HOSTED_API) == "7"
+    assert dl._process_identity()[0] == "7"
+
+
 def test_publish_origin_identity_prefers_url_selector(
     _data_dir: Path, origin_identity_probe: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -248,13 +248,16 @@ def store_databricks_auth(
     }
     if user_id:
         entry["user_id"] = user_id
-    if org_id:
-        entry["org_id"] = org_id
-    else:
-        existing_org_id = load_databricks_org_id(server_url)
-        if existing_org_id is not None:
-            entry["org_id"] = existing_org_id
-    _store_entry(server_url, entry)
+    # Locked so a concurrent attribution merge (see _merge_entry_field) is not
+    # read before and overwritten after this replacement.
+    with _token_file_lock():
+        if org_id:
+            entry["org_id"] = org_id
+        else:
+            existing_org_id = load_databricks_org_id(server_url)
+            if existing_org_id is not None:
+                entry["org_id"] = existing_org_id
+        _store_entry(server_url, entry)
 
 
 def store_databricks_org_id(server_url: str, org_id: str) -> None:
@@ -269,31 +272,43 @@ def store_databricks_org_id(server_url: str, org_id: str) -> None:
     :param server_url: Canonical server API base.
     :param org_id: Workspace selector parsed from the user-supplied URL.
     """
-    existing = _load_entry(server_url) or {}
-    if existing.get("org_id") == org_id:
-        return
-    _store_entry(server_url, {**existing, "org_id": org_id})
+    _merge_entry_field(server_url, "org_id", org_id)
 
 
 def store_server_user_id(server_url: str, user_id: str) -> None:
     """Persist the server's view of the current user without replacing credentials.
 
     The host records the owner it resolves via ``GET /v1/me`` so the next host
-    or CLI process can attribute its debug-log rows before it connects. Runs
-    under the token-file lock: unlike login, it happens while other processes
-    may be refreshing the same record.
+    or CLI process can attribute its debug-log rows before it connects.
 
     :param server_url: Canonical server API base.
     :param user_id: The user the server reported, e.g. ``"alice@example.com"``.
     :raises OSError: If the state directory cannot be locked or written.
     """
-    if load_server_user_id(server_url) == user_id:
+    _merge_entry_field(server_url, "user_id", user_id)
+
+
+def _merge_entry_field(server_url: str, key: str, value: str) -> None:
+    """Set one field on a server's record, keeping every other field.
+
+    The host, CLI and debug-log attribution update the same record from separate
+    processes, so the read and the write share the token-file lock: an unlocked
+    read-modify-write would drop a field another process stored in between.
+    An already-current value returns before locking, so a read-only state
+    directory only fails when something actually changes.
+
+    :param server_url: Canonical server API base.
+    :param key: Record field, e.g. ``"org_id"``.
+    :param value: Value to store, e.g. ``"2850744067564480"``.
+    :raises OSError: If the state directory cannot be locked or written.
+    """
+    if (_load_entry(server_url) or {}).get(key) == value:
         return
     with _token_file_lock():
         existing = _load_entry(server_url) or {}
-        if existing.get("user_id") == user_id:
+        if existing.get(key) == value:
             return
-        _store_entry(server_url, {**existing, "user_id": user_id})
+        _store_entry(server_url, {**existing, key: value})
 
 
 def _load_entry(server_url: str) -> dict[str, str | float] | None:

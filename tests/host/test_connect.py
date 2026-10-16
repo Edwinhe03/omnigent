@@ -9007,3 +9007,51 @@ async def test_host_publishes_stored_identity_at_startup(
     assert host._origin_workspace_id == "1965859176160743"
     assert os.environ[debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR] == "1965859176160743"
     assert os.environ[debug_logging.USER_ID_ENV_VAR] == "alice@example.com"
+
+
+async def test_owner_user_id_store_failure_keeps_live_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cache write failure never disrupts the host or its live attribution."""
+
+    def read_only(server_url: str, user_id: str) -> None:
+        raise PermissionError("read-only")
+
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "omnigent.resume_dispatch._resolve_current_user_id",
+        lambda *, base_url, headers: "alice@example.com",
+    )
+    monkeypatch.setattr("omnigent.cli_auth.store_server_user_id", read_only)
+    host = _host("https://example.databricks.com/api/2.0/omnigent")
+
+    await host._ensure_owner_user_id(headers={"Authorization": "Bearer test"})
+
+    assert host._owner_user_id == "alice@example.com"
+    assert os.environ[debug_logging.USER_ID_ENV_VAR] == "alice@example.com"
+
+
+async def test_run_host_process_publishes_identity_before_logging_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identity is in the env before the host configures logging or does any work."""
+    from omnigent.host import connect
+
+    order: list[str] = []
+
+    class _StopAfterLogging(Exception):
+        pass
+
+    def configure_logging(*args: object, **kwargs: object) -> None:
+        order.append("logging")
+        raise _StopAfterLogging
+
+    monkeypatch.setattr(
+        connect, "publish_origin_identity", lambda server_url: order.append(server_url)
+    )
+    monkeypatch.setattr(connect, "configure_process_logging", configure_logging)
+
+    with pytest.raises(_StopAfterLogging):
+        connect.run_host_process("https://example.databricks.com/api/2.0/omnigent")
+
+    assert order == ["https://example.databricks.com/api/2.0/omnigent", "logging"]

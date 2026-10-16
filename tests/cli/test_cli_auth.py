@@ -372,6 +372,55 @@ def test_store_server_user_id_preserves_record(token_dir) -> None:
     assert load_databricks_workspace_host(server) == "https://example.databricks.com"
 
 
+@pytest.mark.parametrize(
+    ("writer", "field", "value", "concurrent_field", "concurrent_value"),
+    [
+        ("store_databricks_org_id", "org_id", "123", "user_id", "alice@example.com"),
+        ("store_server_user_id", "user_id", "alice@example.com", "org_id", "123"),
+    ],
+)
+def test_attribution_merge_keeps_field_stored_concurrently(
+    token_dir,
+    monkeypatch: pytest.MonkeyPatch,
+    writer: str,
+    field: str,
+    value: str,
+    concurrent_field: str,
+    concurrent_value: str,
+) -> None:
+    """A field another process stores mid-update survives this process's merge.
+
+    The concurrent write lands right after this writer's first read of the
+    record, the window an unlocked read-modify-write would overwrite.
+    """
+    from omnigent import cli_auth
+
+    server = "https://example.databricks.com/api/2.0/omnigent"
+    cli_auth.store_databricks_auth(server, "https://example.databricks.com")
+    real_load = cli_auth._load_entry
+    reads = 0
+
+    def load_then_race(server_url: str) -> dict[str, str | float] | None:
+        nonlocal reads
+        entry = real_load(server_url)
+        reads += 1
+        if reads == 1:
+            cli_auth._store_entry(
+                server_url, {**(entry or {}), concurrent_field: concurrent_value}
+            )
+        return entry
+
+    monkeypatch.setattr(cli_auth, "_load_entry", load_then_race)
+
+    getattr(cli_auth, writer)(server, value)
+
+    stored = real_load(server)
+    assert stored is not None
+    assert stored[field] == value
+    assert stored[concurrent_field] == concurrent_value
+    assert stored["workspace_host"] == "https://example.databricks.com"
+
+
 def test_store_token_preserves_databricks_org_id(token_dir) -> None:
     """Refreshing a login session must retain remembered routing."""
     from omnigent.cli_auth import (
