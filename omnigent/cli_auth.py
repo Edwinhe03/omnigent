@@ -260,7 +260,8 @@ def store_databricks_auth(
 def store_databricks_org_id(server_url: str, org_id: str) -> None:
     """Persist a workspace selector without replacing existing credentials.
 
-    URL normalization calls this when a managed server URL carries ``?o=``.
+    URL normalization calls this when a managed server URL carries ``?o=``, and
+    debug-log attribution when it probes the workspace id for a URL without one.
     Keeping the selector beside the server's existing auth record lets later
     CLI helpers and child processes rebuild routing headers after the query has
     been removed from the HTTP base URL.
@@ -272,6 +273,27 @@ def store_databricks_org_id(server_url: str, org_id: str) -> None:
     if existing.get("org_id") == org_id:
         return
     _store_entry(server_url, {**existing, "org_id": org_id})
+
+
+def store_server_user_id(server_url: str, user_id: str) -> None:
+    """Persist the server's view of the current user without replacing credentials.
+
+    The host records the owner it resolves via ``GET /v1/me`` so the next host
+    or CLI process can attribute its debug-log rows before it connects. Runs
+    under the token-file lock: unlike login, it happens while other processes
+    may be refreshing the same record.
+
+    :param server_url: Canonical server API base.
+    :param user_id: The user the server reported, e.g. ``"alice@example.com"``.
+    :raises OSError: If the state directory cannot be locked or written.
+    """
+    if load_server_user_id(server_url) == user_id:
+        return
+    with _token_file_lock():
+        existing = _load_entry(server_url) or {}
+        if existing.get("user_id") == user_id:
+            return
+        _store_entry(server_url, {**existing, "user_id": user_id})
 
 
 def _load_entry(server_url: str) -> dict[str, str | float] | None:
@@ -615,6 +637,21 @@ def load_databricks_org_id(server_url: str) -> str | None:
         return None
     org_id = entry.get("org_id")
     return org_id if isinstance(org_id, str) and org_id else None
+
+
+def load_server_user_id(server_url: str) -> str | None:
+    """Load the user a stored server record names.
+
+    :param server_url: The server URL, e.g.
+        ``"https://example.databricks.com/api/2.0/omnigent"``.
+    :returns: The user id, e.g. ``"alice@example.com"``, or ``None`` when no
+        record exists or it names no user.
+    """
+    entry = _load_entry(server_url)
+    if entry is None:
+        return None
+    user_id = entry.get("user_id")
+    return user_id if isinstance(user_id, str) and user_id else None
 
 
 # Workspace-routing header. When a Databricks host fronts many workspaces

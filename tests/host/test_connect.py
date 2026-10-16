@@ -8969,3 +8969,41 @@ def test_run_host_process_classifies_how_the_host_ended(
         )
 
     assert _host_exit_reasons(caplog) == [expected]
+
+
+async def test_owner_user_id_is_stored_for_next_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolved owner is recorded so the next host attributes pre-connect rows."""
+    from omnigent.cli_auth import load_server_user_id
+
+    server_url = "https://example.databricks.com/api/2.0/omnigent"
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "omnigent.resume_dispatch._resolve_current_user_id",
+        lambda *, base_url, headers: "alice@example.com",
+    )
+    host = _host(server_url)
+
+    await host._ensure_owner_user_id(headers={"Authorization": "Bearer test"})
+
+    assert load_server_user_id(server_url) == "alice@example.com"
+    assert os.environ[debug_logging.USER_ID_ENV_VAR] == "alice@example.com"
+
+
+async def test_host_publishes_stored_identity_at_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host starts attributed from the stored record, before it ever connects."""
+    from omnigent.cli_auth import store_databricks_org_id, store_server_user_id
+
+    server_url = "https://example.databricks.com/api/2.0/omnigent"
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    store_databricks_org_id(server_url, "1965859176160743")
+    store_server_user_id(server_url, "alice@example.com")
+
+    host = _host(server_url)
+
+    assert host._origin_workspace_id == "1965859176160743"
+    assert os.environ[debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR] == "1965859176160743"
+    assert os.environ[debug_logging.USER_ID_ENV_VAR] == "alice@example.com"

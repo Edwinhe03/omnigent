@@ -349,6 +349,29 @@ def test_store_databricks_org_id_preserves_session_token(token_dir) -> None:
     assert load_databricks_org_id(server) == "123"
 
 
+def test_store_server_user_id_preserves_record(token_dir) -> None:
+    """Remembering the host owner must not replace credentials or routing."""
+    from omnigent.cli_auth import (
+        load_databricks_org_id,
+        load_databricks_workspace_host,
+        load_server_user_id,
+        store_databricks_auth,
+        store_databricks_org_id,
+        store_server_user_id,
+    )
+
+    server = "https://example.databricks.com/api/2.0/omnigent"
+    assert load_server_user_id(server) is None
+    store_databricks_auth(server, "https://example.databricks.com")
+    store_databricks_org_id(server, "123")
+
+    store_server_user_id(server, "alice@example.com")
+
+    assert load_server_user_id(server) == "alice@example.com"
+    assert load_databricks_org_id(server) == "123"
+    assert load_databricks_workspace_host(server) == "https://example.databricks.com"
+
+
 def test_store_token_preserves_databricks_org_id(token_dir) -> None:
     """Refreshing a login session must retain remembered routing."""
     from omnigent.cli_auth import (

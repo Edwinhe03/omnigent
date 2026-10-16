@@ -45,6 +45,7 @@ from omnigent.debug_logging import (
     PRIMARY_SESSION_ID_ENV_VAR,
     USER_ID_ENV_VAR,
     debug_event,
+    publish_origin_identity,
     runner_log_scope,
 )
 from omnigent.errors import (
@@ -1209,20 +1210,11 @@ class HostProcess:
         # to OMNIGENT_USER_ID so host/runner debug-log rows carry it. None until
         # resolved, or on a single-user server / managed host where it is absent.
         self._owner_user_id: str | None = None
-        # The fronting Databricks workspace id for this server, resolved once from
-        # the server URL (its ?o= selector or the stored login record) — the same
-        # resolution the display URL uses, no extra network. Published to
+        # The fronting Databricks workspace id for this server, published to
         # DATABRICKS_WORKSPACE_ID for the host's own debug-log rows and injected
         # into every runner this host spawns; None on a non-Databricks server.
-        self._origin_workspace_id: str | None = None
-        try:
-            from omnigent.util.server_url import ServerUrl
-
-            self._origin_workspace_id = ServerUrl.from_api_base(self._server_url).org_id
-        except Exception:  # noqa: BLE001 — attribution is best-effort
-            self._origin_workspace_id = None
-        if self._origin_workspace_id:
-            os.environ[ORIGIN_WORKSPACE_ID_ENV_VAR] = self._origin_workspace_id
+        # run_host_process already resolved it, so this is a cache hit there.
+        self._origin_workspace_id: str | None = publish_origin_identity(self._server_url)
         # Set on the first accepted WS upgrade. Distinguishes a host that
         # never authenticated (login redirects / 401 / 403 turn fatal) from a
         # live host hit by a transient failure — a server restart or a dropped
@@ -4585,6 +4577,11 @@ class HostProcess:
         if owner:
             self._owner_user_id = owner
             os.environ[USER_ID_ENV_VAR] = owner
+            # Stored so the next host/CLI process attributes its pre-connect rows.
+            from omnigent.cli_auth import store_server_user_id
+
+            with contextlib.suppress(OSError):
+                await asyncio.to_thread(store_server_user_id, self._server_url, owner)
 
     def _build_connect_headers(self) -> dict[str, str]:
         """Build the WebSocket upgrade headers for the tunnel connection.
@@ -5182,6 +5179,8 @@ def run_host_process(
         loopback server that is gone). The actionable cause is printed
         to stderr first.
     """
+    # Before any startup work logs, so its earliest debug-log rows are attributed.
+    publish_origin_identity(server_url)
     host_log_path = configure_process_logging(
         "host",
         log_to_stderr=should_log_to_stderr() or sys.stderr.isatty(),

@@ -462,6 +462,67 @@ def _process_identity() -> tuple[str | None, str | None]:
     return workspace_id, app_name
 
 
+# Workspace-id probe results by API base, success or not, so a process probes a
+# server at most once even when the result cannot be persisted.
+_probed_workspace_ids: dict[str, str | None] = {}
+_WORKSPACE_ID_PROBE_TIMEOUT_S = 3.0
+
+
+def _probe_workspace_id(api_base: str) -> str | None:
+    """Read the workspace id a workspace-hosted server's proxy stamps on responses.
+
+    The Databricks API proxy sets ``x-databricks-org-id`` even on a 401, so this
+    unauthenticated request needs no credential and can run before any exists.
+    """
+    if api_base in _probed_workspace_ids:
+        return _probed_workspace_ids[api_base]
+    workspace_id: str | None = None
+    try:
+        resp = httpx.get(f"{api_base}/v1/me", timeout=_WORKSPACE_ID_PROBE_TIMEOUT_S)
+        header = _clean(resp.headers.get("x-databricks-org-id"))
+        workspace_id = header if header and header.isdecimal() else None
+    except httpx.HTTPError:
+        workspace_id = None
+    _probed_workspace_ids[api_base] = workspace_id
+    return workspace_id
+
+
+def publish_origin_identity(server_url: str) -> str | None:
+    """Publish the workspace id and owning user a client process's rows carry.
+
+    Host and CLI processes call this at startup, before anything they log or
+    spawn, so even pre-connect rows (credential service, login) are attributed.
+    The workspace id comes from the URL's ``?o=``, the stored login record, or
+    else a one-time probe whose result is stored for later processes. The user
+    is the one the host last resolved for this server; the host replaces it with
+    the live ``GET /v1/me`` answer once connected.
+
+    :param server_url: The server API base, e.g.
+        ``"https://example.databricks.com/api/2.0/omnigent"``.
+    :returns: The workspace id, e.g. ``"2850744067564480"``, or ``None`` on a
+        non-Databricks server or when it cannot be resolved.
+    """
+    try:
+        from omnigent.cli_auth import load_server_user_id, store_databricks_org_id
+        from omnigent.util.server_url import ServerUrl
+
+        resolved = ServerUrl.from_api_base(server_url)
+        workspace_id = resolved.org_id
+        if workspace_id is None and resolved.is_workspace_hosted:
+            workspace_id = _probe_workspace_id(resolved.api_base)
+            if workspace_id:
+                with contextlib.suppress(OSError):
+                    store_databricks_org_id(resolved.api_base, workspace_id)
+        if workspace_id:
+            os.environ[ORIGIN_WORKSPACE_ID_ENV_VAR] = workspace_id
+        user_id = load_server_user_id(resolved.api_base)
+        if user_id:
+            os.environ[USER_ID_ENV_VAR] = user_id
+        return workspace_id
+    except Exception:  # noqa: BLE001 — attribution is best-effort
+        return None
+
+
 def debug_event(
     event_name: str,
     *,
