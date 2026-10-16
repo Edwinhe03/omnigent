@@ -204,6 +204,20 @@ def store_token(
         the access token past expiry without a human re-running
         ``omnigent login``.
     """
+    # Locked so a concurrent attribution merge (see _merge_entry_field) cannot
+    # read the old record and then write it back over this login.
+    with _token_file_lock():
+        _store_token_locked(server_url, token, user_id, expires_at, refresh_token)
+
+
+def _store_token_locked(
+    server_url: str,
+    token: str,
+    user_id: str,
+    expires_at: float,
+    refresh_token: str | None,
+) -> None:
+    """:func:`store_token` for callers that already hold the token-file lock."""
     entry: dict[str, str | float] = {
         "token": token,
         "user_id": user_id,
@@ -591,7 +605,7 @@ def _refresh_locked(server_url: str, normalized: str, timeout: float) -> str | N
     expires_in = _coerce_expires_in(payload.get("expires_in"))
 
     user_id = entry.get("user_id")
-    store_token(
+    _store_token_locked(
         server_url,
         token=access_token,
         user_id=user_id if isinstance(user_id, str) else "",

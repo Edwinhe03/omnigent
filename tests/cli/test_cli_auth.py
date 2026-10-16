@@ -421,6 +421,53 @@ def test_attribution_merge_keeps_field_stored_concurrently(
     assert stored["workspace_host"] == "https://example.databricks.com"
 
 
+def test_login_during_attribution_merge_keeps_fresh_credentials(
+    token_dir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A login that lands mid-merge waits for it instead of being overwritten.
+
+    The host's owner merge re-reads the record under the lock; a login saved
+    between that read and its write would otherwise be replaced by the stale
+    record, losing the fresh token and refresh grant.
+    """
+    import threading
+
+    from omnigent import cli_auth
+
+    server = "http://localhost:6767"
+    cli_auth.store_token(server, "old-token", "", time.time() + 3600, refresh_token="old-grant")
+    real_load = cli_auth._load_entry
+    reads = 0
+    login: threading.Thread | None = None
+
+    def login_during_locked_read(server_url: str) -> dict[str, str | float] | None:
+        nonlocal reads, login
+        entry = real_load(server_url)
+        reads += 1
+        if reads == 2:  # the read inside the lock
+            login = threading.Thread(
+                target=cli_auth.store_token,
+                args=(server, "new-token", "alice@example.com", time.time() + 3600),
+                kwargs={"refresh_token": "new-grant"},
+            )
+            login.start()
+            login.join(timeout=0.2)
+            assert login.is_alive(), "login must wait for the merge holding the lock"
+        return entry
+
+    monkeypatch.setattr(cli_auth, "_load_entry", login_during_locked_read)
+
+    cli_auth.store_server_user_id(server, "alice@example.com")
+    assert login is not None
+    login.join(timeout=5)
+
+    stored = real_load(server)
+    assert stored is not None
+    assert stored["token"] == "new-token"
+    assert stored["refresh_token"] == "new-grant"
+    assert stored["user_id"] == "alice@example.com"
+
+
 def test_store_token_preserves_databricks_org_id(token_dir) -> None:
     """Refreshing a login session must retain remembered routing."""
     from omnigent.cli_auth import (
@@ -1032,6 +1079,8 @@ def test_refresh_no_material_does_not_touch_lock_file(token_dir, monkeypatch) ->
     from omnigent.cli_auth import refresh_stored_token, store_token
 
     store_token("http://localhost:6767", token="jwt", user_id="a@x", expires_at=time.time() - 10)
+    # Saving the login takes the lock; only the refresh below is under test.
+    (token_dir / "auth_tokens.lock").unlink(missing_ok=True)
 
     def _boom(*_a, **_kw):
         raise AssertionError("lock file must not be created when nothing to refresh")

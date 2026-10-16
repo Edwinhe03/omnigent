@@ -9107,3 +9107,36 @@ async def test_run_host_process_publishes_identity_before_logging_setup(
         connect.run_host_process("https://example.databricks.com/api/2.0/omnigent")
 
     assert order == ["https://example.databricks.com/api/2.0/omnigent", "logging"]
+
+
+async def test_owner_user_id_store_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stalled owner cache write cannot hold up the connect path frames wait on."""
+    import threading
+
+    from omnigent.host import connect
+
+    release = threading.Event()
+
+    def stalled(server_url: str, user_id: str) -> None:
+        release.wait(timeout=5)
+
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(connect, "_OWNER_PERSIST_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(
+        "omnigent.resume_dispatch._resolve_current_user_id",
+        lambda *, base_url, headers: "alice@example.com",
+    )
+    monkeypatch.setattr("omnigent.cli_auth.store_server_user_id", stalled)
+    host = _host("https://example.databricks.com/api/2.0/omnigent")
+
+    try:
+        await asyncio.wait_for(
+            host._ensure_owner_user_id(headers={"Authorization": "Bearer test"}), timeout=2.0
+        )
+    finally:
+        release.set()
+
+    assert host._owner_user_id == "alice@example.com"
+    assert os.environ[debug_logging.USER_ID_ENV_VAR] == "alice@example.com"
