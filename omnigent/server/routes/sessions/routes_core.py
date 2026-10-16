@@ -929,10 +929,6 @@ def register_core_routes(
                     LEVEL_OWNER,
                 )
             resp.permission_level = grant.level
-        # Push the new session to this user's other open tabs (see the
-        # multipart path above for the rationale).
-        _announce_session_added(user_id, resp.id)
-
         # Managed host: schedule a BACKGROUND sandbox provision bound
         # to this session and return immediately — provisioning takes
         # tens of seconds and must not block the create POST. The
@@ -943,22 +939,32 @@ def register_core_routes(
         # problems and malformed repo workspaces still fail the POST
         # synchronously.
         launch_host_id = body.host_id
-        if body.host_type == "managed" and resp.runner_id is None:
-            await _schedule_managed_launch(
-                request,
-                session_id=resp.id,
-                agent_id=conv.agent_id if conv is not None else None,
-                user_id=user_id,
-                sandbox_provider=body.sandbox_provider,
-                workspaces=body.managed_repo_workspaces(),
-                requested_host_id=body.requested_host_id,
-            )
-            if body.requested_host_id is not None:
-                from omnigent.server.managed_hosts import REQUESTED_HOST_ID_LABEL_KEY
+        try:
+            if body.host_type == "managed" and resp.runner_id is None:
+                await _schedule_managed_launch(
+                    request,
+                    session_id=resp.id,
+                    agent_id=conv.agent_id if conv is not None else None,
+                    user_id=user_id,
+                    sandbox_provider=body.sandbox_provider,
+                    workspaces=body.managed_repo_workspaces(),
+                    requested_host_id=body.requested_host_id,
+                )
+                if body.requested_host_id is not None:
+                    from omnigent.server.managed_hosts import REQUESTED_HOST_ID_LABEL_KEY
 
-                # The row's host_id stays null until the host binds; the caller
-                # routes by this label until then.
-                resp.labels[REQUESTED_HOST_ID_LABEL_KEY] = body.requested_host_id
+                    # The row's host_id stays null until the host binds; the caller
+                    # routes by this label until then.
+                    resp.labels[REQUESTED_HOST_ID_LABEL_KEY] = body.requested_host_id
+        finally:
+            # Push the new session to this user's other open tabs (see the
+            # multipart path above for the rationale) — only once the managed
+            # labels are on the row. A tab that lists the row on this push
+            # routes the session by ``omnigent.sandbox.requested_host_id``
+            # until the host binds, and a row read without the label would
+            # clear that routing. Still pushed when the managed guard fails:
+            # the owned row stays visible either way (see the grant above).
+            _announce_session_added(user_id, resp.id)
 
         # Host launch: if a host is targeted (caller-supplied or
         # managed) and no runner is bound yet, authorize (caller must
@@ -3876,13 +3882,6 @@ def register_core_routes(
         if permission_store is not None and user_id is not None:
             await asyncio.to_thread(permission_store.ensure_user, user_id)
             await asyncio.to_thread(permission_store.grant, user_id, new_conv.id, LEVEL_OWNER)
-        # Push the forked session to this user's other open tabs — but NOT a
-        # side chat: it surfaces only as a Workspace-rail tab, never a sidebar
-        # row, so announcing it would leak it into every open sidebar (the
-        # real-time path bypasses the list-endpoint's side-chat filter).
-        if not body.side_chat:
-            _announce_session_added(user_id, new_conv.id)
-
         from omnigent.server.managed_hosts import read_managed_repo_workspaces
 
         # Managed host: schedule the fork's own BACKGROUND sandbox provision
@@ -3892,21 +3891,32 @@ def register_core_routes(
         # ALL of the repositories the source recorded (read off the SOURCE,
         # since a fork never inherits the labels itself), so cloning a
         # multi-repo sandbox session lands the fork with every repo.
-        if body.host_type == "managed":
-            fork_workspaces = (
-                ([body.workspace] if body.workspace is not None else [])
-                if workspace_set
-                else read_managed_repo_workspaces(source.labels)
-            )
-            await _schedule_managed_launch(
-                request,
-                session_id=new_conv.id,
-                agent_id=new_conv.agent_id,
-                user_id=user_id,
-                sandbox_provider=body.sandbox_provider,
-                workspaces=fork_workspaces,
-                requested_host_id=body.host_id,
-            )
+        try:
+            if body.host_type == "managed":
+                fork_workspaces = (
+                    ([body.workspace] if body.workspace is not None else [])
+                    if workspace_set
+                    else read_managed_repo_workspaces(source.labels)
+                )
+                await _schedule_managed_launch(
+                    request,
+                    session_id=new_conv.id,
+                    agent_id=new_conv.agent_id,
+                    user_id=user_id,
+                    sandbox_provider=body.sandbox_provider,
+                    workspaces=fork_workspaces,
+                    requested_host_id=body.host_id,
+                )
+        finally:
+            # Push the forked session to this user's other open tabs — but NOT a
+            # side chat: it surfaces only as a Workspace-rail tab, never a sidebar
+            # row, so announcing it would leak it into every open sidebar (the
+            # real-time path bypasses the list-endpoint's side-chat filter).
+            # Pushed only once the managed labels are on the row, as on a create:
+            # a tab that lists the fork on this push routes it by
+            # ``omnigent.sandbox.requested_host_id`` until its host binds.
+            if not body.side_chat:
+                _announce_session_added(user_id, new_conv.id)
         # Default-public grant only after the managed launch was accepted (see
         # the create paths). A side chat is a private scratch fork of the
         # caller's own view.

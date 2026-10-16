@@ -377,14 +377,18 @@ def _with_host_slice_key(
     host_config: dict[str, object] | None, enabled: bool, server_url: str
 ) -> dict[str, object] | None:
     """
-    Add the in-sandbox ``host.slice_key_enabled`` setting to *host_config*.
+    Apply the launch's ``host.slice_key_enabled`` decision to *host_config*.
 
     The setting rides ``host_config`` because every launcher already installs
     it before the host starts; a host env var would need each launcher's own
     plumbing. The env var ``OMNIGENT_HOST_SLICE_KEY_ENABLED`` still overrides it.
-    Added only when *enabled* differs from the host's default for
-    *server_url*, so a launch that needs no override keeps passing no
-    ``host_config`` to a launcher whose ``start_host`` predates it.
+    *host_config* is returned as is when the host would already key as
+    *enabled* says, whether by the deployment's explicit
+    ``host.slice_key_enabled`` or, absent one, by its default for
+    *server_url*; so when no override or deployment config is needed,
+    ``host_config`` stays unset for legacy launchers. An explicit deployment
+    value that contradicts the launch is overwritten: the launch decides the
+    host's routing, since the caller already routes by its decision.
 
     :param host_config: The deployment's ``sandbox.host_config``, or ``None``.
     :param enabled: Whether the host keys its traffic by its own id.
@@ -393,10 +397,12 @@ def _with_host_slice_key(
     """
     from omnigent.util.server_url import is_workspace_hosted_url
 
-    if enabled == is_workspace_hosted_url(server_url):
+    existing = host_config.get("host") if host_config else None
+    configured = existing.get("slice_key_enabled") if isinstance(existing, dict) else None
+    current = configured if isinstance(configured, bool) else is_workspace_hosted_url(server_url)
+    if enabled == current:
         return host_config
     merged = dict(host_config or {})
-    existing = merged.get("host")
     host = dict(existing) if isinstance(existing, dict) else {}
     host["slice_key_enabled"] = enabled
     merged["host"] = host

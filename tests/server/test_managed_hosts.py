@@ -4620,24 +4620,55 @@ async def test_launch_defaults_to_first_provider(db_uri: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("server_url", "enabled", "expected"),
+    ("server_url", "host_config", "enabled", "expected"),
     [
-        ("https://srv.example.com", False, None),
-        ("https://srv.example.com", True, {"host": {"slice_key_enabled": True}}),
-        ("https://ws.example.com/api/2.0/omnigent", True, None),
-        ("https://ws.example.com/api/2.0/omnigent", False, {"host": {"slice_key_enabled": False}}),
+        ("https://srv.example.com", None, False, None),
+        ("https://srv.example.com", None, True, {"host": {"slice_key_enabled": True}}),
+        ("https://ws.example.com/api/2.0/omnigent", None, True, None),
+        (
+            "https://ws.example.com/api/2.0/omnigent",
+            None,
+            False,
+            {"host": {"slice_key_enabled": False}},
+        ),
+        # An explicit deployment value that contradicts the launch is overwritten,
+        # whichever way the URL's default points.
+        (
+            "https://ws.example.com/api/2.0/omnigent",
+            {"host": {"slice_key_enabled": False}},
+            True,
+            {"host": {"slice_key_enabled": True}},
+        ),
+        (
+            "https://srv.example.com",
+            {"host": {"slice_key_enabled": True}},
+            False,
+            {"host": {"slice_key_enabled": False}},
+        ),
+        # One that already agrees with the launch is passed through unchanged.
+        (
+            "https://srv.example.com",
+            {"host": {"slice_key_enabled": True}},
+            True,
+            {"host": {"slice_key_enabled": True}},
+        ),
     ],
 )
 def test_host_slice_key_is_injected_only_to_override_the_hosts_default(
-    server_url: str, enabled: bool, expected: dict[str, object] | None
+    server_url: str,
+    host_config: dict[str, object] | None,
+    enabled: bool,
+    expected: dict[str, object] | None,
 ) -> None:
     """
     A host keys by default only on the workspace mount, so a launch adds the
-    setting only to change that, leaving legacy launchers an unchanged call.
+    setting only to change what the host would otherwise do, leaving legacy
+    launchers an unchanged call; an explicit deployment value never wins over
+    the launch's decision.
     """
     from omnigent.server.managed_hosts import _with_host_slice_key
 
-    assert _with_host_slice_key(None, enabled, server_url) == expected
+    assert _with_host_slice_key(host_config, enabled, server_url) == expected
 
 
 def test_host_slice_key_keeps_the_deployments_host_section() -> None:

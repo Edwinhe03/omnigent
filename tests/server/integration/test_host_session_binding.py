@@ -469,6 +469,24 @@ async def test_managed_session_create_end_to_end(
     fake = FakeSandboxLauncher(on_host_start=_start_fake_sandbox_host)
     install_fake_modal_launcher(monkeypatch, fake)
 
+    # A tab that lists the row on the create's ``session_added`` push routes
+    # the session by the requested-host label until the host binds, so the
+    # label must already be on the row when the push goes out: a row read
+    # without it would clear that routing in the tab that created it.
+    from omnigent.server.routes.sessions import routes_core
+
+    labels_when_announced: dict[str, list[dict[str, str]]] = {}
+    real_announce = routes_core._announce_session_added
+
+    def _announce_recording_labels(user_id: str | None, session_id: str) -> None:
+        row = env.conv_store.get_conversation(session_id)
+        labels_when_announced.setdefault(session_id, []).append(
+            dict(row.labels) if row is not None else {}
+        )
+        real_announce(user_id, session_id)
+
+    monkeypatch.setattr(routes_core, "_announce_session_added", _announce_recording_labels)
+
     agent = await create_test_agent(env.client, name="managed-host-agent")
     body: dict[str, object] = {"agent_id": agent["id"], "host_type": "managed"}
     if requested_host_id is not None:
@@ -480,6 +498,10 @@ async def test_managed_session_create_end_to_end(
     assert resp.json()["host_id"] is None
     assert resp.json()["labels"].get("omnigent.sandbox.requested_host_id") == requested_host_id
     session_id = resp.json()["id"]
+    assert [
+        labels.get("omnigent.sandbox.requested_host_id")
+        for labels in labels_when_announced[session_id]
+    ] == [requested_host_id]
 
     # The background launch binds the session row: sandbox host,
     # sandbox workspace, and a token-bound runner.
