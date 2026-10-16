@@ -950,20 +950,12 @@ def register_core_routes(
                     workspaces=body.managed_repo_workspaces(),
                     requested_host_id=body.requested_host_id,
                 )
-                if body.requested_host_id is not None:
-                    from omnigent.server.managed_hosts import REQUESTED_HOST_ID_LABEL_KEY
-
-                    # The row's host_id stays null until the host binds; the caller
-                    # routes by this label until then.
-                    resp.labels[REQUESTED_HOST_ID_LABEL_KEY] = body.requested_host_id
         finally:
             # Push the new session to this user's other open tabs (see the
-            # multipart path above for the rationale) — only once the managed
-            # labels are on the row. A tab that lists the row on this push
-            # routes the session by ``omnigent.sandbox.requested_host_id``
-            # until the host binds, and a row read without the label would
-            # clear that routing. Still pushed when the managed guard fails:
-            # the owned row stays visible either way (see the grant above).
+            # multipart path above for the rationale) once its managed labels
+            # are written, so a tab that lists it on this push sees the row the
+            # create returns. Still pushed when the managed guard fails: the
+            # owned row stays visible either way (see the grant above).
             _announce_session_added(user_id, resp.id)
 
         # Host launch: if a host is targeted (caller-supplied or
@@ -3617,6 +3609,14 @@ def register_core_routes(
             extra_labels[SIDE_CHAT_LABEL_KEY] = "1"
             extra_labels[SIDE_CHAT_SOURCE_LABEL_KEY] = source_id
 
+        # A managed fork's chosen sandbox host id is born with the row, as on a
+        # create: the caller routes the fork by it until its host binds, so no
+        # read of the row may miss it. The source's own id was dropped above.
+        if body.host_type == "managed" and body.host_id is not None:
+            from omnigent.server.managed_hosts import REQUESTED_HOST_ID_LABEL_KEY
+
+            extra_labels[REQUESTED_HOST_ID_LABEL_KEY] = body.host_id
+
         # When the fork binds a NATIVE target, the native CLI won't replay
         # the copied Omnigent transcript on its own — mark the fork so the
         # runner carries history into the native harness. Same-family: clone
@@ -3912,9 +3912,7 @@ def register_core_routes(
             # side chat: it surfaces only as a Workspace-rail tab, never a sidebar
             # row, so announcing it would leak it into every open sidebar (the
             # real-time path bypasses the list-endpoint's side-chat filter).
-            # Pushed only once the managed labels are on the row, as on a create:
-            # a tab that lists the fork on this push routes it by
-            # ``omnigent.sandbox.requested_host_id`` until its host binds.
+            # Pushed once its managed labels are written, as on a create.
             if not body.side_chat:
                 _announce_session_added(user_id, new_conv.id)
         # Default-public grant only after the managed launch was accepted (see
@@ -3942,7 +3940,7 @@ def register_core_routes(
             order="desc",
         )
         level = await _get_permission_level(user_id, new_conv.id, permission_store)
-        resp = _build_session_response(
+        return _build_session_response(
             new_conv,
             list(reversed(fork_items.data)),
             "idle",
@@ -3950,12 +3948,6 @@ def register_core_routes(
             last_task_error=None,
             agent_name=base_agent.name,
         )
-        if body.host_id is not None:
-            from omnigent.server.managed_hosts import REQUESTED_HOST_ID_LABEL_KEY
-
-            # new_conv predates the launch's label write; see the create path.
-            resp.labels[REQUESTED_HOST_ID_LABEL_KEY] = body.host_id
-        return resp
 
     # ── POST /sessions/{session_id}/switch-agent (reserved) ──────
     # Placeholder: in-place agent switching was retired and will return with a

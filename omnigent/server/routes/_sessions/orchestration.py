@@ -147,6 +147,7 @@ from omnigent.server.creation_logging import creation_metadata, creation_stage, 
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
 from omnigent.server.managed_hosts import (
     MANAGED_REPO_LABEL_KEY,
+    REQUESTED_HOST_ID_LABEL_KEY,
     ManagedHostLaunch,
     ManagedLaunchTracker,
     ManagedSandboxDeployment,
@@ -11071,6 +11072,11 @@ async def _create_session_from_existing_agent(
         from omnigent.runner.subagent_routing import AUTO_HARNESS_LABEL_KEY
 
         initial_labels[AUTO_HARNESS_LABEL_KEY] = "1"
+    # A managed create's chosen sandbox host id is born with the row: the caller
+    # routes the session by it until the host binds, and a sidebar list read
+    # racing the create must never return the row without it.
+    if body.host_type == "managed" and body.requested_host_id is not None:
+        initial_labels[REQUESTED_HOST_ID_LABEL_KEY] = body.requested_host_id
 
     snapshot_kwargs: dict[str, Any] = (
         {"inference_snapshot": inference_snapshot} if inference_snapshot is not None else {}

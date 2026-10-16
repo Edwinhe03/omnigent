@@ -486,6 +486,18 @@ async def test_managed_session_create_end_to_end(
         real_announce(user_id, session_id)
 
     monkeypatch.setattr(routes_core, "_announce_session_added", _announce_recording_labels)
+    # Stronger still, the label is born with the row: a sidebar list read that is
+    # already in flight when the create runs can't return the row without it.
+    real_create = env.conv_store.create_conversation
+    labels_at_insert: dict[str, dict[str, str]] = {}
+
+    def _create_recording_labels(*args: object, **kwargs: object) -> Conversation:
+        created = real_create(*args, **kwargs)  # type: ignore[arg-type]
+        labels = kwargs.get("labels")
+        labels_at_insert[created.id] = dict(labels) if isinstance(labels, dict) else {}
+        return created
+
+    monkeypatch.setattr(env.conv_store, "create_conversation", _create_recording_labels)
 
     agent = await create_test_agent(env.client, name="managed-host-agent")
     body: dict[str, object] = {"agent_id": agent["id"], "host_type": "managed"}
@@ -498,6 +510,9 @@ async def test_managed_session_create_end_to_end(
     assert resp.json()["host_id"] is None
     assert resp.json()["labels"].get("omnigent.sandbox.requested_host_id") == requested_host_id
     session_id = resp.json()["id"]
+    assert labels_at_insert[session_id].get("omnigent.sandbox.requested_host_id") == (
+        requested_host_id
+    )
     assert [
         labels.get("omnigent.sandbox.requested_host_id")
         for labels in labels_when_announced[session_id]
