@@ -478,14 +478,13 @@ def _isolate_origin_identity(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep debug-log origin attribution from reaching the network or leaking env.
+    """Keep debug-log workspace attribution off the network and out of later tests.
 
-    Host startup and CLI server resolution publish the workspace id and user to
-    the process env, probing a workspace-hosted server once when nothing records
-    the workspace id. Unstubbed, that probe would consume a response a test
-    scripted into a patched ``httpx.get`` (or hit the real host), and the
-    published env would carry into later tests. The probe's own tests request
-    ``origin_identity_probe``.
+    Host startup and CLI server resolution probe a workspace-hosted server once
+    when nothing records its workspace id. Unstubbed, that probe would consume a
+    response a test scripted into a patched ``httpx.get`` (or hit the real host),
+    and the published env would carry into later tests. The probe's own tests
+    request ``origin_identity_probe``.
 
     :param request: Pytest request, inspected for the opt-in fixture.
     :param monkeypatch: Pytest monkeypatch fixture; restores the env and probe
@@ -495,7 +494,6 @@ def _isolate_origin_identity(
     from omnigent import debug_logging
 
     monkeypatch.delenv(debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR, raising=False)
-    monkeypatch.delenv(debug_logging.USER_ID_ENV_VAR, raising=False)
     monkeypatch.setattr(debug_logging, "_probed_workspace_ids", {})
     if "origin_identity_probe" in request.fixturenames:
         return

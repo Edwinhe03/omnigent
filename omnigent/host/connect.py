@@ -444,8 +444,6 @@ def _connection_refused(exc: BaseException) -> bool:
     return bool(errnos) and all(int(n) == errno.ECONNREFUSED for n in errnos)
 
 
-# Longest the first connect waits on caching the resolved owner for later processes.
-_OWNER_PERSIST_TIMEOUT_S = 1.0
 _RECONNECT_BASE_S = 0.5
 _RECONNECT_CAP_S = 3.0
 _RECONNECT_JITTER = 0.5
@@ -1972,12 +1970,9 @@ class HostProcess:
             env[PRIMARY_SESSION_ID_ENV_VAR] = frame.session_id
         # The runner is 1:1 with this host's owner (cross-owner co-location is
         # rejected server-side), so hand it our resolved owner for user_id
-        # attribution of runner-level log records. Until the live lookup
-        # succeeds, the owner published at startup from the stored record
-        # stands in, as it already does for the host's own rows.
-        owner_user_id = self._owner_user_id or os.environ.get(USER_ID_ENV_VAR)
-        if owner_user_id:
-            env[USER_ID_ENV_VAR] = owner_user_id
+        # attribution of runner-level log records.
+        if self._owner_user_id:
+            env[USER_ID_ENV_VAR] = self._owner_user_id
         # The workspace id is resolved from the same server URL the runner dials,
         # so hand it the already-resolved value rather than making it re-derive.
         if self._origin_workspace_id:
@@ -4582,17 +4577,6 @@ class HostProcess:
         if owner:
             self._owner_user_id = owner
             os.environ[USER_ID_ENV_VAR] = owner
-            # Stored so the next host/CLI process attributes its pre-connect rows.
-            # Bounded: frames wait on this lookup, and the token-file lock can be
-            # held through another process's refresh exchange. A slow write
-            # still finishes on its worker thread.
-            from omnigent.cli_auth import store_server_user_id
-
-            with contextlib.suppress(OSError, TimeoutError):
-                await asyncio.wait_for(
-                    asyncio.to_thread(store_server_user_id, self._server_url, owner),
-                    timeout=_OWNER_PERSIST_TIMEOUT_S,
-                )
 
     def _build_connect_headers(self) -> dict[str, str]:
         """Build the WebSocket upgrade headers for the tunnel connection.

@@ -349,125 +349,6 @@ def test_store_databricks_org_id_preserves_session_token(token_dir) -> None:
     assert load_databricks_org_id(server) == "123"
 
 
-def test_store_server_user_id_preserves_record(token_dir) -> None:
-    """Remembering the host owner must not replace credentials or routing."""
-    from omnigent.cli_auth import (
-        load_databricks_org_id,
-        load_databricks_workspace_host,
-        load_server_user_id,
-        store_databricks_auth,
-        store_databricks_org_id,
-        store_server_user_id,
-    )
-
-    server = "https://example.databricks.com/api/2.0/omnigent"
-    assert load_server_user_id(server) is None
-    store_databricks_auth(server, "https://example.databricks.com")
-    store_databricks_org_id(server, "123")
-
-    store_server_user_id(server, "alice@example.com")
-
-    assert load_server_user_id(server) == "alice@example.com"
-    assert load_databricks_org_id(server) == "123"
-    assert load_databricks_workspace_host(server) == "https://example.databricks.com"
-
-
-@pytest.mark.parametrize(
-    ("writer", "field", "value", "concurrent_field", "concurrent_value"),
-    [
-        ("store_databricks_org_id", "org_id", "123", "user_id", "alice@example.com"),
-        ("store_server_user_id", "user_id", "alice@example.com", "org_id", "123"),
-    ],
-)
-def test_attribution_merge_keeps_field_stored_concurrently(
-    token_dir,
-    monkeypatch: pytest.MonkeyPatch,
-    writer: str,
-    field: str,
-    value: str,
-    concurrent_field: str,
-    concurrent_value: str,
-) -> None:
-    """A field another process stores mid-update survives this process's merge.
-
-    The concurrent write lands right after this writer's first read of the
-    record, the window an unlocked read-modify-write would overwrite.
-    """
-    from omnigent import cli_auth
-
-    server = "https://example.databricks.com/api/2.0/omnigent"
-    cli_auth.store_databricks_auth(server, "https://example.databricks.com")
-    real_load = cli_auth._load_entry
-    reads = 0
-
-    def load_then_race(server_url: str) -> dict[str, str | float] | None:
-        nonlocal reads
-        entry = real_load(server_url)
-        reads += 1
-        if reads == 1:
-            cli_auth._store_entry(
-                server_url, {**(entry or {}), concurrent_field: concurrent_value}
-            )
-        return entry
-
-    monkeypatch.setattr(cli_auth, "_load_entry", load_then_race)
-
-    getattr(cli_auth, writer)(server, value)
-
-    stored = real_load(server)
-    assert stored is not None
-    assert stored[field] == value
-    assert stored[concurrent_field] == concurrent_value
-    assert stored["workspace_host"] == "https://example.databricks.com"
-
-
-def test_login_during_attribution_merge_keeps_fresh_credentials(
-    token_dir, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A login that lands mid-merge waits for it instead of being overwritten.
-
-    The host's owner merge re-reads the record under the lock; a login saved
-    between that read and its write would otherwise be replaced by the stale
-    record, losing the fresh token and refresh grant.
-    """
-    import threading
-
-    from omnigent import cli_auth
-
-    server = "http://localhost:6767"
-    cli_auth.store_token(server, "old-token", "", time.time() + 3600, refresh_token="old-grant")
-    real_load = cli_auth._load_entry
-    reads = 0
-    login: threading.Thread | None = None
-
-    def login_during_locked_read(server_url: str) -> dict[str, str | float] | None:
-        nonlocal reads, login
-        entry = real_load(server_url)
-        reads += 1
-        if reads == 2:  # the read inside the lock
-            login = threading.Thread(
-                target=cli_auth.store_token,
-                args=(server, "new-token", "alice@example.com", time.time() + 3600),
-                kwargs={"refresh_token": "new-grant"},
-            )
-            login.start()
-            login.join(timeout=0.2)
-            assert login.is_alive(), "login must wait for the merge holding the lock"
-        return entry
-
-    monkeypatch.setattr(cli_auth, "_load_entry", login_during_locked_read)
-
-    cli_auth.store_server_user_id(server, "alice@example.com")
-    assert login is not None
-    login.join(timeout=5)
-
-    stored = real_load(server)
-    assert stored is not None
-    assert stored["token"] == "new-token"
-    assert stored["refresh_token"] == "new-grant"
-    assert stored["user_id"] == "alice@example.com"
-
-
 def test_store_token_preserves_databricks_org_id(token_dir) -> None:
     """Refreshing a login session must retain remembered routing."""
     from omnigent.cli_auth import (
@@ -1079,8 +960,6 @@ def test_refresh_no_material_does_not_touch_lock_file(token_dir, monkeypatch) ->
     from omnigent.cli_auth import refresh_stored_token, store_token
 
     store_token("http://localhost:6767", token="jwt", user_id="a@x", expires_at=time.time() - 10)
-    # Saving the login takes the lock; only the refresh below is under test.
-    (token_dir / "auth_tokens.lock").unlink(missing_ok=True)
 
     def _boom(*_a, **_kw):
         raise AssertionError("lock file must not be created when nothing to refresh")

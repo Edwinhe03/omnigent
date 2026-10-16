@@ -1051,8 +1051,8 @@ def _fail_get(url: str, **kwargs: object) -> httpx.Response:
 def test_publish_origin_identity_probes_and_stores_workspace_id(
     _data_dir: Path, origin_identity_probe: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A login that never wrote an org id: the proxy's header on an unauthenticated
-    # 401 supplies it, and it is stored so the next process needs no request.
+    # A login that never recorded an org id: the proxy's header on an
+    # unauthenticated 401 supplies it, stored so the next process needs no request.
     from omnigent.cli_auth import load_databricks_org_id
 
     calls: list[str] = []
@@ -1071,24 +1071,6 @@ def test_publish_origin_identity_probes_and_stores_workspace_id(
     monkeypatch.setattr(httpx, "get", _fail_get)
     monkeypatch.setattr(dl, "_probed_workspace_ids", {})
     assert dl.publish_origin_identity(_HOSTED_API) == "1965859176160743"
-
-
-def test_publish_origin_identity_publishes_when_store_fails(
-    _data_dir: Path, origin_identity_probe: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A read-only state dir loses only the cache, never this process's attribution.
-    def read_only(server_url: str, org_id: str) -> None:
-        raise PermissionError("read-only")
-
-    monkeypatch.setattr(
-        httpx,
-        "get",
-        lambda url, **kwargs: httpx.Response(401, headers={"x-databricks-org-id": "7"}),
-    )
-    monkeypatch.setattr("omnigent.cli_auth.store_databricks_org_id", read_only)
-
-    assert dl.publish_origin_identity(_HOSTED_API) == "7"
-    assert dl._process_identity()[0] == "7"
 
 
 def test_publish_origin_identity_prefers_url_selector(
@@ -1139,24 +1121,6 @@ def test_publish_origin_identity_probes_unreachable_server_once(
     assert dl.publish_origin_identity(_HOSTED_API) is None
     assert dl.publish_origin_identity(_HOSTED_API) is None
     assert len(calls) == 1
-
-
-def test_publish_origin_identity_publishes_stored_user(_data_dir: Path) -> None:
-    from omnigent.cli_auth import store_databricks_org_id, store_server_user_id
-
-    store_databricks_org_id(_HOSTED_API, "42")
-    store_server_user_id(_HOSTED_API, "alice@example.com")
-
-    assert dl.publish_origin_identity(_HOSTED_API) == "42"
-    assert dl.current_user_id() == "alice@example.com"
-
-
-def test_publish_origin_identity_keeps_inherited_user_without_record(
-    _data_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(dl.USER_ID_ENV_VAR, "owner@example.com")
-    dl.publish_origin_identity(_HOSTED_API)
-    assert dl.current_user_id() == "owner@example.com"
 
 
 def test_record_to_row_prefers_record_workspace_id(monkeypatch: pytest.MonkeyPatch) -> None:

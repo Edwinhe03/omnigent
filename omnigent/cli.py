@@ -3737,14 +3737,7 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
             )
         refreshed_probe = _verify_databricks_server_token(server, auth_info.token, org_id)
         if refreshed_probe.status_code == 200:
-            # The verified caller replaces any stored user: the recovered
-            # credential may belong to a different account.
-            user_id: str | None = None
-            with contextlib.suppress(ValueError):
-                payload = refreshed_probe.json()
-                raw_user = payload.get("user_id") if isinstance(payload, dict) else None
-                user_id = raw_user if isinstance(raw_user, str) else None
-            store_databricks_auth(server, workspace_host, user_id=user_id, org_id=org_id)
+            store_databricks_auth(server, workspace_host, org_id=org_id)
             return
     # User-facing: show the display form (the workspace /omnigent URL, with
     # ?o= when known), not the internal API mount; it round-trips through

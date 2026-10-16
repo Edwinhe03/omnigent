@@ -824,58 +824,6 @@ def _cleanup_host(host: HostProcess) -> None:
         task.cancel()
 
 
-@pytest.mark.parametrize(
-    ("live_owner", "published_owner", "expected"),
-    [
-        (None, "cached@example.com", "cached@example.com"),
-        ("live@example.com", "cached@example.com", "live@example.com"),
-        (None, None, None),
-    ],
-)
-async def test_handle_launch_attributes_runner_to_owner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    live_owner: str | None,
-    published_owner: str | None,
-    expected: str | None,
-) -> None:
-    """Runner rows carry the live owner, else the one published from the stored record.
-
-    The startup-published owner covers runners launched before (or without) a
-    successful ``GET /v1/me``, matching the host's own rows.
-    """
-    if published_owner is not None:
-        monkeypatch.setenv(debug_logging.USER_ID_ENV_VAR, published_owner)
-    host = _make_host_process()
-    host._owner_user_id = live_owner
-    host._auth_token_factory = lambda: "host-bootstrap-bearer"
-    host._auth_token_factory_resolved = True
-    workspace = tmp_path / "project"
-    workspace.mkdir()
-    frame = HostLaunchRunnerFrame(
-        request_id="req_owner",
-        binding_token="test_token_owner",
-        workspace=str(workspace),
-    )
-    spawned_env: dict[str, str] = {}
-    original_popen = subprocess.Popen
-
-    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
-        spawned_env.update(kwargs.get("env", {}))
-        return original_popen(
-            ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-
-    try:
-        with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
-            result = await host._handle_launch(frame)
-        assert isinstance(result, HostLaunchRunnerResultFrame)
-        assert result.status == "launched", result.error
-        assert spawned_env.get(debug_logging.USER_ID_ENV_VAR) == expected
-    finally:
-        _cleanup_host(host)
-
-
 async def test_handle_launch_spawns_subprocess(
     tmp_path: Path,
 ) -> None:
@@ -9023,120 +8971,17 @@ def test_run_host_process_classifies_how_the_host_ended(
     assert _host_exit_reasons(caplog) == [expected]
 
 
-async def test_owner_user_id_is_stored_for_next_startup(
+async def test_host_publishes_stored_workspace_at_startup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The resolved owner is recorded so the next host attributes pre-connect rows."""
-    from omnigent.cli_auth import load_server_user_id
-
-    server_url = "https://example.databricks.com/api/2.0/omnigent"
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(
-        "omnigent.resume_dispatch._resolve_current_user_id",
-        lambda *, base_url, headers: "alice@example.com",
-    )
-    host = _host(server_url)
-
-    await host._ensure_owner_user_id(headers={"Authorization": "Bearer test"})
-
-    assert load_server_user_id(server_url) == "alice@example.com"
-    assert os.environ[debug_logging.USER_ID_ENV_VAR] == "alice@example.com"
-
-
-async def test_host_publishes_stored_identity_at_startup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A host starts attributed from the stored record, before it ever connects."""
-    from omnigent.cli_auth import store_databricks_org_id, store_server_user_id
+    """A host's rows carry the recorded workspace id before it ever connects."""
+    from omnigent.cli_auth import store_databricks_org_id
 
     server_url = "https://example.databricks.com/api/2.0/omnigent"
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     store_databricks_org_id(server_url, "1965859176160743")
-    store_server_user_id(server_url, "alice@example.com")
 
     host = _host(server_url)
 
     assert host._origin_workspace_id == "1965859176160743"
     assert os.environ[debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR] == "1965859176160743"
-    assert os.environ[debug_logging.USER_ID_ENV_VAR] == "alice@example.com"
-
-
-async def test_owner_user_id_store_failure_keeps_live_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A cache write failure never disrupts the host or its live attribution."""
-
-    def read_only(server_url: str, user_id: str) -> None:
-        raise PermissionError("read-only")
-
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(
-        "omnigent.resume_dispatch._resolve_current_user_id",
-        lambda *, base_url, headers: "alice@example.com",
-    )
-    monkeypatch.setattr("omnigent.cli_auth.store_server_user_id", read_only)
-    host = _host("https://example.databricks.com/api/2.0/omnigent")
-
-    await host._ensure_owner_user_id(headers={"Authorization": "Bearer test"})
-
-    assert host._owner_user_id == "alice@example.com"
-    assert os.environ[debug_logging.USER_ID_ENV_VAR] == "alice@example.com"
-
-
-async def test_run_host_process_publishes_identity_before_logging_setup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Identity is in the env before the host configures logging or does any work."""
-    from omnigent.host import connect
-
-    order: list[str] = []
-
-    class _StopAfterLogging(Exception):
-        pass
-
-    def configure_logging(*args: object, **kwargs: object) -> None:
-        order.append("logging")
-        raise _StopAfterLogging
-
-    monkeypatch.setattr(
-        connect, "publish_origin_identity", lambda server_url: order.append(server_url)
-    )
-    monkeypatch.setattr(connect, "configure_process_logging", configure_logging)
-
-    with pytest.raises(_StopAfterLogging):
-        connect.run_host_process("https://example.databricks.com/api/2.0/omnigent")
-
-    assert order == ["https://example.databricks.com/api/2.0/omnigent", "logging"]
-
-
-async def test_owner_user_id_store_is_bounded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A stalled owner cache write cannot hold up the connect path frames wait on."""
-    import threading
-
-    from omnigent.host import connect
-
-    release = threading.Event()
-
-    def stalled(server_url: str, user_id: str) -> None:
-        release.wait(timeout=5)
-
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(connect, "_OWNER_PERSIST_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(
-        "omnigent.resume_dispatch._resolve_current_user_id",
-        lambda *, base_url, headers: "alice@example.com",
-    )
-    monkeypatch.setattr("omnigent.cli_auth.store_server_user_id", stalled)
-    host = _host("https://example.databricks.com/api/2.0/omnigent")
-
-    try:
-        await asyncio.wait_for(
-            host._ensure_owner_user_id(headers={"Authorization": "Bearer test"}), timeout=2.0
-        )
-    finally:
-        release.set()
-
-    assert host._owner_user_id == "alice@example.com"
-    assert os.environ[debug_logging.USER_ID_ENV_VAR] == "alice@example.com"
