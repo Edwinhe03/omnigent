@@ -149,6 +149,10 @@ def test_display_round_trips_through_login_resolution(monkeypatch) -> None:
 
     assert resolved.api_base == _WORKSPACE_API
     assert resolved.org_id == "123"
+    # Every CLI resolution also attributes the CLI's own debug-log rows.
+    from omnigent import debug_logging
+
+    assert debug_logging._process_identity()[0] == "123"
 
 
 @pytest.mark.parametrize(
@@ -217,29 +221,3 @@ def test_is_workspace_hosted_url(url: str, expected: bool) -> None:
     non-Databricks targets keep showing their version.
     """
     assert is_workspace_hosted_url(url) is expected
-
-
-def test_resolve_server_url_publishes_debug_log_workspace(monkeypatch) -> None:
-    """Every CLI server resolution attributes the CLI's own debug-log rows."""
-    import httpx
-
-    import omnigent.cli as cli_mod
-    from omnigent import debug_logging
-
-    def fake_get(url: str, **kwargs: object) -> httpx.Response:
-        request = httpx.Request("GET", url)
-        if url == "https://ws.databricks.com/v1/me":
-            return httpx.Response(404, headers={"server": "databricks"}, request=request)
-        if url == f"{_WORKSPACE_API}/v1/me":
-            return httpx.Response(
-                401,
-                headers={"www-authenticate": 'Bearer realm="DatabricksRealm"'},
-                request=request,
-            )
-        raise AssertionError(f"unexpected probe {url}")
-
-    monkeypatch.setattr("httpx.get", fake_get)
-
-    cli_mod._resolve_server_url("https://ws.databricks.com/omnigent?o=123")
-
-    assert debug_logging._process_identity()[0] == "123"

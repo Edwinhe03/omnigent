@@ -1970,9 +1970,12 @@ class HostProcess:
             env[PRIMARY_SESSION_ID_ENV_VAR] = frame.session_id
         # The runner is 1:1 with this host's owner (cross-owner co-location is
         # rejected server-side), so hand it our resolved owner for user_id
-        # attribution of runner-level log records.
-        if self._owner_user_id:
-            env[USER_ID_ENV_VAR] = self._owner_user_id
+        # attribution of runner-level log records. Until the live lookup
+        # succeeds, the owner published at startup from the stored record
+        # stands in, as it already does for the host's own rows.
+        owner_user_id = self._owner_user_id or os.environ.get(USER_ID_ENV_VAR)
+        if owner_user_id:
+            env[USER_ID_ENV_VAR] = owner_user_id
         # The workspace id is resolved from the same server URL the runner dials,
         # so hand it the already-resolved value rather than making it re-derive.
         if self._origin_workspace_id:

@@ -824,6 +824,58 @@ def _cleanup_host(host: HostProcess) -> None:
         task.cancel()
 
 
+@pytest.mark.parametrize(
+    ("live_owner", "published_owner", "expected"),
+    [
+        (None, "cached@example.com", "cached@example.com"),
+        ("live@example.com", "cached@example.com", "live@example.com"),
+        (None, None, None),
+    ],
+)
+async def test_handle_launch_attributes_runner_to_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    live_owner: str | None,
+    published_owner: str | None,
+    expected: str | None,
+) -> None:
+    """Runner rows carry the live owner, else the one published from the stored record.
+
+    The startup-published owner covers runners launched before (or without) a
+    successful ``GET /v1/me``, matching the host's own rows.
+    """
+    if published_owner is not None:
+        monkeypatch.setenv(debug_logging.USER_ID_ENV_VAR, published_owner)
+    host = _make_host_process()
+    host._owner_user_id = live_owner
+    host._auth_token_factory = lambda: "host-bootstrap-bearer"
+    host._auth_token_factory_resolved = True
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    frame = HostLaunchRunnerFrame(
+        request_id="req_owner",
+        binding_token="test_token_owner",
+        workspace=str(workspace),
+    )
+    spawned_env: dict[str, str] = {}
+    original_popen = subprocess.Popen
+
+    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        spawned_env.update(kwargs.get("env", {}))
+        return original_popen(
+            ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+    try:
+        with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+            result = await host._handle_launch(frame)
+        assert isinstance(result, HostLaunchRunnerResultFrame)
+        assert result.status == "launched", result.error
+        assert spawned_env.get(debug_logging.USER_ID_ENV_VAR) == expected
+    finally:
+        _cleanup_host(host)
+
+
 async def test_handle_launch_spawns_subprocess(
     tmp_path: Path,
 ) -> None:

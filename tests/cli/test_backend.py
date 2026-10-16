@@ -3144,15 +3144,35 @@ def test_ensure_backend_databricks_preflight_skips_when_authenticated(
     assert result == "https://myapp-1234.aws.databricksapps.com"
 
 
+@pytest.mark.parametrize(
+    ("verified_body", "stored_user"),
+    [
+        (b'{"user_id": "bob@example.com"}', "bob@example.com"),
+        (b"", None),
+        (b"null", None),
+    ],
+)
 def test_databricks_preflight_silent_sdk_refresh_skips_login(
     monkeypatch: pytest.MonkeyPatch,
+    verified_body: bytes,
+    stored_user: str | None,
 ) -> None:
-    """A fresh SDK token recovers an expired Databricks Apps session silently."""
+    """A fresh SDK token recovers an expired Databricks Apps session silently.
+
+    The rewritten record keeps the user the server just verified (it also caches
+    the owner for debug-log attribution), and an unusable body only leaves the
+    user unset.
+    """
     import httpx
 
-    responses = iter([_databricks_probe_response(302), _databricks_probe_response(200)])
+    verified = httpx.Response(
+        200,
+        content=verified_body,
+        request=httpx.Request("GET", "https://myapp-1234.aws.databricksapps.com/v1/me"),
+    )
+    responses = iter([_databricks_probe_response(302), verified])
     requests: list[dict[str, object]] = []
-    stored: list[tuple[str, str, str | None]] = []
+    stored: list[tuple[str, str, str | None, str | None]] = []
     monkeypatch.setattr(
         "omnigent.chat._remote_headers",
         lambda server_url=None, *, host_id=None: {"Authorization": "Bearer expired"},
@@ -3177,7 +3197,7 @@ def test_databricks_preflight_silent_sdk_refresh_skips_login(
         user_id: str | None = None,
         org_id: str | None = None,
     ) -> None:
-        stored.append((server, workspace, org_id))
+        stored.append((server, workspace, org_id, user_id))
 
     monkeypatch.setattr("omnigent.cli_auth.store_databricks_auth", _store)
 
@@ -3185,7 +3205,9 @@ def test_databricks_preflight_silent_sdk_refresh_skips_login(
 
     assert requests[1]["headers"] == {"Authorization": "Bearer fresh-token"}
     assert requests[1]["params"] == {"o": "123"}
-    assert stored == [(_HOST_DATABRICKS_SERVER, "https://example.databricks.com", "123")]
+    assert stored == [
+        (_HOST_DATABRICKS_SERVER, "https://example.databricks.com", "123", stored_user)
+    ]
 
 
 def test_databricks_preflight_uses_cli_workspace_id_for_workspace_mount(
@@ -3255,60 +3277,6 @@ def test_databricks_preflight_uses_cli_workspace_id_for_workspace_mount(
     assert requests[1]["headers"] == {"Authorization": "Bearer fresh-token"}
     assert requests[1]["params"] == {"o": "1965859176160743"}
     assert stored == [(server, "https://example.databricks.com", "1965859176160743")]
-
-
-def test_databricks_preflight_recovery_stores_verified_user(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Silent auth recovery records the user the server just verified.
-
-    The record also caches the owner for pre-connect debug-log attribution, so
-    rewriting it must neither drop the user nor keep one from another account.
-    """
-    import httpx
-
-    server = "https://example.databricks.com/api/2.0/omnigent"
-    stored: list[str | None] = []
-    monkeypatch.setattr(
-        "omnigent.chat._remote_headers",
-        lambda server_url=None, *, host_id=None: {},
-    )
-    monkeypatch.setattr("omnigent.cli_auth.load_databricks_org_id", lambda server: "123")
-    monkeypatch.setattr(
-        cli,
-        "_databricks_workspace_auth_info",
-        lambda workspace: cli._DatabricksWorkspaceAuthInfo(token="fresh-token", profile_name=None),
-    )
-    monkeypatch.setattr(cli, "_databricks_login", lambda *args, **kwargs: pytest.fail("login"))
-    probes = iter(
-        [
-            httpx.Response(
-                401,
-                headers={"www-authenticate": 'Bearer realm="DatabricksRealm"'},
-                request=httpx.Request("GET", f"{server}/v1/me"),
-            ),
-            httpx.Response(
-                200,
-                content=json.dumps({"user_id": "bob@example.com"}).encode(),
-                request=httpx.Request("GET", f"{server}/v1/me"),
-            ),
-        ]
-    )
-    monkeypatch.setattr(httpx, "get", lambda url, **kwargs: next(probes))
-
-    def _store(
-        server: str,
-        workspace: str,
-        user_id: str | None = None,
-        org_id: str | None = None,
-    ) -> None:
-        stored.append(user_id)
-
-    monkeypatch.setattr("omnigent.cli_auth.store_databricks_auth", _store)
-
-    cli._ensure_databricks_server_auth(server, non_interactive=True)
-
-    assert stored == ["bob@example.com"]
 
 
 def test_databricks_preflight_refresh_handles_duplicate_workspace_profiles(

@@ -3741,7 +3741,8 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
             # credential may belong to a different account.
             user_id: str | None = None
             with contextlib.suppress(ValueError):
-                raw_user = refreshed_probe.json().get("user_id")
+                payload = refreshed_probe.json()
+                raw_user = payload.get("user_id") if isinstance(payload, dict) else None
                 user_id = raw_user if isinstance(raw_user, str) else None
             store_databricks_auth(server, workspace_host, user_id=user_id, org_id=org_id)
             return
