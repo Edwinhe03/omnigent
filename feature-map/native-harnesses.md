@@ -132,6 +132,18 @@ the extra fields. Resolver and raw-tunnel checks:
 `tests/host/test_harness_startup.py`,
 `tests/server/integration/test_host_tunnel_route.py::test_startup_http_through_real_tunnel`.
 
+**Native agy gateways (own environment):** `omni setup` → Antigravity →
+Configure native agy API key / gateway → Add a credential offers a native Gemini
+URL/key or a local Databricks profile. The gateway must speak native Gemini;
+OpenAI Responses and Chat Completions endpoints are not supported.
+`tests/e2e_ui/shells/test_antigravity_gateway_setup.py` owns fresh daemon/host
+processes and a fake Gemini upstream. With agy and tmux installed, run
+`OMNIGENT_E2E_ANTIGRAVITY=mock uv run pytest tests/e2e_ui/shells/test_antigravity_gateway_setup.py --ui-skip-build`.
+The journeys check setup, streaming, a file tool, and browser repair guidance
+when saved credentials become invalid after host connection. They do not prove
+compatibility with a live external gateway. See [the gateway guide](../docs/native-agy-gateways.md)
+for live setup, tool, and resume smoke steps.
+
 Cross-harness journeys:
 
 - **Antigravity permission choices (Chat and Inbox):**
@@ -191,6 +203,7 @@ Cross-harness journeys:
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_clamps_unsupported_effort`,
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_preserves_supported_effort`,
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_model_switch_clamps_inherited_effort`,
+  `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_model_pick_recreates_closed_terminal`,
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_combined_model_and_reset_uses_target_default`,
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_effort_reset_survives_next_turn`.
   These own their environment: run with plain `uv run pytest`. They drive a
@@ -248,9 +261,17 @@ Cross-harness journeys:
   An older server resets the previous model first, even with an updated runner;
   its default is then inherited if the target supports it. On older servers,
   switch models first and select Default as a separate action afterward.
-  While a connected runner is still starting Codex and has no loaded bridge,
-  live settings return a retryable 503 and retain the previous selection.
-  Retry once the terminal is ready; fully offline and silent saves remain deferred.
+  On a connected runner, live settings recreate an idle-reaped Codex pane and
+  wait up to 15 seconds for startup to publish its bridge. An unloaded saved
+  thread is resumed once before retrying a rejected update. Overlapping picks
+  retain their apply order, including while recovery is in progress
+  (`tests/server/integration/test_codex_model_change_after_idle_reap.py`).
+  A refused connection to an owned backend whose process has exited replaces
+  that exact launch once within the same readiness budget, then confirms the
+  settings RPC. A replacement backend, live process, authentication refusal,
+  or failure after sending settings is not replayed.
+  Failed startup or resume returns a retryable 503 and retains the previous
+  selection; fully offline and silent saves remain deferred.
   An older server keeps such a refused change, so the updated runner applies it
   on the next turn; an older runner keeps it itself, so the updated server keeps
   it too. A hung connect fails after five seconds; a hung update is unconfirmed,
