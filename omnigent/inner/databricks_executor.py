@@ -886,9 +886,16 @@ class _ReusedDatabricksTokenSource:
         self._server_url = server_url
         self._host = host
         self._auth: _DatabricksBearerAuth | None = None
+        self._last_failure: str | None = None
 
     def _resolve(self) -> _DatabricksBearerAuth | None:
-        """Resolve fresh SDK auth, returning ``None`` on credential failure."""
+        """Resolve fresh SDK auth, returning ``None`` on credential failure.
+
+        Callers proceed unauthenticated on ``None``, so the failure is logged
+        here: it is otherwise the only record of why a request carried no
+        bearer. Logged once per distinct cause, since a failing source is
+        re-resolved on every mint.
+        """
         try:
             if self._host is not None:
                 return _resolve_databricks_auth(host=self._host)[0]
@@ -900,7 +907,11 @@ class _ReusedDatabricksTokenSource:
             if workspace_host is not None:
                 return _resolve_databricks_auth(host=workspace_host)[0]
             return _resolve_databricks_auth()[0]
-        except (DatabricksAuthError, ImportError, ValueError):
+        except (DatabricksAuthError, ImportError, ValueError) as exc:
+            failure = f"{type(exc).__name__}: {exc}"
+            if failure != self._last_failure:
+                self._last_failure = failure
+                logger.info("Databricks SDK auth unavailable: %s", failure)
             return None
 
     def current_token(self) -> str | None:
