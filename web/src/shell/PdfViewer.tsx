@@ -51,6 +51,10 @@ import "./pdfViewer.css";
 // lifetime. It bypasses pdf.js's fake-worker fallback, so a restrictive worker
 // CSP or a non-Worker environment (jsdom) throws on import — importing tests
 // must mock this module (CodeViewer.test.tsx already mocks ./PdfViewer).
+//
+// The worker comes from web's own `pdfjs-dist`, which must be pinned to the
+// exact version react-pdf depends on: pdf.js rejects an API/worker version
+// mismatch and nothing renders.
 pdfjs.GlobalWorkerOptions.workerPort = new Worker(
   new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url),
   { type: "module" },
