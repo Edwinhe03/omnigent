@@ -11327,6 +11327,29 @@ describe("managed sandbox gateway preview", () => {
     );
   });
 
+  it("keeps your own agent on a harness the gateway serves no models for", async () => {
+    preview();
+    vi.mocked(useSandboxHarnessesWithoutModels).mockReturnValue(new Set(["codex-native"]));
+    mockAgents([
+      ...DEFAULT_LANDING_AGENTS,
+      testAgent("ag_mycodex", "my-codex", {
+        display_name: "My Codex",
+        harness: "codex-native",
+        builtin: false,
+        mine: true,
+      }),
+    ]);
+    localStorage.setItem(LAST_AGENT_KEY, "ag_mycodex");
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as Response);
+    renderGatewaySandbox();
+    // Its own provider may serve it; the sandbox's default preview does not speak for it.
+    const { body } = await submitAndReadBody();
+    expect(body.agent_id).toBe("ag_mycodex");
+  });
+
   it("moves a remembered pick off a harness the gateway serves no models for", async () => {
     preview();
     vi.mocked(useSandboxHarnessesWithoutModels).mockReturnValue(new Set(["codex-native"]));

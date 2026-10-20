@@ -152,6 +152,17 @@ def preferred_served_claude_model(
     return _models_by_claude_family(claude_ids, marker="claude-").get(preferred_family)
 
 
+def _advertises_api_type(service: dict[str, object], api_type: str) -> bool:
+    """Whether *service* serves *api_type*; an unreported API list counts as yes."""
+    api_types = service.get("supported_api_types")
+    reported = {
+        value.lower()
+        for value in (api_types if isinstance(api_types, list) else [])
+        if isinstance(value, str)
+    }
+    return not reported or api_type.lower() in reported
+
+
 def _list_model_service_ids(
     client: httpx.Client,
     workspace_url: str,
@@ -162,8 +173,9 @@ def _list_model_service_ids(
     """List Databricks-managed ``system.ai`` model-service identifiers.
 
     :param api_type: When set, drop services whose ``supported_api_types`` omits
-        it, e.g. ``"codex/v1/responses"``. A service that reports no API types
-        is kept, matching listings that predate the field.
+        it (case-insensitively), e.g. ``"codex/v1/responses"``. A service that
+        omits the field or reports an empty list is kept, matching listings that
+        predate it.
     """
     model_ids: list[str] = []
     page_token: str | None = None
@@ -190,12 +202,7 @@ def _list_model_service_ids(
                 raw_name = service.get("name") if isinstance(service, dict) else None
                 if not isinstance(raw_name, str):
                     continue
-                api_types = service.get("supported_api_types")
-                if (
-                    api_type is not None
-                    and isinstance(api_types, list)
-                    and api_type not in api_types
-                ):
+                if api_type is not None and not _advertises_api_type(service, api_type):
                     continue
                 model_id = raw_name.strip()
                 if model_id.startswith(_MODEL_SERVICE_PREFIX):

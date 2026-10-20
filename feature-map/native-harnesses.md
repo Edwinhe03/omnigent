@@ -111,20 +111,20 @@ separate. See [sessions](./sessions.md) for all side-chat entry points.
 the mock model; the others need their real CLI and vendor credentials. Test
 columns name one journey test per harness; "—" means none exists yet.
 
-| Harness | CLI | Mock | Chat render test | Other journey test | Dev skill |
-|---|---|---|---|---|---|
-| `antigravity-native` | `omnigent antigravity` or `omnigent agy` | no | — | tests/e2e/test_antigravity_native_isolated_hooks_e2e.py::test_dispatched_agy_session_loads_user_hooks | [antigravity-native-e2e-dev](../.claude/skills/antigravity-native-e2e-dev/SKILL.md) |
-| `claude-native` | `omnigent claude` | yes | tests/e2e_ui/messages/test_native_claude_render_parity.py::test_native_claude_message_render_parity | tests/e2e/test_claude_native_cli_resume_e2e.py::test_claude_native_cli_resume_restores_history | — |
-| `codex-native` | `omnigent codex` | yes | tests/e2e_ui/messages/test_native_codex_render_parity.py::test_native_codex_message_render_parity | tests/e2e/test_codex_native_cli_resume_e2e.py::test_codex_native_cli_resume_restores_history | — |
-| `cursor-native` | `omnigent cursor` | no | tests/e2e_ui/messages/test_native_cursor_render_parity.py::test_native_cursor_message_render_parity | tests/e2e/test_cursor_native_cli_e2e.py::test_cursor_native_cli_smoke | — |
-| `devin-native` | `omnigent devin` | no | — | tests/e2e_ui/chat/test_devin_native_picker.py::test_devin_picker_offers_its_own_models_and_effort | — |
-| `goose-native` | `omnigent goose` | no | tests/e2e_ui/messages/test_native_goose_render_parity.py::test_native_goose_message_render_parity | tests/e2e/test_goose_native_cli_e2e.py::test_goose_native_cli_smoke | — |
-| `hermes-native` | `omnigent hermes` | no | tests/e2e_ui/messages/test_native_hermes_render_parity.py::test_native_hermes_message_render_parity | tests/e2e/test_hermes_native_policy_hook_path_e2e.py::test_hermes_native_policy_hook_path_lets_the_tool_run | — |
-| `kimi-native` | `omnigent kimi` | no | — | tests/e2e/test_kimi_native_steering_e2e.py::test_midturn_steer_is_applied_not_queued | — |
-| `kiro-native` | `omnigent kiro` | no | tests/e2e_ui/messages/test_native_kiro_render_parity.py::test_native_kiro_message_render_parity | tests/e2e/test_kiro_native_cli_e2e.py::test_kiro_native_cli_smoke | — |
-| `opencode-native` | `omnigent opencode` | no | — | tests/e2e/test_opencode_native_startup_cancel_leak_e2e.py::test_opencode_native_startup_cancel_reaps_serve | — |
-| `pi-native` | `omnigent pi` | no | — | tests/e2e/test_pi_native_send_now_steer_e2e.py::test_pi_native_send_now_steers_into_active_turn | [pi-native-e2e-dev](../.claude/skills/pi-native-e2e-dev/SKILL.md) |
-| `qwen-native` | `omnigent qwen` | no | — | tests/e2e/test_qwen_native_subagent_wake_e2e.py::test_qwen_native_subagent_completion_wakes_parent | — |
+| Harness              | CLI                                      | Mock | Chat render test                                                                                    | Other journey test                                                                                          | Dev skill                                                                           |
+| -------------------- | ---------------------------------------- | ---- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `antigravity-native` | `omnigent antigravity` or `omnigent agy` | no   | —                                                                                                   | tests/e2e/test_antigravity_native_isolated_hooks_e2e.py::test_dispatched_agy_session_loads_user_hooks       | [antigravity-native-e2e-dev](../.claude/skills/antigravity-native-e2e-dev/SKILL.md) |
+| `claude-native`      | `omnigent claude`                        | yes  | tests/e2e_ui/messages/test_native_claude_render_parity.py::test_native_claude_message_render_parity | tests/e2e/test_claude_native_cli_resume_e2e.py::test_claude_native_cli_resume_restores_history              | —                                                                                   |
+| `codex-native`       | `omnigent codex`                         | yes  | tests/e2e_ui/messages/test_native_codex_render_parity.py::test_native_codex_message_render_parity   | tests/e2e/test_codex_native_cli_resume_e2e.py::test_codex_native_cli_resume_restores_history                | —                                                                                   |
+| `cursor-native`      | `omnigent cursor`                        | no   | tests/e2e_ui/messages/test_native_cursor_render_parity.py::test_native_cursor_message_render_parity | tests/e2e/test_cursor_native_cli_e2e.py::test_cursor_native_cli_smoke                                       | —                                                                                   |
+| `devin-native`       | `omnigent devin`                         | no   | —                                                                                                   | tests/e2e_ui/chat/test_devin_native_picker.py::test_devin_picker_offers_its_own_models_and_effort           | —                                                                                   |
+| `goose-native`       | `omnigent goose`                         | no   | tests/e2e_ui/messages/test_native_goose_render_parity.py::test_native_goose_message_render_parity   | tests/e2e/test_goose_native_cli_e2e.py::test_goose_native_cli_smoke                                         | —                                                                                   |
+| `hermes-native`      | `omnigent hermes`                        | no   | tests/e2e_ui/messages/test_native_hermes_render_parity.py::test_native_hermes_message_render_parity | tests/e2e/test_hermes_native_policy_hook_path_e2e.py::test_hermes_native_policy_hook_path_lets_the_tool_run | —                                                                                   |
+| `kimi-native`        | `omnigent kimi`                          | no   | —                                                                                                   | tests/e2e/test_kimi_native_steering_e2e.py::test_midturn_steer_is_applied_not_queued                        | —                                                                                   |
+| `kiro-native`        | `omnigent kiro`                          | no   | tests/e2e_ui/messages/test_native_kiro_render_parity.py::test_native_kiro_message_render_parity     | tests/e2e/test_kiro_native_cli_e2e.py::test_kiro_native_cli_smoke                                           | —                                                                                   |
+| `opencode-native`    | `omnigent opencode`                      | no   | —                                                                                                   | tests/e2e/test_opencode_native_startup_cancel_leak_e2e.py::test_opencode_native_startup_cancel_reaps_serve  | —                                                                                   |
+| `pi-native`          | `omnigent pi`                            | no   | —                                                                                                   | tests/e2e/test_pi_native_send_now_steer_e2e.py::test_pi_native_send_now_steers_into_active_turn             | [pi-native-e2e-dev](../.claude/skills/pi-native-e2e-dev/SKILL.md)                   |
+| `qwen-native`        | `omnigent qwen`                          | no   | —                                                                                                   | tests/e2e/test_qwen_native_subagent_wake_e2e.py::test_qwen_native_subagent_completion_wakes_parent          | —                                                                                   |
 
 ## Driving it with the repro environment
 
@@ -262,11 +262,14 @@ Cross-harness journeys:
   see also [composer](./composer.md) for effort.
 - **`model-and-effort`, managed sandbox before a host exists:**
   `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py::test_sandbox_codex_picker_offers_gateway_models_before_a_host_exists`,
-  `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`.
+  `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`,
+  `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_sandbox_harness_without_models_is_disabled`.
   The picker offers the sandbox gateway's models for native and SDK agents with
   a Harness default row; efforts come from the listing's reasoning metadata, and
-  an unavailable listing keeps Harness default launchable. Connected-host
-  discovery and bound (`inference_models`) targets are unchanged.
+  an unavailable listing keeps Harness default launchable. A built-in harness
+  whose listing is `empty` is disabled with a tooltip and never the default
+  pick. Connected-host discovery and bound (`inference_models`) targets are
+  unchanged.
 - **`model-and-effort`, Codex runtime settings:**
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_clamps_unsupported_effort`,
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_preserves_supported_effort`,
@@ -391,6 +394,7 @@ Cross-harness journeys:
   receipt races, abandoned-hook cleanup, and legacy verdict replay are covered by
   `tests/server/integration/test_kiro_permission_delivery.py`.
   These tests do not verify a signed-in vendor Kiro CLI.
+
 - **`resume`, bare picker scoped to this host:**
   `tests/e2e/test_native_resume_picker_cross_host_e2e.py::test_bare_resume_picker_excludes_other_hosts_sessions`
 - **`resume`, Claude and Pi provider selection after a runner restart:**

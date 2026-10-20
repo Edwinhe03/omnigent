@@ -1636,8 +1636,12 @@ export function AgentHarnessPicker({
     setOpen(true);
   }, [openNonce, effectiveAgentId, hasSelectedConfig, isMobile, open]);
 
-  const isModeless = (agent: AvailableAgent) =>
-    modelessHarnesses?.has(nativeCodingAgentForAvailableAgent(agent)?.harness ?? "") ?? false;
+  const isModeless = useCallback(
+    (agent: AvailableAgent) =>
+      !agent.mine &&
+      (modelessHarnesses?.has(nativeCodingAgentForAvailableAgent(agent)?.harness ?? "") ?? false),
+    [modelessHarnesses],
+  );
   const renderEntry = (agent: AvailableAgent): ReactNode => {
     const active = !autoHarnessActive && agent.id === effectiveAgentId;
     const blurb = AGENT_PICKER_DESCRIPTIONS[agent.name];
@@ -1718,9 +1722,8 @@ export function AgentHarnessPicker({
     for (const agent of harnessEntries) {
       const selected = agent.id === effectiveAgentId;
       const readiness = harnessReadinessOnHost(agent.harness, host);
-      const modeless =
-        modelessHarnesses?.has(nativeCodingAgentForAvailableAgent(agent)?.harness ?? "") ?? false;
-      const unavailable = modeless || (!readiness.selectable && readiness.fallbackRelevant);
+      const unavailable =
+        isModeless(agent) || (!readiness.selectable && readiness.fallbackRelevant);
       if (!selected && hideUnconfigured && unavailable) continue;
       const key = nativeCodingAgentForAvailableAgent(agent)?.iconKind ?? "";
       const primary = primaryOrder.includes(key) || agent.id === promotedHarnessId;
@@ -1737,14 +1740,7 @@ export function AgentHarnessPicker({
     ready.sort((first, second) => rank(first, primaryOrder) - rank(second, primaryOrder));
     more.sort((first, second) => rank(first, secondaryOrder) - rank(second, secondaryOrder));
     return { readyHarnessEntries: ready, moreHarnessEntries: more };
-  }, [
-    harnessEntries,
-    host,
-    hideUnconfigured,
-    effectiveAgentId,
-    promotedHarnessId,
-    modelessHarnesses,
-  ]);
+  }, [harnessEntries, host, hideUnconfigured, effectiveAgentId, promotedHarnessId, isModeless]);
   const selectedOtherHarness = moreHarnessEntries.find((agent) => agent.id === effectiveAgentId);
   const otherHarnessLabel =
     selectedOtherHarness && !autoHarnessActive
@@ -3055,8 +3051,9 @@ export function NewChatLandingScreen() {
   // bundled agent. So a pending pick made before switching to a sandbox is
   // dropped there, falling back to a real agent; off the sandbox it's kept.
   const pendingAgentAllowedOnTarget = !sandboxSelected;
-  // A native harness the sandbox's model preview serves no model for renders
-  // disabled in the picker and is skipped when choosing the default agent.
+  // A built-in native harness the sandbox's model preview serves no model for
+  // renders disabled and is skipped when choosing the default agent. A user's own
+  // agent may bring its own provider, which the default preview does not describe.
   const previewableSandboxHarnesses = useMemo(
     () =>
       new Set(
@@ -3067,23 +3064,26 @@ export function NewChatLandingScreen() {
       ),
     [harnessEntries],
   );
-  const modelessSandboxProvider =
+  const previewSandboxProvider =
     sandboxProvider ?? (info !== "loading" ? info.sandbox_provider : null);
-  const modelessSandboxCapabilities =
-    info !== "loading" && modelessSandboxProvider !== null
-      ? info.sandbox_provider_capabilities?.[modelessSandboxProvider]
+  const sandboxModelCapabilities =
+    info !== "loading" && previewSandboxProvider !== null
+      ? info.sandbox_provider_capabilities?.[previewSandboxProvider]
       : undefined;
+  const sandboxDefaultModelsOffered =
+    sandboxSelected &&
+    sandboxModelCapabilities?.default_models === true &&
+    sandboxModelCapabilities.inference_models !== true;
   const sandboxHarnessesWithoutModels = useSandboxHarnessesWithoutModels(
-    modelessSandboxProvider,
+    previewSandboxProvider,
     previewableSandboxHarnesses,
     cacheUser,
-    sandboxSelected &&
-      modelessSandboxCapabilities?.default_models === true &&
-      modelessSandboxCapabilities.inference_models !== true,
+    sandboxDefaultModelsOffered,
   );
   const selectableAgents = sandboxSelected
     ? agentList.filter(
         (agent) =>
+          agent.mine ||
           !sandboxHarnessesWithoutModels.has(
             nativeCodingAgentForAvailableAgent(agent)?.harness ?? "",
           ),
@@ -3238,16 +3238,6 @@ export function NewChatLandingScreen() {
     poll: selectedNativeHarness === "devin-native",
   });
   const previewHarness = selectedNativeHarness ?? pickedHarness ?? selectedAgent?.harness ?? null;
-  const previewSandboxProvider =
-    sandboxProvider ?? (info !== "loading" ? info.sandbox_provider : null);
-  const sandboxModelCapabilities =
-    info !== "loading" && previewSandboxProvider !== null
-      ? info.sandbox_provider_capabilities?.[previewSandboxProvider]
-      : undefined;
-  const sandboxDefaultModelsOffered =
-    sandboxSelected &&
-    sandboxModelCapabilities?.default_models === true &&
-    sandboxModelCapabilities.inference_models !== true;
   const sandboxPreviewEnabled =
     sandboxSelected &&
     previewSandboxProvider !== null &&

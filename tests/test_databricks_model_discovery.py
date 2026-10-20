@@ -379,12 +379,14 @@ def test_discover_codex_models_drops_models_without_the_codex_route() -> None:
             },
             {
                 "name": "model-services/system.ai.gpt-5-5",
-                "supported_api_types": ["mlflow/v1/responses", "codex/v1/responses"],
+                "supported_api_types": ["mlflow/v1/responses", "Codex/v1/Responses"],
             },
+            # An empty list reports nothing, like a listing that predates the field.
+            {"name": "model-services/system.ai.gpt-5-4", "supported_api_types": []},
         ]
     )
 
-    assert servable == ("system.ai.gpt-5-5",)
+    assert servable == ("system.ai.gpt-5-5", "system.ai.gpt-5-4")
 
 
 def test_discover_codex_models_empty_listing_is_authoritative() -> None:
