@@ -1741,17 +1741,17 @@ async def test_managed_relaunch_failure_leaves_the_host_identity_alone(
     assert terminated == []
 
 
-async def test_cancel_managed_launch_tasks_returns_after_drain_while_provision_parked(
+async def test_cancel_managed_launch_tasks_returns_while_provision_parked(
     managed_session_env: ManagedSessionEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Shutdown teardown does not hang past its drain on a stuck provision.
+    Shutdown teardown does not hang on an in-flight managed provision.
 
-    With a provision parked on the fake's gate (a provider call that
-    never returns), the teardown waits out the drain for the launch to
-    bind, then cancels it and returns rather than waiting the provision
-    out.
+    With a provision parked on the fake's gate (a slow provider call),
+    the default teardown does not wait for the launch to bind: it
+    cancels the task and returns promptly rather than waiting the
+    provision out.
     """
     import threading
 
@@ -1770,7 +1770,7 @@ async def test_cancel_managed_launch_tasks_returns_after_drain_while_provision_p
     assert resp.status_code == 201, resp.text
 
     # The gate would hold the provision 30s; 5s is the generosity bound.
-    await asyncio.wait_for(cancel_managed_launch_tasks(drain_s=0.5), timeout=5.0)
+    await asyncio.wait_for(cancel_managed_launch_tasks(), timeout=5.0)
 
     # Release the gate so the provision worker thread exits cleanly.
     gate.set()
