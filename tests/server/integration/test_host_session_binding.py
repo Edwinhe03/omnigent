@@ -41,6 +41,7 @@ from omnigent.server.managed_hosts import (
 )
 from omnigent.server.routes.host_tunnel import create_host_tunnel_router
 from omnigent.server.routes.hosts import create_hosts_router
+from omnigent.server.startup_inputs import STARTUP_LABEL
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.comment_store.sqlalchemy_store import SqlAlchemyCommentStore
@@ -1740,19 +1741,17 @@ async def test_managed_relaunch_failure_leaves_the_host_identity_alone(
     assert terminated == []
 
 
-async def test_cancel_managed_launch_tasks_returns_while_provision_parked(
+async def test_cancel_managed_launch_tasks_returns_after_drain_while_provision_parked(
     managed_session_env: ManagedSessionEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Shutdown teardown does not hang on an in-flight managed provision.
+    Shutdown teardown does not hang past its drain on a stuck provision.
 
-    The lifespan teardown calls ``cancel_managed_launch_tasks`` to
-    stop background launches; with a provision parked on the fake's
-    gate (a slow provider call), the cancel must settle the task and
-    return promptly rather than waiting the provision out — a rolling
-    deploy must not block on Modal. Without the cancellation hook,
-    this test fails at the ``wait_for`` (nothing settles the task).
+    With a provision parked on the fake's gate (a provider call that
+    never returns), the teardown waits out the drain for the launch to
+    bind, then cancels it and returns rather than waiting the provision
+    out.
     """
     import threading
 
@@ -1770,13 +1769,66 @@ async def test_cancel_managed_launch_tasks_returns_while_provision_parked(
     )
     assert resp.status_code == 201, resp.text
 
-    # The launch is gate-held mid-provision. The teardown hook must
-    # return well inside the provision's duration (the gate would hold
-    # it 30s) — 5s is the generosity bound, not an expectation.
-    await asyncio.wait_for(cancel_managed_launch_tasks(), timeout=5.0)
+    # The gate would hold the provision 30s; 5s is the generosity bound.
+    await asyncio.wait_for(cancel_managed_launch_tasks(drain_s=0.5), timeout=5.0)
 
     # Release the gate so the provision worker thread exits cleanly.
     gate.set()
+
+
+async def test_shutdown_waits_for_an_in_flight_launch_to_bind_its_host(
+    managed_session_env: ManagedSessionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Shutdown lets a mid-provision launch bind its session to the host.
+
+    Once bound, whichever replica the host tunnels to starts the runner
+    and delivers the session's saved messages; cancelled before the
+    bind, the session would belong to no host and never start.
+    """
+    import threading
+
+    from omnigent.server.routes.sessions import cancel_managed_launch_tasks
+
+    env = managed_session_env
+    monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
+    loop = asyncio.get_running_loop()
+    gate = threading.Event()
+    host_futures: list[asyncio.Future[ApplicationCommunicator]] = []
+
+    def _start_fake_sandbox_host(invocation: HostStartInvocation) -> None:
+        """Spawn the fake sandbox host when the launcher 'starts' it."""
+        future = asyncio.run_coroutine_threadsafe(
+            _fake_sandbox_host(
+                env.app, invocation.host_id, invocation.host_name, invocation.token
+            ),
+            loop,
+        )
+        host_futures.append(asyncio.wrap_future(future, loop=loop))
+
+    fake = FakeSandboxLauncher(provision_gate=gate, on_host_start=_start_fake_sandbox_host)
+    install_fake_modal_launcher(monkeypatch, fake)
+
+    agent = await create_test_agent(env.client, name="managed-shutdown-drain-agent")
+    resp = await env.client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "host_type": "managed"},
+    )
+    assert resp.status_code == 201, resp.text
+    session_id = resp.json()["id"]
+
+    shutdown = asyncio.create_task(cancel_managed_launch_tasks(drain_s=15.0))
+    await asyncio.sleep(0.3)
+    assert not shutdown.done()
+    gate.set()
+    await asyncio.wait_for(shutdown, timeout=15.0)
+
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None and conv.host_id is not None
+    assert conv.labels.get(STARTUP_LABEL) != "failed"
+    for future in host_futures:
+        future.cancel()
 
 
 async def test_managed_session_deleted_during_provision_terminates_sandbox(
