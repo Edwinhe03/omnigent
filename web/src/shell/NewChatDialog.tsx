@@ -256,7 +256,11 @@ import {
   DEVIN_NATIVE_PERMISSION_MODES,
 } from "@/lib/nativeHarnessModes";
 import { fetchHosts, useHostModelOptions, useHosts, type Host } from "@/hooks/useHosts";
-import { sandboxModelOptionsKey, useSandboxModelOptions } from "@/hooks/useSandboxModelOptions";
+import {
+  sandboxModelOptionsKey,
+  useSandboxHarnessesWithoutModels,
+  useSandboxModelOptions,
+} from "@/hooks/useSandboxModelOptions";
 import { useSkills } from "@/hooks/useSkills";
 import { useOnboardingRunnerHost } from "@/hooks/useOnboardingRunnerHost";
 import { readArcaHostId, writeArcaHostId } from "@/lib/arcaHost";
@@ -1412,6 +1416,7 @@ export function AgentHarnessPicker({
   autoHarnessActive = false,
   onSelectAutoHarness,
   openNonce = 0,
+  modelessHarnesses,
 }: {
   agentEntries: AvailableAgent[];
   harnessEntries: AvailableAgent[];
@@ -1486,6 +1491,8 @@ export function AgentHarnessPicker({
   onSelectAutoHarness?: () => void;
   /** Bump to open the menu imperatively (the landing's model-picker hotkey). */
   openNonce?: number;
+  /** Harnesses the selected target serves no model for; their rows render disabled. */
+  modelessHarnesses?: ReadonlySet<string>;
 }) {
   // Controlled so picking a row can close the menu.
   const [open, setOpen] = useState(false);
@@ -1629,6 +1636,8 @@ export function AgentHarnessPicker({
     setOpen(true);
   }, [openNonce, effectiveAgentId, hasSelectedConfig, isMobile, open]);
 
+  const isModeless = (agent: AvailableAgent) =>
+    modelessHarnesses?.has(nativeCodingAgentForAvailableAgent(agent)?.harness ?? "") ?? false;
   const renderEntry = (agent: AvailableAgent): ReactNode => {
     const active = !autoHarnessActive && agent.id === effectiveAgentId;
     const blurb = AGENT_PICKER_DESCRIPTIONS[agent.name];
@@ -1641,14 +1650,14 @@ export function AgentHarnessPicker({
     const summary = details || entrySummaries?.[agent.id] || "Default";
     const editable = selectedConfigContent !== undefined && (isEntryConfigurable?.(agent) ?? true);
     const readiness = harnessReadinessOnHost(agent.harness, host);
-    const unavailable = !readiness.selectable && readiness.fallbackRelevant;
-    const warning = harnessWarningBadgeText(readiness.reason, collapsedBadge);
-    const warningMessage = harnessWarningMessage(
-      agent.display_name,
-      host?.name,
-      readiness.reason,
-      agent.harness,
-    );
+    const modeless = isModeless(agent);
+    const unavailable = modeless || (!readiness.selectable && readiness.fallbackRelevant);
+    const warning = modeless
+      ? "No models available"
+      : harnessWarningBadgeText(readiness.reason, collapsedBadge);
+    const warningMessage = modeless
+      ? `No models are available for ${agent.display_name}. Ask an administrator to enable model access.`
+      : harnessWarningMessage(agent.display_name, host?.name, readiness.reason, agent.harness);
     return (
       <HarnessPickerEntry
         key={agent.id}
@@ -1709,7 +1718,9 @@ export function AgentHarnessPicker({
     for (const agent of harnessEntries) {
       const selected = agent.id === effectiveAgentId;
       const readiness = harnessReadinessOnHost(agent.harness, host);
-      const unavailable = !readiness.selectable && readiness.fallbackRelevant;
+      const modeless =
+        modelessHarnesses?.has(nativeCodingAgentForAvailableAgent(agent)?.harness ?? "") ?? false;
+      const unavailable = modeless || (!readiness.selectable && readiness.fallbackRelevant);
       if (!selected && hideUnconfigured && unavailable) continue;
       const key = nativeCodingAgentForAvailableAgent(agent)?.iconKind ?? "";
       const primary = primaryOrder.includes(key) || agent.id === promotedHarnessId;
@@ -1726,7 +1737,14 @@ export function AgentHarnessPicker({
     ready.sort((first, second) => rank(first, primaryOrder) - rank(second, primaryOrder));
     more.sort((first, second) => rank(first, secondaryOrder) - rank(second, secondaryOrder));
     return { readyHarnessEntries: ready, moreHarnessEntries: more };
-  }, [harnessEntries, host, hideUnconfigured, effectiveAgentId, promotedHarnessId]);
+  }, [
+    harnessEntries,
+    host,
+    hideUnconfigured,
+    effectiveAgentId,
+    promotedHarnessId,
+    modelessHarnesses,
+  ]);
   const selectedOtherHarness = moreHarnessEntries.find((agent) => agent.id === effectiveAgentId);
   const otherHarnessLabel =
     selectedOtherHarness && !autoHarnessActive
@@ -3037,6 +3055,40 @@ export function NewChatLandingScreen() {
   // bundled agent. So a pending pick made before switching to a sandbox is
   // dropped there, falling back to a real agent; off the sandbox it's kept.
   const pendingAgentAllowedOnTarget = !sandboxSelected;
+  // A native harness the sandbox's model preview serves no model for renders
+  // disabled in the picker and is skipped when choosing the default agent.
+  const previewableSandboxHarnesses = useMemo(
+    () =>
+      new Set(
+        harnessEntries.flatMap((agent) => {
+          const harness = nativeCodingAgentForAvailableAgent(agent)?.harness;
+          return harness ? [harness] : [];
+        }),
+      ),
+    [harnessEntries],
+  );
+  const modelessSandboxProvider =
+    sandboxProvider ?? (info !== "loading" ? info.sandbox_provider : null);
+  const modelessSandboxCapabilities =
+    info !== "loading" && modelessSandboxProvider !== null
+      ? info.sandbox_provider_capabilities?.[modelessSandboxProvider]
+      : undefined;
+  const sandboxHarnessesWithoutModels = useSandboxHarnessesWithoutModels(
+    modelessSandboxProvider,
+    previewableSandboxHarnesses,
+    cacheUser,
+    sandboxSelected &&
+      modelessSandboxCapabilities?.default_models === true &&
+      modelessSandboxCapabilities.inference_models !== true,
+  );
+  const selectableAgents = sandboxSelected
+    ? agentList.filter(
+        (agent) =>
+          !sandboxHarnessesWithoutModels.has(
+            nativeCodingAgentForAvailableAgent(agent)?.harness ?? "",
+          ),
+      )
+    : agentList;
   // A configured agent absent from templates and the first 30 Mine sessions
   // stays unavailable until the user explicitly chooses another agent.
   const configuredAgentUnavailable =
@@ -3081,14 +3133,14 @@ export function NewChatLandingScreen() {
   const defaultEffectiveAgentId =
     pickedAgentId === PENDING_AGENT_ID && pendingAgentAllowedOnTarget
       ? PENDING_AGENT_ID
-      : agentList.some((a) => a.id === pickedAgentId)
+      : selectableAgents.some((a) => a.id === pickedAgentId)
         ? pickedAgentId
         : configuredAgentUnavailable || pickUnresolvedOnPlaceholder
           ? null
           : (agentsLoading || prefillConfig === undefined) &&
-              agentList.some((agent) => agent.id === cachedPickerOptions?.agent.id)
+              selectableAgents.some((agent) => agent.id === cachedPickerOptions?.agent.id)
             ? cachedPickerOptions!.agent.id
-            : (agentList[0]?.id ?? null);
+            : (selectableAgents[0]?.id ?? null);
   const effectiveAgentId = automaticHarnessFallback?.candidate?.value.id ?? defaultEffectiveAgentId;
   const selectedAgent = useMemo(
     () =>
@@ -7059,6 +7111,9 @@ export function NewChatLandingScreen() {
                         openNonce={modelPickerOpenNonce}
                         agentEntries={agentEntries}
                         harnessEntries={harnessEntries}
+                        modelessHarnesses={
+                          sandboxSelected ? sandboxHarnessesWithoutModels : undefined
+                        }
                         effectiveAgentId={effectiveAgentId}
                         agentLabel={agentLabel}
                         hasAgents={agentList.length > 0}

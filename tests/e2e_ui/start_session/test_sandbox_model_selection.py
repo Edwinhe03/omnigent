@@ -258,3 +258,87 @@ async def _drive(
             assert creates[0]["sandbox_provider"] == "agent_sandbox"
         finally:
             await browser.close()
+
+
+def test_sandbox_harness_without_models_is_disabled(seeded_session: tuple[str, str]) -> None:
+    _run_in_fresh_loop(_drive_modeless_harness(*seeded_session))
+
+
+async def _drive_modeless_harness(base_url: str, session_id: str) -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1440, "height": 960})
+        creates: list[dict] = []
+        try:
+            agents = json.loads(_codex_native_agents_body())["data"]
+            agents.append(
+                {
+                    "id": "ag_claude_e2e",
+                    "name": "claude-native-ui",
+                    "display_name": "Claude Code",
+                    "description": "Anthropic's coding agent",
+                    "harness": "claude-native",
+                    "skills": [],
+                }
+            )
+            await _register_common_routes(
+                page,
+                created_session_id=session_id,
+                create_bodies=creates,
+                agents_body=json.dumps({"data": agents}),
+            )
+            info = json.loads(_managed_info_body())
+            info.update(
+                sandbox_provider="arclet",
+                sandbox_provider_capabilities={"arclet": {"default_models": True}},
+            )
+            await page.route("**/v1/info", lambda route: route.fulfill(json=info))
+            await page.route("**/v1/hosts", lambda route: route.fulfill(json={"hosts": []}))
+            await page.route(
+                re.compile(r"/v1/sessions\?(?!.*pinned=).*visibility=mine"),
+                lambda route: route.fulfill(json={"data": []}),
+            )
+
+            async def models(route: Route) -> None:
+                codex = "/harnesses/codex-native/" in route.request.url
+                await route.fulfill(
+                    json={
+                        "configured": False,
+                        "status": "empty" if codex else "ready",
+                        "models": []
+                        if codex
+                        else [{"id": "system.ai.claude-opus-4-8", "displayName": "Opus 4.8"}],
+                        "configuration_revision": None,
+                        "provider_label": "AI Gateway",
+                        "default_model": None,
+                    }
+                )
+
+            await page.route("**/v1/sandbox-providers/*/harnesses/*/model-options*", models)
+            # Remember Codex so the landing must move the pick off it.
+            await page.add_init_script(
+                "window.localStorage.setItem('omnigent:last-agent-id', 'ag_codex_e2e')"
+            )
+            await page.goto(base_url)
+            await expect(page.get_by_test_id("new-chat-landing-agent-select")).to_contain_text(
+                "Claude Code"
+            )
+            await page.get_by_test_id("new-chat-landing-agent-select").click()
+            more = page.get_by_test_id("new-chat-landing-harness-more")
+            if await more.count():
+                await more.click()
+            codex_row = page.get_by_test_id("new-chat-landing-agent-ag_codex_e2e")
+            await expect(codex_row).to_have_attribute("aria-disabled", "true")
+            await codex_row.get_by_text("Codex").hover()
+            await expect(page.get_by_role("tooltip")).to_contain_text(
+                "No models are available for Codex. Ask an administrator to enable model access."
+            )
+            await page.keyboard.press("Escape")
+            await page.get_by_test_id("new-chat-landing-input").fill("Reply with READY.")
+            await page.get_by_test_id("new-chat-landing-submit").click()
+            await expect(page).to_have_url(re.compile(rf"/c/{session_id}$"))
+            assert len(creates) == 1
+            assert creates[0]["agent_id"] == "ag_claude_e2e"
+            assert creates[0]["sandbox_provider"] == "arclet"
+        finally:
+            await browser.close()

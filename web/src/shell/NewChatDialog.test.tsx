@@ -3,6 +3,7 @@ import type * as SandboxModelOptionsModule from "@/hooks/useSandboxModelOptions"
 
 vi.mock("@/hooks/useSandboxModelOptions", async (importOriginal) => ({
   ...(await importOriginal<typeof SandboxModelOptionsModule>()),
+  useSandboxHarnessesWithoutModels: vi.fn(() => new Set<string>()),
   useSandboxModelOptions: vi.fn(() => ({
     data: {
       configured: false,
@@ -56,7 +57,11 @@ import {
   NewChatLandingScreen,
   resetLandingDraft,
 } from "./NewChatDialog";
-import { useSandboxModelOptions, type SandboxModelOptions } from "@/hooks/useSandboxModelOptions";
+import {
+  useSandboxHarnessesWithoutModels,
+  useSandboxModelOptions,
+  type SandboxModelOptions,
+} from "@/hooks/useSandboxModelOptions";
 import { ComposerAddMenu } from "@/components/composer/ComposerAddMenu";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
@@ -1204,6 +1209,7 @@ function setupLandingMocks() {
     isLoading: false,
     error: null,
   } as unknown as ReturnType<typeof useSandboxModelOptions>);
+  vi.mocked(useSandboxHarnessesWithoutModels).mockReturnValue(new Set());
   vi.mocked(useSkills).mockReset();
   vi.mocked(useSkills).mockImplementation(
     ({ target, enabled = true, starting = false }) =>
@@ -11288,6 +11294,51 @@ describe("managed sandbox gateway preview", () => {
       expect(body.reasoning_effort).toBeUndefined();
     },
   );
+
+  it("disables a sandbox harness the gateway serves no models for", async () => {
+    preview();
+    vi.mocked(useSandboxHarnessesWithoutModels).mockReturnValue(new Set(["codex-native"]));
+    renderGatewaySandbox();
+    const selectedHarnessName = screen
+      .getByTestId("new-chat-landing-agent-select")
+      .getAttribute("aria-label");
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    // An unavailable primary demotes to "Other..."; the row stays disabled there.
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
+    const row = screen.getByTestId("new-chat-landing-agent-a2");
+    expect(row.closest("[data-harness-menu-row]")).toHaveAttribute("data-disabled");
+    expect(row).toHaveAttribute("aria-disabled", "true");
+    await userEvent.hover(within(row).getByText("Codex"));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "No models are available for Codex. Ask an administrator to enable model access.",
+    );
+    fireEvent.click(row);
+    expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
+      selectedHarnessName ?? "",
+    );
+    expect(useSandboxHarnessesWithoutModels).toHaveBeenLastCalledWith(
+      "arclet",
+      expect.objectContaining({ size: expect.any(Number) }),
+      null,
+      true,
+    );
+    expect(vi.mocked(useSandboxHarnessesWithoutModels).mock.lastCall?.[1]).toContain(
+      "codex-native",
+    );
+  });
+
+  it("moves a remembered pick off a harness the gateway serves no models for", async () => {
+    preview();
+    vi.mocked(useSandboxHarnessesWithoutModels).mockReturnValue(new Set(["codex-native"]));
+    localStorage.setItem(LAST_AGENT_KEY, "a2");
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as Response);
+    renderGatewaySandbox();
+    const { body } = await submitAndReadBody();
+    expect(body.agent_id).toBe("a1");
+  });
 
   it("waits for the selected harness's catalog without probing a host", () => {
     mockHosts([]);

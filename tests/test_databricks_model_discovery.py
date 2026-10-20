@@ -369,6 +369,24 @@ def test_discover_codex_models_filters_non_codex_and_ranks_curated_first(
     )
 
 
+def test_discover_codex_models_drops_models_without_the_codex_route() -> None:
+    """A GPT-named model serving only chat routes cannot run a codex turn."""
+    servable = _discover_codex(
+        [
+            {
+                "name": "model-services/system.ai.gpt-oss-120b",
+                "supported_api_types": ["mlflow/v1/chat/completions", "mlflow/v1/responses"],
+            },
+            {
+                "name": "model-services/system.ai.gpt-5-5",
+                "supported_api_types": ["mlflow/v1/responses", "codex/v1/responses"],
+            },
+        ]
+    )
+
+    assert servable == ("system.ai.gpt-5-5",)
+
+
 def test_discover_codex_models_empty_listing_is_authoritative() -> None:
     """A listing that serves no codex model returns an empty tuple, not an error."""
     assert _discover_codex([{"name": "model-services/system.ai.claude-opus-5"}]) == ()
