@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -1864,6 +1865,70 @@ async def test_shutdown_waits_for_an_in_flight_launch_to_bind_its_host(
     conv = env.conv_store.get_conversation(session_id)
     assert conv is not None and conv.host_id is not None
     assert conv.labels.get(STARTUP_LABEL) != "failed"
+    for future in host_futures:
+        future.cancel()
+
+
+async def test_shutdown_cancelling_the_bind_write_keeps_the_session_startable(
+    managed_session_env: ManagedSessionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A drain that ends while the bind is being written does not fail the session.
+
+    The write still lands, so the host's replica must still find the
+    session's startup pending; a "failed" startup would never be resumed.
+    """
+    import threading
+
+    from omnigent.server.routes.sessions import cancel_managed_launch_tasks
+
+    env = managed_session_env
+    monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
+    loop = asyncio.get_running_loop()
+    host_futures: list[asyncio.Future[ApplicationCommunicator]] = []
+
+    def _start_fake_sandbox_host(invocation: HostStartInvocation) -> None:
+        """Spawn the fake sandbox host when the launcher 'starts' it."""
+        future = asyncio.run_coroutine_threadsafe(
+            _fake_sandbox_host(
+                env.app, invocation.host_id, invocation.host_name, invocation.token
+            ),
+            loop,
+        )
+        host_futures.append(asyncio.wrap_future(future, loop=loop))
+
+    install_fake_modal_launcher(
+        monkeypatch, FakeSandboxLauncher(on_host_start=_start_fake_sandbox_host)
+    )
+    writing = threading.Event()
+    release = threading.Event()
+    set_host_id = env.conv_store.set_host_id
+
+    def slow_set_host_id(*args: Any, **kwargs: Any) -> Any:
+        writing.set()
+        release.wait(timeout=10)
+        return set_host_id(*args, **kwargs)
+
+    monkeypatch.setattr(env.conv_store, "set_host_id", slow_set_host_id)
+
+    agent = await create_test_agent(env.client, name="managed-shutdown-bind-race-agent")
+    resp = await env.client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "host_type": "managed"},
+    )
+    assert resp.status_code == 201, resp.text
+    session_id = resp.json()["id"]
+    await asyncio.wait_for(asyncio.to_thread(writing.wait, 10), timeout=15)
+
+    shutdown = asyncio.create_task(cancel_managed_launch_tasks(drain_s=0.2))
+    await asyncio.sleep(0.5)
+    release.set()
+    await asyncio.wait_for(shutdown, timeout=15)
+
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None and conv.host_id is not None
+    assert conv.labels.get(STARTUP_LABEL) == "pending"
     for future in host_futures:
         future.cancel()
 

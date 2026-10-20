@@ -6318,7 +6318,7 @@ async def cancel_managed_launch_tasks(drain_s: float = 0.0) -> None:
     deadline = loop.time() + drain_s
     if _unbound_managed_launch_tasks and drain_s > 0:
         _logger.info(
-            "Waiting up to %.0fs for %d managed launch(es) to bind their host before shutdown",
+            "Waiting up to %gs for %d managed launch(es) to bind their host before shutdown",
             drain_s,
             len(_unbound_managed_launch_tasks),
         )
@@ -6326,11 +6326,11 @@ async def cancel_managed_launch_tasks(drain_s: float = 0.0) -> None:
         await asyncio.sleep(0.2)
     if _unbound_managed_launch_tasks:
         _logger.warning(
-            "Cancelling %d managed launch(es) that did not bind their host within %.0fs; "
-            "they will be recorded failed",
+            "Cancelling %d managed launch(es) still unbound after %gs",
             len(_unbound_managed_launch_tasks),
             drain_s,
         )
+    tasks = list(_managed_launch_tasks)
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)

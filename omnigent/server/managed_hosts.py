@@ -1420,6 +1420,7 @@ def parse_sandbox_config(raw: object) -> ManagedSandboxDeployment | None:
     if (
         not isinstance(shutdown_drain_s, (int, float))
         or isinstance(shutdown_drain_s, bool)
+        or not math.isfinite(shutdown_drain_s)
         or shutdown_drain_s < 0
     ):
         raise ValueError(

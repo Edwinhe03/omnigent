@@ -257,7 +257,7 @@ def test_parse_shutdown_drain_is_deployment_wide(providers: bool) -> None:
     assert config.shutdown_drain_s == 240.0
 
 
-@pytest.mark.parametrize("value", [-1, True, "240s"])
+@pytest.mark.parametrize("value", [-1, True, "240s", float("inf"), float("nan")])
 def test_parse_shutdown_drain_rejects_malformed_value(value: object) -> None:
     with pytest.raises(ValueError, match=r"shutdown_drain_s.*non-negative"):
         parse_sandbox_config(

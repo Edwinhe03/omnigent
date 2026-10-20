@@ -628,20 +628,25 @@ def register_core_routes(
         )
         startup = getattr(request.app.state, "startup_inputs", None)
 
+        async def record_unbound_launch_failure() -> None:
+            # Shutdown gave up on the launch. Bound, the host's replica finishes
+            # it; unbound, no replica can, so fail the saved inputs rather than
+            # leave them pending with nothing to deliver them.
+            assert startup is not None
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if conv is not None and conv.host_id is None:
+                await startup.record_launch_failure(
+                    session_id, "the server shut down before the sandbox finished launching"
+                )
+
         async def launch_and_record_failure() -> None:
             try:
                 await launch
             except asyncio.CancelledError:
-                # Shutdown gave up on the launch before it bound a host, so no
-                # replica can finish it: fail the saved inputs rather than leave
-                # them pending with nothing to deliver them.
-                if startup is not None and asyncio.current_task() in _unbound_managed_launch_tasks:
+                if startup is not None:
                     with contextlib.suppress(Exception):
                         await asyncio.wait_for(
-                            startup.record_launch_failure(
-                                session_id,
-                                "the server shut down before the sandbox finished launching",
-                            ),
+                            record_unbound_launch_failure(),
                             timeout=_MANAGED_LAUNCH_FAILURE_RECORD_TIMEOUT_S,
                         )
                 raise

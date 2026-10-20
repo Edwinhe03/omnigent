@@ -4458,13 +4458,23 @@ async def _bind_and_launch_managed_runner(
     """
     from omnigent.server.managed_hosts import terminate_managed_host
 
-    try:
-        conv = await asyncio.to_thread(
+    bind = asyncio.ensure_future(
+        asyncio.to_thread(
             conversation_store.set_host_id,
             session_id,
             managed.host_id,
             managed.workspace,
         )
+    )
+    try:
+        conv = await asyncio.shield(bind)
+    except asyncio.CancelledError:
+        # Shutdown cancelled the launch mid-write. Let the write land so the
+        # row, which the cancelled launch reads to decide whether it failed,
+        # says whether the session is bound.
+        with contextlib.suppress(Exception):
+            await bind
+        raise
     except ConversationNotFoundError:
         # The session was deleted while its sandbox provisioned. The
         # delete route couldn't see the host binding yet, so tear the
