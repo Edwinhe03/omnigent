@@ -1776,6 +1776,43 @@ async def test_cancel_managed_launch_tasks_returns_while_provision_parked(
     gate.set()
 
 
+async def test_lifespan_shutdown_drains_for_the_configured_time(
+    runtime_init: None,
+    db_uri: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deployment's ``sandbox.shutdown_drain_s`` is what server shutdown waits."""
+    drains: list[float] = []
+
+    async def record_drain(drain_s: float = 0.0) -> None:
+        drains.append(drain_s)
+
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.cancel_managed_launch_tasks", record_drain
+    )
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    app = create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifact_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+        host_store=HostStore(db_uri),
+        sandbox_config=parse_sandbox_config(
+            {
+                "provider": "modal",
+                "server_url": "https://managed-test.example.com",
+                "modal": {"image": "docker.io/test/omnigent-host:latest"},
+                "shutdown_drain_s": 7,
+            }
+        ),
+    )
+    async with app.router.lifespan_context(app):
+        assert drains == []
+    assert drains == [7.0]
+
+
 async def test_shutdown_waits_for_an_in_flight_launch_to_bind_its_host(
     managed_session_env: ManagedSessionEnv,
     monkeypatch: pytest.MonkeyPatch,

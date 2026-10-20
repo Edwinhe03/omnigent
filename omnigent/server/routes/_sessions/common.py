@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import os
 import re
 import time
 import weakref
@@ -911,14 +910,6 @@ _managed_launch_tasks: set[asyncio.Task[None]] = set()
 # session is bound, whichever replica its host tunnels to finishes the launch.
 # custom-lint: disable-next=workspace-scoped-cache -- set of Task objects
 _unbound_managed_launch_tasks: set[asyncio.Task[Any]] = set()
-# Seconds shutdown waits for unbound launches to bind before cancelling them;
-# a launch still unbound is recorded failed. A launch can only bind through
-# another replica (this one has stopped accepting connections), so the default
-# is no wait. A multi-replica deployment sets it, plus
-# OMNIGENT_SERVER_SHUTDOWN_TIMEOUT_S, inside its termination grace period.
-_MANAGED_LAUNCH_SHUTDOWN_DRAIN_S = float(
-    os.environ.get("OMNIGENT_MANAGED_LAUNCH_SHUTDOWN_DRAIN_S", "0")
-)
 _MANAGED_LAUNCH_FAILURE_RECORD_TIMEOUT_S = 5.0
 
 
@@ -1191,7 +1182,6 @@ __all__ = [
     "_LAST_TASK_ERROR_REMEDIATION_LABEL_KEY",
     "_LAST_TASK_ERROR_TITLE_LABEL_KEY",
     "_MANAGED_LAUNCH_FAILURE_RECORD_TIMEOUT_S",
-    "_MANAGED_LAUNCH_SHUTDOWN_DRAIN_S",
     "_MANAGED_RESUMABLE_TUNNEL_STALE_S",
     "_MAX_TERMINAL_LAUNCH_ARGS",
     "_MAX_TERMINAL_LAUNCH_ARG_LEN",

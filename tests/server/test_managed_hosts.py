@@ -238,6 +238,43 @@ def test_parse_reaper_rejects_per_provider_override() -> None:
         )
 
 
+def test_parse_shutdown_drain_defaults_to_no_wait() -> None:
+    """A single replica has nowhere for an in-flight launch to bind, so shutdown doesn't wait."""
+    config = parse_sandbox_config({"provider": "modal", "server_url": "https://s.example.com"})
+    assert config is not None
+    assert config.shutdown_drain_s == 0.0
+
+
+@pytest.mark.parametrize("providers", [False, True])
+def test_parse_shutdown_drain_is_deployment_wide(providers: bool) -> None:
+    raw: dict[str, object] = {"server_url": "https://s.example.com", "shutdown_drain_s": 240}
+    if providers:
+        raw["providers"] = [{"provider": "modal"}, {"provider": "e2b"}]
+    else:
+        raw["provider"] = "modal"
+    config = parse_sandbox_config(raw)
+    assert config is not None
+    assert config.shutdown_drain_s == 240.0
+
+
+@pytest.mark.parametrize("value", [-1, True, "240s"])
+def test_parse_shutdown_drain_rejects_malformed_value(value: object) -> None:
+    with pytest.raises(ValueError, match=r"shutdown_drain_s.*non-negative"):
+        parse_sandbox_config(
+            {"provider": "modal", "server_url": "https://s.example.com", "shutdown_drain_s": value}
+        )
+
+
+def test_parse_shutdown_drain_rejects_per_provider_override() -> None:
+    with pytest.raises(ValueError, match="deployment-wide"):
+        parse_sandbox_config(
+            {
+                "server_url": "https://s.example.com",
+                "providers": [{"provider": "modal", "shutdown_drain_s": 240}],
+            }
+        )
+
+
 def test_parse_valid_modal_config_builds_image_parameterized_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

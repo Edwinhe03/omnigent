@@ -204,7 +204,6 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY,
     _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY,
     _LAST_TASK_ERROR_TITLE_LABEL_KEY,
-    _MANAGED_LAUNCH_SHUTDOWN_DRAIN_S,
     _MAX_TERMINAL_LAUNCH_ARG_LEN,
     _MAX_TERMINAL_LAUNCH_ARGS,
     _MODEL_OPTIONS_ENDPOINT_BY_WRAPPER,
@@ -6294,9 +6293,7 @@ async def _launch_runner_on_host_locked(
         return _HostLaunchAttempt(runner_id=new_runner_id, acknowledged=True)
 
 
-async def cancel_managed_launch_tasks(
-    drain_s: float = _MANAGED_LAUNCH_SHUTDOWN_DRAIN_S,
-) -> None:
+async def cancel_managed_launch_tasks(drain_s: float = 0.0) -> None:
     """
     Let in-flight managed launches bind their host, then cancel them.
 
@@ -6309,7 +6306,8 @@ async def cancel_managed_launch_tasks(
     failed. Cancellation stops the TASK only — an already-provisioned
     sandbox is reaped by the provider lifetime cap.
 
-    :param drain_s: Longest wait for unbound launches, in seconds.
+    :param drain_s: Longest wait for unbound launches, in seconds — the
+        deployment's :attr:`ManagedSandboxDeployment.shutdown_drain_s`.
     :returns: None once every task has settled (cancellations and any
         in-flight failures are absorbed via ``return_exceptions``).
     """

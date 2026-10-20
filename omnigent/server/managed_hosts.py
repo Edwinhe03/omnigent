@@ -40,6 +40,10 @@ stores into ``create_app``):
          # For SEVERAL providers, replace `provider:` with a `providers:`
          # list (mutually exclusive); a create picks one by name via
          # `sandbox_provider`, else the first. See parse_sandbox_config.
+         shutdown_drain_s: 0      # optional; deployment-wide. Seconds a
+                                  # shutting-down server waits for in-flight
+                                  # launches to bind their host; needs another
+                                  # replica to take the host (default: 0)
          reaper:                  # optional; deployment-wide, not per-provider
            enabled: true          # default: false
            terminate_after_offline_days: 30  # default: 30 days
@@ -745,12 +749,19 @@ class ManagedSandboxDeployment:
         default a request that names no provider gets.
     :param reaper: One deployment-wide reaper policy shared by every
         configured provider.
+    :param shutdown_drain_s: Seconds a shutting-down server waits for
+        in-flight launches to bind their session to a host before
+        cancelling them. A launch can only bind through another replica
+        (this one has stopped accepting connections), so ``0`` (no wait)
+        suits a single replica. A multi-replica deployment sizes it, plus
+        uvicorn's graceful shutdown, inside its termination grace period.
     """
 
     configs: tuple[ManagedSandboxConfig, ...]
     reaper: ManagedSandboxReaperConfig = dataclass_field(
         default_factory=ManagedSandboxReaperConfig
     )
+    shutdown_drain_s: float = 0.0
 
     def __post_init__(self) -> None:
         # Enforce the "never empty" invariant the accessors rely on
@@ -766,6 +777,7 @@ class ManagedSandboxDeployment:
         config: ManagedSandboxConfig,
         *,
         reaper: ManagedSandboxReaperConfig | None = None,
+        shutdown_drain_s: float = 0.0,
     ) -> ManagedSandboxDeployment:
         """
         Wrap one provider config as a one-provider deployment.
@@ -776,9 +788,14 @@ class ManagedSandboxDeployment:
 
         :param config: The single provider's config.
         :param reaper: Optional deployment-wide reaper policy.
+        :param shutdown_drain_s: See :attr:`shutdown_drain_s`.
         :returns: A deployment offering exactly *config*.
         """
-        return cls(configs=(config,), reaper=reaper or ManagedSandboxReaperConfig())
+        return cls(
+            configs=(config,),
+            reaper=reaper or ManagedSandboxReaperConfig(),
+            shutdown_drain_s=shutdown_drain_s,
+        )
 
     @property
     def default(self) -> ManagedSandboxConfig:
@@ -1399,11 +1416,24 @@ def parse_sandbox_config(raw: object) -> ManagedSandboxDeployment | None:
     if not isinstance(raw, dict):
         raise ValueError("server config 'sandbox' must be a mapping")
     reaper = _parse_managed_sandbox_reaper_config(raw)
+    shutdown_drain_s = raw.get("shutdown_drain_s", 0)
+    if (
+        not isinstance(shutdown_drain_s, (int, float))
+        or isinstance(shutdown_drain_s, bool)
+        or shutdown_drain_s < 0
+    ):
+        raise ValueError(
+            "server config 'sandbox.shutdown_drain_s' must be a non-negative number of seconds"
+        )
     if "providers" in raw:
-        return _parse_multi_provider_sandbox_config(raw, reaper=reaper)
+        return replace(
+            _parse_multi_provider_sandbox_config(raw, reaper=reaper),
+            shutdown_drain_s=float(shutdown_drain_s),
+        )
     return ManagedSandboxDeployment.single(
         _parse_single_provider_sandbox_config(raw),
         reaper=reaper,
+        shutdown_drain_s=float(shutdown_drain_s),
     )
 
 
@@ -1480,7 +1510,9 @@ def _parse_multi_provider_sandbox_config(
     # Shared keys describe THIS server, so they ride into every entry
     # instead of being repeated per entry.
     shared = {
-        key: value for key, value in raw.items() if key not in {"providers", "provider", "reaper"}
+        key: value
+        for key, value in raw.items()
+        if key not in {"providers", "provider", "reaper", "shutdown_drain_s"}
     }
     parsed: list[ManagedSandboxConfig] = []
     seen: set[str] = set()
@@ -1494,11 +1526,12 @@ def _parse_multi_provider_sandbox_config(
             raise ValueError(
                 f"server config 'sandbox.providers[{index}]' must not nest 'providers'"
             )
-        if "reaper" in entry:
-            raise ValueError(
-                "server config 'sandbox.reaper' is deployment-wide and must be set "
-                "next to 'providers', not inside a provider entry"
-            )
+        for key in ("reaper", "shutdown_drain_s"):
+            if key in entry:
+                raise ValueError(
+                    f"server config 'sandbox.{key}' is deployment-wide and must be set "
+                    "next to 'providers', not inside a provider entry"
+                )
         config = _parse_single_provider_sandbox_config({**shared, **entry})
         # Always a str: the single-provider parser rejects anything else.
         name = str(config.provider)
