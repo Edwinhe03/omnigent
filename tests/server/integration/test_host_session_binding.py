@@ -1923,6 +1923,8 @@ async def test_shutdown_cancelling_the_bind_write_keeps_the_session_startable(
 
     shutdown = asyncio.create_task(cancel_managed_launch_tasks(drain_s=0.2))
     await asyncio.sleep(0.5)
+    # Past the drain, shutdown still waits for the bind write to land.
+    assert not shutdown.done()
     release.set()
     await asyncio.wait_for(shutdown, timeout=15)
 

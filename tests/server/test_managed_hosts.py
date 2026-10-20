@@ -257,12 +257,21 @@ def test_parse_shutdown_drain_is_deployment_wide(providers: bool) -> None:
     assert config.shutdown_drain_s == 240.0
 
 
-@pytest.mark.parametrize("value", [-1, True, "240s", float("inf"), float("nan")])
+@pytest.mark.parametrize("value", [-1, True, "240s", float("inf"), float("nan"), 10**400])
 def test_parse_shutdown_drain_rejects_malformed_value(value: object) -> None:
     with pytest.raises(ValueError, match=r"shutdown_drain_s.*non-negative"):
         parse_sandbox_config(
             {"provider": "modal", "server_url": "https://s.example.com", "shutdown_drain_s": value}
         )
+
+
+@pytest.mark.parametrize("value", [-1.0, float("inf"), float("nan")])
+def test_directly_built_deployment_rejects_malformed_shutdown_drain(value: float) -> None:
+    """Embedders build the deployment in code, so it validates the drain itself."""
+    config = parse_sandbox_config({"provider": "modal", "server_url": "https://s.example.com"})
+    assert config is not None
+    with pytest.raises(ValueError, match=r"shutdown_drain_s.*non-negative"):
+        ManagedSandboxDeployment(configs=config.configs, shutdown_drain_s=value)
 
 
 def test_parse_shutdown_drain_rejects_per_provider_override() -> None:

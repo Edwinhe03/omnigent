@@ -728,6 +728,11 @@ class ManagedSandboxReaperConfig:
     sweep_interval_s: int = 24 * 60 * 60
 
 
+_SHUTDOWN_DRAIN_ERROR = (
+    "server config 'sandbox.shutdown_drain_s' must be a non-negative number of seconds"
+)
+
+
 @dataclass
 class ManagedSandboxDeployment:
     """
@@ -770,6 +775,9 @@ class ManagedSandboxDeployment:
         # direct constructor passed ``configs=()``.
         if not self.configs:
             raise ValueError("ManagedSandboxDeployment requires at least one provider config")
+        # Embedders construct this directly, bypassing the YAML parser.
+        if not math.isfinite(self.shutdown_drain_s) or self.shutdown_drain_s < 0:
+            raise ValueError(_SHUTDOWN_DRAIN_ERROR)
 
     @classmethod
     def single(
@@ -1416,25 +1424,22 @@ def parse_sandbox_config(raw: object) -> ManagedSandboxDeployment | None:
     if not isinstance(raw, dict):
         raise ValueError("server config 'sandbox' must be a mapping")
     reaper = _parse_managed_sandbox_reaper_config(raw)
-    shutdown_drain_s = raw.get("shutdown_drain_s", 0)
-    if (
-        not isinstance(shutdown_drain_s, (int, float))
-        or isinstance(shutdown_drain_s, bool)
-        or not math.isfinite(shutdown_drain_s)
-        or shutdown_drain_s < 0
-    ):
-        raise ValueError(
-            "server config 'sandbox.shutdown_drain_s' must be a non-negative number of seconds"
-        )
+    raw_drain = raw.get("shutdown_drain_s", 0)
+    if not isinstance(raw_drain, (int, float)) or isinstance(raw_drain, bool):
+        raise ValueError(_SHUTDOWN_DRAIN_ERROR)
+    try:
+        shutdown_drain_s = float(raw_drain)
+    except OverflowError:
+        raise ValueError(_SHUTDOWN_DRAIN_ERROR) from None
     if "providers" in raw:
         return replace(
             _parse_multi_provider_sandbox_config(raw, reaper=reaper),
-            shutdown_drain_s=float(shutdown_drain_s),
+            shutdown_drain_s=shutdown_drain_s,
         )
     return ManagedSandboxDeployment.single(
         _parse_single_provider_sandbox_config(raw),
         reaper=reaper,
-        shutdown_drain_s=float(shutdown_drain_s),
+        shutdown_drain_s=shutdown_drain_s,
     )
 
 
