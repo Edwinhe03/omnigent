@@ -290,10 +290,12 @@ async def test_gateway_preview_needs_no_host_or_inference_binding(env: _Env, row
 @pytest.mark.parametrize(
     ("reason", "expected_error"),
     [
-        ("No models are available for Codex.", {"error": "No models are available for Codex."}),
-        ("", {}),
+        (("No models are available for Codex.",), {"error": "No models are available for Codex."}),
+        ((), {}),
+        (("first", "second"), {}),
+        (("x" * 400,), {"error": "x" * 300}),
     ],
-    ids=["with-reason", "without-reason"],
+    ids=["with-reason", "without-reason", "non-message-args", "long-reason"],
 )
 async def test_provider_certain_no_model_is_reachable_reports_unsupported(
     env: _Env, reason, expected_error
@@ -302,7 +304,7 @@ async def test_provider_certain_no_model_is_reachable_reports_unsupported(
 
     target = env.app.state.sandbox_config.default
     target.host_config = None
-    target.default_model_options = AsyncMock(side_effect=NoReachableModels(reason))
+    target.default_model_options = AsyncMock(side_effect=NoReachableModels(*reason))
     env.app.state.inference_catalog = SandboxInferenceService(env.app.state)
     response = await env.client.get(
         "/v1/sandbox-providers/agent_sandbox/harnesses/codex-native/model-options"

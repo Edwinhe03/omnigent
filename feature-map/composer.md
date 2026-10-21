@@ -154,9 +154,9 @@ and steers messages while the agent is busy.
   whose preview is `unsupported` renders disabled with that reason. Agent rows
   (bundle and your own) are never grayed out, since they can switch brains or
   bring their own provider; selecting one with no models still blocks submit,
-  and a blocked brain harness is named in the message. A failed or timed-out preview never disables anything. This is distinct
-  from a connected host's own catalog and from a bound (`inference_models`)
-  target. Covered by
+  and a blocked brain harness is named in the message. A failed or timed-out
+  preview never disables anything. This is distinct from a connected host's
+  own catalog and from a bound (`inference_models`) target. Covered by
   `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py`,
   `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`
   and `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_sandbox_harness_without_reachable_models_blocks_launch`.

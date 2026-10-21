@@ -24,6 +24,8 @@ from omnigent.server.routes._session_create_validation import validate_session_a
 
 _logger = logging.getLogger(__name__)
 _DEFAULT_MODEL_OPTIONS_TIMEOUT_S = 10.0
+# The provider's reason reaches the browser verbatim; keep it to a sentence.
+_NO_REACHABLE_MODELS_REASON_MAX_CHARS = 300
 
 
 def inference_service(request: Request) -> Any:
@@ -253,9 +255,17 @@ def create_sandbox_inference_router(
                 if not models:
                     result["error"] = "The gateway lists no usable models for this harness."
             except NoReachableModels as exc:
+                reason = exc.args[0] if len(exc.args) == 1 and isinstance(exc.args[0], str) else ""
+                reason = reason.strip()[:_NO_REACHABLE_MODELS_REASON_MAX_CHARS]
+                _logger.info(
+                    "Sandbox provider reports no reachable models for %s/%s: %s",
+                    provider,
+                    harness,
+                    reason or "(no reason)",
+                )
                 result["status"] = "unsupported"
-                if str(exc):
-                    result["error"] = str(exc)
+                if reason:
+                    result["error"] = reason
             except Exception:  # noqa: BLE001 - optional preview must not block a default launch
                 _logger.warning(
                     "AI Gateway model preview failed for %s/%s", provider, harness, exc_info=True

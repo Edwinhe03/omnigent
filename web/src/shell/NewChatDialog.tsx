@@ -3219,12 +3219,12 @@ export function NewChatLandingScreen() {
     sandboxSelected &&
     sandboxModelCapabilities?.default_models === true &&
     sandboxModelCapabilities.inference_models !== true;
-  const sandboxPreviewEnabled =
+  const sandboxPreviewsOffered =
     sandboxSelected &&
     previewSandboxProvider !== null &&
-    previewHarness !== null &&
     info !== "loading" &&
     (sandboxModelCapabilities?.inference_models === true || sandboxDefaultModelsOffered);
+  const sandboxPreviewEnabled = sandboxPreviewsOffered && previewHarness !== null;
   const sandboxModels = useSandboxModelOptions(
     previewSandboxProvider,
     previewHarness,
@@ -3232,9 +3232,7 @@ export function NewChatLandingScreen() {
     cacheUser,
     sandboxPreviewEnabled,
   );
-  // Only harness rows gray out. An agent (bundle or your own) can switch brains
-  // or bring its own provider, so its row stays usable; picking one that has no
-  // models is blocked by the selected-agent check instead.
+  // Only harness rows gray out; agents can switch brains, so the submit check blocks them.
   const sandboxPreviewEntries = useMemo(
     () =>
       harnessEntries.flatMap((agent) => {
@@ -3248,10 +3246,7 @@ export function NewChatLandingScreen() {
       previewSandboxProvider,
       sandboxPreviewEntries,
       cacheUser,
-      sandboxSelected &&
-        previewSandboxProvider !== null &&
-        info !== "loading" &&
-        (sandboxModelCapabilities?.inference_models === true || sandboxDefaultModelsOffered),
+      sandboxPreviewsOffered,
     );
   const sandboxBlockedReasons = useMemo(
     () =>
@@ -3272,10 +3267,8 @@ export function NewChatLandingScreen() {
   const sandboxHasModelCatalog = sandboxInferenceConfigured || sandboxDefaultModelsEnabled;
   const sandboxCatalogPending =
     sandboxPreviewEnabled && sandboxModels.data === undefined && sandboxModels.isLoading;
-  // An advisory default catalog never blocks launch, unless its provider is
-  // certain no model can serve the harness.
+  // Advisory catalogs never block launch; only a provider's certain "unsupported" does.
   const sandboxSelectedUnsupported = sandboxPreviewEnabled && previewIsUnsupported(sandboxModels);
-  // A bundle agent blocked by its picked brain harness names the harness, not the agent.
   const sandboxBlockedName =
     selectedNativeHarness === null && pickedHarness !== null
       ? (brainHarnessLabelsAll[pickedHarness] ?? pickedHarness)
