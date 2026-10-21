@@ -11421,6 +11421,19 @@ describe("managed sandbox gateway preview", () => {
     expect(prefetch).toHaveBeenLastCalledWith(expect.not.arrayContaining(["a_polly"]));
   });
 
+  it("prefetches harness rows when the picker opens by hotkey", async () => {
+    preview();
+    const prefetch = vi.fn();
+    vi.mocked(useSandboxUnsupportedAgents).mockReturnValue({ unsupported: new Map(), prefetch });
+    renderGatewaySandbox();
+    expect(prefetch).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { code: "KeyM", ctrlKey: true, shiftKey: true });
+    await waitFor(() =>
+      expect(prefetch).toHaveBeenCalledWith(expect.arrayContaining(["a1", "a2"])),
+    );
+    expect(prefetch).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the picker usable while the selected agent's catalog loads", () => {
     vi.mocked(useSandboxModelOptions).mockReturnValue({
       data: undefined,

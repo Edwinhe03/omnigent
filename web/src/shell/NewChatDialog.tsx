@@ -1744,6 +1744,13 @@ export function AgentHarnessPicker({
     more.sort((first, second) => rank(first, secondaryOrder) - rank(second, secondaryOrder));
     return { readyHarnessEntries: ready, moreHarnessEntries: more };
   }, [harnessEntries, host, hideUnconfigured, effectiveAgentId, promotedHarnessId]);
+  // Opening by hotkey skips onOpenChange, so prefetch here like a pointer open.
+  const prefetchedOpenNonce = useRef(0);
+  useEffect(() => {
+    if (!openNonce || openNonce === prefetchedOpenNonce.current) return;
+    prefetchedOpenNonce.current = openNonce;
+    onPrefetchEntries?.(readyHarnessEntries.map((agent) => agent.id));
+  }, [openNonce, onPrefetchEntries, readyHarnessEntries]);
   const selectedOtherHarness = moreHarnessEntries.find((agent) => agent.id === effectiveAgentId);
   const otherHarnessLabel =
     selectedOtherHarness && !autoHarnessActive

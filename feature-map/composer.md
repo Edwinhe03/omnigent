@@ -149,8 +149,9 @@ and steers messages while the agent is busy.
   A failed listing shows its error and keeps Default launchable; a
   harness the catalog cannot serve keeps its ordinary list. When the provider
   reports `unsupported` (no model can serve the harness), the composer shows
-  its reason and submit stays disabled; opening the picker or its "Other..."
-  harness submenu prefetches the shown harness rows' previews, and a harness row
+  its reason and submit stays disabled; opening the picker (including by
+  Ctrl+Shift+M) or its "Other..." harness submenu prefetches the shown harness
+  rows' previews, and a harness row
   whose preview is `unsupported` renders disabled with that reason. Agent rows
   (bundle and your own) are never grayed out, since they can switch brains or
   bring their own provider; selecting one with no models still blocks submit,
