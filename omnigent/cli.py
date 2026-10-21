@@ -3559,7 +3559,7 @@ def _raise_live_daemon_conflict(
     from omnigent.cli_diagnostics import SUPPRESS_RECOVERY_HINT_ATTR
 
     # server_url is None in local mode; "" makes the hint say --server "".
-    stop_command = _host_stop_command(conflict.server_url or "")
+    stop_command = _host_stop_command(conflict.target if conflict.server_url else "")
     same_workspace = (
         conflict.mode == "server"
         and record.mode == "server"
@@ -10953,8 +10953,11 @@ def _stop_daemon_sessions(
     stopped = 0
     max_workers = min(total, _HOST_SESSION_STOP_MAX_WORKERS)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        # Each worker runs in a copy of this context so it keeps the caller's
+        # record org scope (_record_org_scope); threads don't inherit it.
         futures = {
             pool.submit(
+                contextvars.copy_context().run,
                 _stop_session_on_server,
                 base_url=result.base_url,
                 session_id=session_id,

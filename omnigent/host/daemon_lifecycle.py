@@ -78,14 +78,19 @@ def normalize_daemon_target(server_url: str | None, *, org_id: str | None = None
 
     :param server_url: Requested server URL, or ``None`` / empty for local mode.
     :param org_id: Workspace the daemon is bound to, e.g. ``"2850744067564480"``.
-        Appended as ``?o=`` (when the URL has no query) so daemons for different
-        workspaces behind one account host get distinct records.
+        Added as an ``o`` query parameter (unless the URL already selects one)
+        so daemons for different workspaces behind one account host get
+        distinct records.
     :returns: ``"local"`` for local mode, else a canonical server URL.
     """
     if not server_url:
         return _LOCAL_DAEMON_MARKER
-    if org_id and "?" not in server_url:
-        server_url = f"{server_url.rstrip('/')}?o={org_id}"
+    if org_id:
+        parsed = urlsplit(server_url)
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        if not any(key == "o" for key, _ in query):
+            query.append(("o", org_id))
+            server_url = urlunsplit(parsed._replace(query=urlencode(query)))
 
     fallback_target = server_url.rstrip("/")
     try:

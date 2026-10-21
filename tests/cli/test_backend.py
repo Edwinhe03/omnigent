@@ -4072,6 +4072,8 @@ def test_foreground_and_legacy_records_use_the_bare_server_url(
     assert legacy.server_url == _ACCOUNT_SERVER
     assert cli._daemon_base_url(legacy) == _ACCOUNT_SERVER
 
+    assert cli._record_probed_through(foreground, target).server_url == _ACCOUNT_SERVER
+
 
 def test_bare_daemon_record_never_matches_a_workspace_target(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -4198,15 +4200,40 @@ def test_apps_url_with_a_stored_org_keeps_its_url_only_key_and_no_pin(
     assert PINNED_DATABRICKS_ORG_ENV_VAR not in cli._build_host_daemon_env(server_url=app)
 
 
-def test_record_probed_through_keeps_a_bare_server_url() -> None:
+def test_stop_daemon_sessions_sends_each_stop_with_the_records_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session stops run on worker threads; they must keep the record's org, not the caller's."""
+    from omnigent.cli_auth import load_databricks_org_id
+
+    _select_workspace(monkeypatch, "222")
     record = cli._HostDaemonRecord(
         pid=4242,
-        target=_ACCOUNT_SERVER,
+        target=f"{_ACCOUNT_SERVER}?o=111",
         mode="server",
         server_url=_ACCOUNT_SERVER,
         log_path=None,
         started_at=1,
         host_id="host_abc",
     )
-    probed = cli._record_probed_through(record, f"{_ACCOUNT_SERVER}?o=111")
-    assert probed.server_url == _ACCOUNT_SERVER
+    monkeypatch.setattr(
+        cli,
+        "_sessions_for_daemon",
+        lambda record: cli._DaemonSessionsResult(
+            base_url=_ACCOUNT_SERVER,
+            sessions=[{"id": f"conv_{i}", "status": "running"} for i in range(4)],
+            error=None,
+        ),
+    )
+    orgs: list[str | None] = []
+    monkeypatch.setattr(
+        cli,
+        "_stop_session_on_server",
+        lambda *, base_url, session_id: orgs.append(load_databricks_org_id(base_url)),
+    )
+
+    with cli._record_org_scope(record):
+        stopped = cli._stop_daemon_sessions(record)
+
+    assert stopped == 4
+    assert orgs == ["111"] * 4

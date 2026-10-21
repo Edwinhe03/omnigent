@@ -80,8 +80,13 @@ def test_daemon_targets_differ_per_workspace_on_one_account_host(tmp_path: Path)
     assert daemon_record_path(prod, base_dir=tmp_path) != daemon_record_path(
         canary, base_dir=tmp_path
     )
-    # An explicit query on the URL is kept as-is rather than overridden.
+    # An explicit selector on the URL is kept rather than overridden...
     assert normalize_daemon_target(f"{server}?o=333", org_id="111") == f"{server}?o=333"
+    # ...but another query parameter doesn't suppress the workspace key.
+    assert normalize_daemon_target(f"{server}?trace=1", org_id="111") == f"{server}?trace=1&o=111"
+    assert normalize_daemon_target(f"{server}?trace=1", org_id="222") != normalize_daemon_target(
+        f"{server}?trace=1", org_id="111"
+    )
 
 
 @pytest.mark.parametrize(
