@@ -669,7 +669,7 @@ def pinned_databricks_org_id(server_url: str) -> str | None:
     """
     scoped = _SCOPED_ORG_PIN.get()
     pin = scoped if scoped is not None else os.environ.get(PINNED_DATABRICKS_ORG_ENV_VAR, "")
-    org_id, separator, origin = pin.partition("@")
+    org_id, separator, origin = pin.rpartition("@")
     if not separator or not org_id or origin != _pin_origin(server_url):
         return None
     return org_id

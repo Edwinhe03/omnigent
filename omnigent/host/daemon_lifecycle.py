@@ -332,10 +332,13 @@ def find_same_workspace_daemon(
             workspace_id = _lookup(server_url, None)
             if workspace_id is None:
                 return None
-        # Skip the caller's own org-keyed record; a bare legacy record on this URL may still match.
-        if normalize_daemon_target(record.target) == normalize_daemon_target(
-            server_url, org_id=workspace_id
-        ):
+        # Skip the caller's own org-keyed record. A bare record on this URL matches
+        # only by its recorded workspace: one inferred from the URL would just be
+        # the caller's own selection on an account host.
+        record_target = normalize_daemon_target(record.target)
+        if record_target == normalize_daemon_target(server_url, org_id=workspace_id):
+            continue
+        if not record.workspace_id and record_target == normalize_daemon_target(server_url):
             continue
         if _lookup(record.server_url, record.workspace_id) == workspace_id:
             return record

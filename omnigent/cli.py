@@ -2666,11 +2666,9 @@ def _selected_org_id(server_url: str | None) -> str | None:
 
 def _record_org_scope(record: _HostDaemonRecord) -> contextlib.AbstractContextManager[None]:
     """Route requests made for *record* to the workspace its daemon is bound to."""
-    from urllib.parse import parse_qs, urlsplit
-
     from omnigent.cli_auth import scoped_databricks_org_id
 
-    org_id = parse_qs(urlsplit(record.target).query).get("o", [None])[0] or record.workspace_id
+    org_id = _org_id_from_url(record.target) or record.workspace_id
     return scoped_databricks_org_id(record.server_url or record.target, org_id)
 
 
@@ -9916,9 +9914,7 @@ def _host_http_json(
     from omnigent.chat import _remote_headers
 
     try:
-        # Cache the resolved headers per (base_url, host_id, org): the auth
-        # resolution is the expensive part (token mint / CLI shell-out), the
-        # slice-key varies by host, and the org by the workspace a call is for.
+        # Headers depend on base URL, host (slice key) and workspace org.
         from omnigent.cli_auth import load_databricks_org_id
 
         cache_key = (base_url, host_id, load_databricks_org_id(base_url))

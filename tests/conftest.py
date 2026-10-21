@@ -516,11 +516,7 @@ def _isolate_origin_identity(
 
 @pytest.fixture(autouse=True)
 def _isolate_databricks_org_pin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drop any workspace pin set by CLI server resolution before the next test.
-
-    Resolving a ``?o=`` URL pins the process via ``os.environ`` on purpose, so
-    without this a pin from one test would change another test's stored-selector
-    lookups. Setting the var first registers it for removal at teardown.
+    """Clear the process-wide Databricks org pin between tests.
 
     :param monkeypatch: Pytest monkeypatch fixture.
     :returns: None.
