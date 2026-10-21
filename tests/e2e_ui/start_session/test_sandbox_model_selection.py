@@ -272,11 +272,22 @@ async def _drive_unsupported_harness(base_url: str, session_id: str, *, evidence
         page = await browser.new_page(viewport={"width": 1440, "height": 960})
         creates: list[dict] = []
         try:
+            agents = json.loads(_codex_native_agents_body())["data"]
+            agents.append(
+                {
+                    "id": "ag_claude_e2e",
+                    "name": "claude-native-ui",
+                    "display_name": "Claude Code",
+                    "description": "Anthropic's coding agent",
+                    "harness": "claude-native",
+                    "skills": [],
+                }
+            )
             await _register_common_routes(
                 page,
                 created_session_id=session_id,
                 create_bodies=creates,
-                agents_body=_codex_native_agents_body(),
+                agents_body=json.dumps({"data": agents}),
             )
             info = json.loads(_managed_info_body())
             info.update(
@@ -289,27 +300,45 @@ async def _drive_unsupported_harness(base_url: str, session_id: str, *, evidence
                 re.compile(r"/v1/sessions\?(?!.*pinned=).*visibility=mine"),
                 lambda route: route.fulfill(json={"data": []}),
             )
-            await page.route(
-                "**/v1/sandbox-providers/*/harnesses/*/model-options*",
-                lambda route: route.fulfill(
+
+            async def models(route: Route) -> None:
+                codex = "/harnesses/codex-native/" in route.request.url
+                await route.fulfill(
                     json={
                         "configured": False,
-                        "status": "unsupported",
-                        "models": [],
+                        "status": "unsupported" if codex else "ready",
+                        "models": []
+                        if codex
+                        else [{"id": "system.ai.claude-opus-4-8", "displayName": "Opus 4.8"}],
                         "configuration_revision": None,
                         "provider_label": "AI Gateway",
                         "default_model": None,
-                        "error": "No models are available for Codex.",
                     }
-                ),
+                )
+
+            await page.route("**/v1/sandbox-providers/*/harnesses/*/model-options*", models)
+            await page.add_init_script(
+                "window.localStorage.setItem('omnigent:last-agent-id', 'ag_codex_e2e')"
             )
             await page.goto(base_url)
             await page.get_by_test_id("new-chat-landing-input").fill("Reply with READY.")
-            await expect(
-                page.get_by_role("alert").filter(has_text="No models are available for Codex.")
-            ).to_be_visible()
+            blocked = (
+                "No models are available for Codex. Ask an administrator to enable model access."
+            )
+            await expect(page.get_by_role("alert").filter(has_text=blocked)).to_be_visible()
             await expect(page.get_by_test_id("new-chat-landing-submit")).to_be_disabled()
+            picker = page.get_by_test_id("new-chat-landing-agent-select")
+            await picker.click()
+            await expect(picker).to_have_attribute("aria-expanded", "true")
+            await expect(
+                page.get_by_test_id("new-chat-landing-agent-ag_codex_e2e")
+            ).to_have_attribute("aria-disabled", "true")
             await page.screenshot(path=str(evidence / "unsupported-harness-blocked.png"))
-            assert creates == []
+            await page.get_by_test_id("new-chat-landing-agent-ag_claude_e2e").click()
+            await expect(page.get_by_role("alert").filter(has_text=blocked)).to_have_count(0)
+            await page.get_by_test_id("new-chat-landing-submit").click()
+            await expect(page).to_have_url(re.compile(rf"/c/{session_id}$"))
+            assert len(creates) == 1
+            assert creates[0]["agent_id"] == "ag_claude_e2e"
         finally:
             await browser.close()

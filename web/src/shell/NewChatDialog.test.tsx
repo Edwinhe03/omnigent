@@ -3,6 +3,7 @@ import type * as SandboxModelOptionsModule from "@/hooks/useSandboxModelOptions"
 
 vi.mock("@/hooks/useSandboxModelOptions", async (importOriginal) => ({
   ...(await importOriginal<typeof SandboxModelOptionsModule>()),
+  useSandboxUnsupportedAgents: vi.fn(() => ({ unsupported: new Map(), prefetch: vi.fn() })),
   useSandboxModelOptions: vi.fn(() => ({
     data: {
       configured: false,
@@ -56,7 +57,11 @@ import {
   NewChatLandingScreen,
   resetLandingDraft,
 } from "./NewChatDialog";
-import { useSandboxModelOptions, type SandboxModelOptions } from "@/hooks/useSandboxModelOptions";
+import {
+  useSandboxModelOptions,
+  useSandboxUnsupportedAgents,
+  type SandboxModelOptions,
+} from "@/hooks/useSandboxModelOptions";
 import { ComposerAddMenu } from "@/components/composer/ComposerAddMenu";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
@@ -1204,6 +1209,10 @@ function setupLandingMocks() {
     isLoading: false,
     error: null,
   } as unknown as ReturnType<typeof useSandboxModelOptions>);
+  vi.mocked(useSandboxUnsupportedAgents).mockReturnValue({
+    unsupported: new Map(),
+    prefetch: vi.fn(),
+  });
   vi.mocked(useSkills).mockReset();
   vi.mocked(useSkills).mockImplementation(
     ({ target, enabled = true, starting = false }) =>
@@ -11308,6 +11317,79 @@ describe("managed sandbox gateway preview", () => {
       target: { value: "ship it" },
     });
     expect(screen.getByRole("alert")).toHaveTextContent(shown);
+    expect(screen.getByTestId("new-chat-landing-submit")).toBeDisabled();
+  });
+
+  it("hides the provider label and Default when no model can serve the harness", () => {
+    preview({
+      ...catalog,
+      status: "unsupported",
+      models: [],
+      error: "No models are available for Codex.",
+    });
+    renderGatewaySandbox();
+    selectAgent("a2");
+    openAgentModels("a2");
+    expect(screen.queryByTestId("sandbox-model-provider")).toBeNull();
+    expect(screen.queryByTestId("new-chat-landing-agent-model-default")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-agent-models")).toHaveTextContent(
+      "No models are available for Codex.",
+    );
+  });
+
+  it("keeps Default launchable when the latest preview request failed", async () => {
+    vi.mocked(useSandboxModelOptions).mockReturnValue({
+      data: { ...catalog, status: "unsupported", models: [] },
+      isLoading: false,
+      isError: true,
+      error: new Error("Gateway down"),
+    } as unknown as ReturnType<typeof useSandboxModelOptions>);
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as Response);
+    renderGatewaySandbox();
+    selectAgent("a2");
+    const { body } = await submitAndReadBody();
+    expect(body.agent_id).toBe("a2");
+    expect(body.model_override).toBeUndefined();
+  });
+
+  it("disables a row its cached preview rules out and prefetches shown rows", async () => {
+    preview();
+    const prefetch = vi.fn();
+    vi.mocked(useSandboxUnsupportedAgents).mockReturnValue({
+      unsupported: new Map([["a2", null]]),
+      prefetch,
+    });
+    renderGatewaySandbox();
+    selectAgent("a1");
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    expect(prefetch).toHaveBeenLastCalledWith(expect.arrayContaining(["a1", "a2"]));
+    const row = screen.getByTestId("new-chat-landing-agent-a2");
+    expect(row).toHaveAttribute("aria-disabled", "true");
+    fireEvent.focus(row);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "No models are available for Codex. Ask an administrator to enable model access.",
+    );
+  });
+
+  it("keeps the picker usable while the selected agent's catalog loads", () => {
+    vi.mocked(useSandboxModelOptions).mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      error: null,
+    } as unknown as ReturnType<typeof useSandboxModelOptions>);
+    renderGatewaySandbox();
+    expect(screen.queryByTestId("new-chat-landing-picker-loading")).toBeNull();
+    openAgentModels("a2");
+    expect(screen.getByTestId("new-chat-landing-agent-models")).toHaveTextContent(
+      "Loading models…",
+    );
+    closeMenu();
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "waiting" },
+    });
     expect(screen.getByTestId("new-chat-landing-submit")).toBeDisabled();
   });
 

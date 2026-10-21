@@ -256,7 +256,12 @@ import {
   DEVIN_NATIVE_PERMISSION_MODES,
 } from "@/lib/nativeHarnessModes";
 import { fetchHosts, useHostModelOptions, useHosts, type Host } from "@/hooks/useHosts";
-import { sandboxModelOptionsKey, useSandboxModelOptions } from "@/hooks/useSandboxModelOptions";
+import {
+  previewIsUnsupported,
+  sandboxModelOptionsKey,
+  useSandboxModelOptions,
+  useSandboxUnsupportedAgents,
+} from "@/hooks/useSandboxModelOptions";
 import { useSkills } from "@/hooks/useSkills";
 import { useOnboardingRunnerHost } from "@/hooks/useOnboardingRunnerHost";
 import { readArcaHostId, writeArcaHostId } from "@/lib/arcaHost";
@@ -1376,6 +1381,10 @@ function NewChatPickerLoading({
  * directly, while Edit selects the entry before opening its settings.
 
  */
+function noReachableModelsMessage(agentName: string | undefined): string {
+  return `No models are available for ${agentName ?? "this harness"}. Ask an administrator to enable model access.`;
+}
+
 export function AgentHarnessPicker({
   agentEntries,
   harnessEntries,
@@ -1412,6 +1421,8 @@ export function AgentHarnessPicker({
   autoHarnessActive = false,
   onSelectAutoHarness,
   openNonce = 0,
+  blockedReasons,
+  onPrefetchEntries,
 }: {
   agentEntries: AvailableAgent[];
   harnessEntries: AvailableAgent[];
@@ -1486,6 +1497,10 @@ export function AgentHarnessPicker({
   onSelectAutoHarness?: () => void;
   /** Bump to open the menu imperatively (the landing's model-picker hotkey). */
   openNonce?: number;
+  /** Agent id → why the target can't run it; those rows render disabled. */
+  blockedReasons?: ReadonlyMap<string, string>;
+  /** Called with the ids of rows the menu is about to show. */
+  onPrefetchEntries?: (agentIds: string[]) => void;
 }) {
   // Controlled so picking a row can close the menu.
   const [open, setOpen] = useState(false);
@@ -1641,14 +1656,16 @@ export function AgentHarnessPicker({
     const summary = details || entrySummaries?.[agent.id] || "Default";
     const editable = selectedConfigContent !== undefined && (isEntryConfigurable?.(agent) ?? true);
     const readiness = harnessReadinessOnHost(agent.harness, host);
-    const unavailable = !readiness.selectable && readiness.fallbackRelevant;
-    const warning = harnessWarningBadgeText(readiness.reason, collapsedBadge);
-    const warningMessage = harnessWarningMessage(
-      agent.display_name,
-      host?.name,
-      readiness.reason,
-      agent.harness,
-    );
+    const blockedReason = blockedReasons?.get(agent.id);
+    const unavailable =
+      blockedReason !== undefined || (!readiness.selectable && readiness.fallbackRelevant);
+    const warning =
+      blockedReason !== undefined
+        ? "No models available"
+        : harnessWarningBadgeText(readiness.reason, collapsedBadge);
+    const warningMessage =
+      blockedReason ??
+      harnessWarningMessage(agent.display_name, host?.name, readiness.reason, agent.harness);
     return (
       <HarnessPickerEntry
         key={agent.id}
@@ -1838,6 +1855,7 @@ export function AgentHarnessPicker({
           for (const agent of [...harnessEntries, ...agentEntries]) {
             void prefetchAvailableAgentDetails(agent, queryClient);
           }
+          onPrefetchEntries?.([...readyHarnessEntries, ...bundleEntries].map((agent) => agent.id));
         }
       }}
       trigger={{
@@ -1982,6 +2000,7 @@ export function AgentHarnessPicker({
                     data-testid="new-chat-landing-harness-more"
                     onSelect={(e) => {
                       e.preventDefault();
+                      onPrefetchEntries?.(moreHarnessEntries.map((agent) => agent.id));
                       setMenuPage("more");
                     }}
                     className="items-center"
@@ -1991,7 +2010,11 @@ export function AgentHarnessPicker({
                   </DropdownMenuItem>
                 ) : (
                   // Desktop: hover flyout submenu.
-                  <DropdownMenuSub>
+                  <DropdownMenuSub
+                    onOpenChange={(next) => {
+                      if (next) onPrefetchEntries?.(moreHarnessEntries.map((agent) => agent.id));
+                    }}
+                  >
                     <DropdownMenuSubTrigger
                       data-testid="new-chat-landing-harness-more"
                       className="cursor-pointer items-center"
@@ -3209,6 +3232,35 @@ export function NewChatLandingScreen() {
     cacheUser,
     sandboxPreviewEnabled,
   );
+  const sandboxPreviewEntries = useMemo(
+    () =>
+      [...harnessEntries, ...agentEntries].flatMap((agent) => {
+        const harness = nativeCodingAgentForAvailableAgent(agent)?.harness ?? agent.harness;
+        return harness ? [{ agentId: agent.id, harness }] : [];
+      }),
+    [harnessEntries, agentEntries],
+  );
+  const { unsupported: sandboxUnsupportedAgents, prefetch: prefetchSandboxPreviews } =
+    useSandboxUnsupportedAgents(
+      previewSandboxProvider,
+      sandboxPreviewEntries,
+      cacheUser,
+      sandboxSelected &&
+        previewSandboxProvider !== null &&
+        info !== "loading" &&
+        (sandboxModelCapabilities?.inference_models === true || sandboxDefaultModelsOffered),
+    );
+  const sandboxBlockedReasons = useMemo(
+    () =>
+      new Map(
+        [...sandboxUnsupportedAgents].map(([agentId, reason]) => [
+          agentId,
+          reason ??
+            noReachableModelsMessage(agentList.find((agent) => agent.id === agentId)?.display_name),
+        ]),
+      ),
+    [sandboxUnsupportedAgents, agentList],
+  );
   // A harness the default catalog cannot serve keeps its ordinary picker.
   const sandboxDefaultModelsEnabled =
     sandboxDefaultModelsOffered && sandboxModels.data?.status !== "unconfigured";
@@ -3219,16 +3271,15 @@ export function NewChatLandingScreen() {
     sandboxPreviewEnabled && sandboxModels.data === undefined && sandboxModels.isLoading;
   // An advisory default catalog never blocks launch, unless its provider is
   // certain no model can serve the harness.
-  const sandboxCatalogError =
-    sandboxPreviewEnabled && sandboxModels.data?.status === "unsupported"
-      ? (sandboxModels.data.error ??
-        `No models are available for ${selectedAgent?.display_name ?? "this harness"}. Ask an administrator to enable model access.`)
-      : sandboxPreviewEnabled && !sandboxDefaultModelsEnabled
-        ? (sandboxModels.error?.message ??
-          (sandboxModels.data?.configured && sandboxModels.data.status !== "ready"
-            ? (sandboxModels.data.error ?? "No usable models are available for this harness.")
-            : null))
-        : null;
+  const sandboxSelectedUnsupported = sandboxPreviewEnabled && previewIsUnsupported(sandboxModels);
+  const sandboxCatalogError = sandboxSelectedUnsupported
+    ? (sandboxModels.data?.error ?? noReachableModelsMessage(selectedAgent?.display_name))
+    : sandboxPreviewEnabled && !sandboxDefaultModelsEnabled
+      ? (sandboxModels.error?.message ??
+        (sandboxModels.data?.configured && sandboxModels.data.status !== "ready"
+          ? (sandboxModels.data.error ?? "No usable models are available for this harness.")
+          : null))
+      : null;
   const sandboxDefaultCatalogError = sandboxDefaultModelsEnabled
     ? (sandboxModels.error?.message ??
       (sandboxModels.data !== undefined &&
@@ -3575,8 +3626,7 @@ export function NewChatLandingScreen() {
           ? "unknown"
           : "unavailable"
       : undefined;
-  const pickerDataLoading =
-    sandboxCatalogPending ||
+  const pickerDataLoadingBesidesCatalog =
     agentsLoading ||
     (cachedPickerOptions !== null && (hostsLoading || info === "loading")) ||
     (projectParam !== "" &&
@@ -3590,6 +3640,7 @@ export function NewChatLandingScreen() {
       !routingOn &&
       harnessTriggerDetails.some((row) => row.label === "Model") &&
       (hostsLoading || info === "loading" || pickerModelsLoading));
+  const pickerDataLoading = sandboxCatalogPending || pickerDataLoadingBesidesCatalog;
   const pickerTarget = JSON.stringify([
     projectParam,
     selectedHostId,
@@ -3615,6 +3666,11 @@ export function NewChatLandingScreen() {
     (!harnessTriggerDetails.some((row) => row.label === "Model") ||
       pickerModelOptions.length > 0 ||
       routingOn);
+  // Switching to an agent whose sandbox catalog is still loading keeps the menu
+  // open; its models submenu shows "Loading models…" and submit stays disabled.
+  const pickerInteractiveWhileLoading =
+    interactiveWhileLoading ||
+    (sandboxPreviewEnabled && selectedAgent !== undefined && !pickerDataLoadingBesidesCatalog);
   const pickerOptions = useMemo<NewChatPickerOptions | null>(
     () =>
       selectedAgent && selectedAgent.id !== PENDING_AGENT_ID
@@ -3875,14 +3931,16 @@ export function NewChatLandingScreen() {
                   header: "Models",
                   leading: (
                     <>
-                      {sandboxHasModelCatalog && sandboxModels.data?.provider_label && (
-                        <div
-                          className="px-2 py-1 text-xs text-muted-foreground"
-                          data-testid="sandbox-model-provider"
-                        >
-                          {sandboxModels.data.provider_label}
-                        </div>
-                      )}
+                      {sandboxHasModelCatalog &&
+                        !sandboxSelectedUnsupported &&
+                        sandboxModels.data?.provider_label && (
+                          <div
+                            className="px-2 py-1 text-xs text-muted-foreground"
+                            data-testid="sandbox-model-provider"
+                          >
+                            {sandboxModels.data.provider_label}
+                          </div>
+                        )}
                       {selectedNativeHarness === "pi-native" && (
                         <Input
                           aria-label="Search models"
@@ -3899,14 +3957,15 @@ export function NewChatLandingScreen() {
                         </div>
                       )}
                       {!pickerModelsLoading && pickerModelOptions.length === 0 && (
-                        <div className="px-2 py-1 text-xs text-muted-foreground">
+                        <div className="whitespace-normal px-2 py-1 text-xs text-muted-foreground">
                           {pickerModelsError?.message ?? "Models unavailable"}
                         </div>
                       )}
                     </>
                   ),
                   choices: [
-                    ...(sandboxDefaultModelsEnabled ||
+                    // Default can't launch once the provider rules the harness out.
+                    ...((sandboxDefaultModelsEnabled && !sandboxSelectedUnsupported) ||
                     (!sandboxInferenceConfigured &&
                       pickerModelOptions.length > 0 &&
                       !pickerModelOptions.some((option) => option.isDefault))
@@ -7064,11 +7123,13 @@ export function NewChatLandingScreen() {
                         openNonce={modelPickerOpenNonce}
                         agentEntries={agentEntries}
                         harnessEntries={harnessEntries}
+                        blockedReasons={sandboxSelected ? sandboxBlockedReasons : undefined}
+                        onPrefetchEntries={prefetchSandboxPreviews}
                         effectiveAgentId={effectiveAgentId}
                         agentLabel={agentLabel}
                         hasAgents={agentList.length > 0}
                         loading={pickerLoading}
-                        interactiveWhileLoading={interactiveWhileLoading}
+                        interactiveWhileLoading={pickerInteractiveWhileLoading}
                         disabledLabel={noExecutionTargetSelected ? "No host selected" : undefined}
                         cacheKey={pickerCacheKey}
                         host={harnessWarningHost}
