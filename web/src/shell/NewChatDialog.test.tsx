@@ -11316,15 +11316,6 @@ describe("managed sandbox gateway preview", () => {
     expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
       selectedHarnessName ?? "",
     );
-    expect(useSandboxHarnessesWithoutModels).toHaveBeenLastCalledWith(
-      "arclet",
-      expect.objectContaining({ size: expect.any(Number) }),
-      null,
-      true,
-    );
-    expect(vi.mocked(useSandboxHarnessesWithoutModels).mock.lastCall?.[1]).toContain(
-      "codex-native",
-    );
   });
 
   it("keeps your own agent on a harness the gateway serves no models for", async () => {

@@ -150,9 +150,10 @@ and steers messages while the agent is busy.
   launchable; a harness the catalog cannot serve (`unconfigured`) keeps its
   ordinary list. A built-in harness whose listing is definitively `empty` is
   disabled with a "No models are available" tooltip and skipped as the default
-  pick; your own agents on that harness stay selectable. This is distinct
-  from a connected host's own catalog and from a bound (`inference_models`)
-  target. Covered by
+  pick; your own agents on that harness stay selectable. With "Hide unconfigured
+  harnesses" on, that row is hidden like other unavailable rows. This is
+  distinct from a connected host's own catalog and from a bound
+  (`inference_models`) target. Covered by
   `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py`,
   `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`
   and `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_sandbox_harness_without_models_is_disabled`.
@@ -335,7 +336,6 @@ Other connection providers alone do not enable the managed MCP picker.
   `local`, disable/re-enable, and uninstall with stale cache. Manually refresh
   both composers after disabling the plugin and confirm its skill disappears.
   Catalog/process checks do not prove browser rendering or live-model invocation.
-
 - **`attachments`:**
   `tests/browser_ui/chat/test_composer_attachments.py::test_attach_supported_files_and_remove`,
   `tests/browser_ui/chat/test_composer_attachments.py::test_file_dropped_on_the_transcript_attaches`,

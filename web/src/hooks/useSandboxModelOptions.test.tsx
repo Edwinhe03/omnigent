@@ -3,7 +3,7 @@ import { cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { authenticatedFetch } from "@/lib/identity";
-import { useSandboxModelOptions } from "./useSandboxModelOptions";
+import { useSandboxHarnessesWithoutModels, useSandboxModelOptions } from "./useSandboxModelOptions";
 
 vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
 const fetchMock = vi.mocked(authenticatedFetch);
@@ -85,5 +85,63 @@ describe("useSandboxModelOptions", () => {
     );
     await Promise.resolve();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("useSandboxHarnessesWithoutModels", () => {
+  const harnesses = new Set(["codex-native", "claude-native", "pi-native"]);
+
+  function previewBy(statusFor: (harness: string) => number | string) {
+    fetchMock.mockImplementation(async (url) => {
+      const harness = decodeURIComponent(String(url).split("/harnesses/")[1].split("/")[0]);
+      const status = statusFor(harness);
+      if (typeof status === "number") {
+        return new Response(JSON.stringify({ detail: "Gateway down" }), { status });
+      }
+      return new Response(JSON.stringify({ ...catalog, configured: false, models: [], status }));
+    });
+  }
+
+  it("reports only harnesses whose preview is definitively empty", async () => {
+    previewBy(
+      (harness) =>
+        ({ "codex-native": "empty", "claude-native": "unavailable", "pi-native": 503 })[harness]!,
+    );
+    const { result } = renderHook(
+      () => useSandboxHarnessesWithoutModels("lakebox", harnesses, "alice", true),
+      { wrapper: wrapper() },
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect([...result.current]).toEqual(["codex-native"]));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/sandbox-providers/lakebox/harnesses/codex-native/model-options?",
+    );
+  });
+
+  it("stops treating a harness as empty once its preview fails", async () => {
+    previewBy(() => "empty");
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(
+      () => useSandboxHarnessesWithoutModels("lakebox", new Set(["codex-native"]), "alice", true),
+      {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      },
+    );
+    await waitFor(() => expect(result.current.has("codex-native")).toBe(true));
+    previewBy(() => 503);
+    await client.refetchQueries();
+    await waitFor(() => expect(result.current.size).toBe(0));
+  });
+
+  it("does not query while disabled", async () => {
+    const { result } = renderHook(
+      () => useSandboxHarnessesWithoutModels("lakebox", harnesses, "alice", false),
+      { wrapper: wrapper() },
+    );
+    await Promise.resolve();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.current.size).toBe(0);
   });
 });

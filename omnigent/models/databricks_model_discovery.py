@@ -21,7 +21,7 @@ _SYSTEM_MODEL_PREFIX = "system.ai."
 _MODEL_SERVICES_MAX_RESULTS = 1000
 _MODEL_SERVICES_PARENT = "schemas/system.ai"
 #: Wire API a model service must advertise for the codex Responses route to serve it.
-CODEX_RESPONSES_API_TYPE = "codex/v1/responses"
+_CODEX_RESPONSES_API_TYPE = "codex/v1/responses"
 _PAGE_SIZE = 100
 _MAX_PAGES = 100
 _HTTP_TIMEOUT_S = 10.0
@@ -404,7 +404,7 @@ def discover_databricks_codex_models(
     headers = {"Authorization": f"Bearer {token}"}
     with httpx.Client(transport=transport, timeout=_HTTP_TIMEOUT_S) as client:
         model_ids = _list_model_service_ids(
-            client, workspace_url, headers, api_type=CODEX_RESPONSES_API_TYPE
+            client, workspace_url, headers, api_type=_CODEX_RESPONSES_API_TYPE
         )
     codex_ids = [model_id for model_id in model_ids if is_codex_compatible_model(model_id)]
     return tuple(sorted(codex_ids, key=_codex_preference_rank, reverse=True))

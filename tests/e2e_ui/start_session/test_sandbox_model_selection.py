@@ -324,9 +324,8 @@ async def _drive_modeless_harness(base_url: str, session_id: str) -> None:
                 "Claude Code"
             )
             await page.get_by_test_id("new-chat-landing-agent-select").click()
-            more = page.get_by_test_id("new-chat-landing-harness-more")
-            if await more.count():
-                await more.click()
+            # A disabled primary harness demotes to "Other...".
+            await page.get_by_test_id("new-chat-landing-harness-more").click()
             codex_row = page.get_by_test_id("new-chat-landing-agent-ag_codex_e2e")
             await expect(codex_row).to_have_attribute("aria-disabled", "true")
             await codex_row.get_by_text("Codex").hover()

@@ -86,7 +86,8 @@ export function useSandboxHarnessesWithoutModels(
     })),
   });
   const emptyKey = ordered
-    .filter((_, index) => results[index]?.data?.status === "empty")
+    // A refetch error keeps the last data, so a stale "empty" must not survive it.
+    .filter((_, index) => !results[index]?.isError && results[index]?.data?.status === "empty")
     .join("\n");
   return useMemo(() => new Set(emptyKey === "" ? [] : emptyKey.split("\n")), [emptyKey]);
 }
