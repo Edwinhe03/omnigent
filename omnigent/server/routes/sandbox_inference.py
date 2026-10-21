@@ -18,6 +18,7 @@ from omnigent.inference_config import (
     resolve_bound_provider,
 )
 from omnigent.server.auth import AuthProvider
+from omnigent.server.managed_hosts import NoReachableModels
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._session_create_validation import validate_session_agent
 
@@ -251,6 +252,10 @@ def create_sandbox_inference_router(
                 result.update(models=models, status="ready" if models else "empty")
                 if not models:
                     result["error"] = "The gateway lists no usable models for this harness."
+            except NoReachableModels as exc:
+                result["status"] = "unsupported"
+                if str(exc):
+                    result["error"] = str(exc)
             except Exception:  # noqa: BLE001 - optional preview must not block a default launch
                 _logger.warning(
                     "AI Gateway model preview failed for %s/%s", provider, harness, exc_info=True

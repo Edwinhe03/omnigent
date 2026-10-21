@@ -146,17 +146,15 @@ and steers messages while the agent is busy.
   the sandbox's default catalog when `/v1/info` advertises `default_models` (an
   unbound gateway with `sandbox.model_discovery`, or a provider hook): rows under
   the provider's label plus a "Default" row, for native and SDK agents.
-  A failed or `unavailable` listing shows its error and keeps Default
-  launchable; a harness the catalog cannot serve (`unconfigured`) keeps its
-  ordinary list. A built-in harness whose listing is definitively `empty` is
-  disabled with a "No models are available" tooltip and skipped as the default
-  pick; your own agents on that harness stay selectable. With "Hide unconfigured
-  harnesses" on, that row is hidden like other unavailable rows. This is
-  distinct from a connected host's own catalog and from a bound
-  (`inference_models`) target. Covered by
+  A failed listing shows its error and keeps Default launchable; a
+  harness the catalog cannot serve keeps its ordinary list. When the provider
+  reports `unsupported` (no model can serve the harness), the composer shows
+  its reason and submit stays disabled. This is distinct
+  from a connected host's own catalog and from a bound (`inference_models`)
+  target. Covered by
   `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py`,
   `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`
-  and `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_sandbox_harness_without_models_is_disabled`.
+  and `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_sandbox_harness_without_reachable_models_blocks_launch`.
 - Attach files or type `/` before the first send.
 - For a managed sandbox, submit a prompt and close the browser once the session
   URL appears, while provisioning is still in progress. Reopen that URL after

@@ -25,6 +25,10 @@ catalog is available. `/v1/info` advertises this capability as `default_models`.
 `ManagedSandboxConfig.default_model_options` supplies request-scoped choices for
 the selected harness and authenticated user. "Default" describes the source of
 these choices; it does not select a default model or bind an inference profile.
+The catalog is advisory: an empty or failed listing keeps "Default" launchable.
+A provider that is certain no model can serve the harness raises
+`NoReachableModels`; the preview then reports `unsupported` with the provider's
+reason, and the picker blocks launch for that harness.
 
 An unbound gateway configured through `sandbox.model_discovery` and
 `sandbox.host_config.providers` also enables this capability. The preview

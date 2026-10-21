@@ -263,13 +263,12 @@ Cross-harness journeys:
 - **`model-and-effort`, managed sandbox before a host exists:**
   `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py::test_sandbox_codex_picker_offers_gateway_models_before_a_host_exists`,
   `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`,
-  `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_sandbox_harness_without_models_is_disabled`.
+  `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_sandbox_harness_without_reachable_models_blocks_launch`.
   The picker offers the sandbox gateway's models for native and SDK agents with
   a Harness default row; efforts come from the listing's reasoning metadata, and
-  an unavailable listing keeps Harness default launchable. A built-in harness
-  whose listing is `empty` is disabled with a tooltip and never the default
-  pick. Connected-host discovery and bound (`inference_models`) targets are
-  unchanged.
+  an unavailable listing keeps Harness default launchable. An `unsupported`
+  listing (the provider is certain no model can serve the harness) blocks launch. Connected-host
+  discovery and bound (`inference_models`) targets are unchanged.
 - **`model-and-effort`, Codex runtime settings:**
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_clamps_unsupported_effort`,
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_preserves_supported_effort`,

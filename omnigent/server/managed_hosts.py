@@ -696,6 +696,8 @@ class ManagedSandboxConfig:
     :param default_model_options: Optional, request-scoped provider catalog used
         when no host catalog is available for the selected harness and user.
         Supplies choices without selecting a default or provisioning a host.
+        Raise :class:`NoReachableModels` when no model can serve the harness;
+        the picker then blocks launch instead of offering Default.
     """
 
     server_url: str
@@ -709,6 +711,17 @@ class ManagedSandboxConfig:
     default_model_options: Callable[[str, str | None], Awaitable[list[dict[str, Any]]]] | None = (
         None
     )
+
+
+class NoReachableModels(Exception):
+    """Raised by ``default_model_options`` when no model can serve the harness.
+
+    Use it only when the provider is certain, e.g. its catalog answered and
+    nothing it serves speaks the harness's API. Returning ``[]`` stays advisory.
+
+    :param message: User-facing reason, e.g.
+        ``"No models are available for Codex."``.
+    """
 
 
 @dataclass(frozen=True)
