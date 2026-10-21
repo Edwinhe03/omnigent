@@ -516,7 +516,7 @@ def _isolate_origin_identity(
 
 @pytest.fixture(autouse=True)
 def _isolate_databricks_org_pin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Clear the process-wide Databricks org pin between tests.
+    """Register the org pin with monkeypatch so direct os.environ writes are undone.
 
     :param monkeypatch: Pytest monkeypatch fixture.
     :returns: None.

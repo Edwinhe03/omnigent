@@ -571,6 +571,13 @@ def _server_record(
             True,
             True,
         ),
+        (
+            _VANITY,
+            dataclasses.replace(_server_record(_VANITY), workspace_id="2"),
+            {_VANITY: "1"},
+            True,
+            False,
+        ),
         # ...and never by a workspace inferred from the URL, which on an account
         # host is just the caller's own selection.
         (_VANITY, _server_record(_VANITY), {_VANITY: "1"}, True, False),
