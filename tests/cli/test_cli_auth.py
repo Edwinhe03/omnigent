@@ -398,6 +398,7 @@ def test_pinned_org_id_never_applies_to_another_host(token_dir, monkeypatch) -> 
 def test_writes_under_a_pin_keep_the_stored_selector(token_dir, monkeypatch, store) -> None:
     """A pinned runner refreshing its token must not rewrite the user's stored selector."""
     from omnigent.cli_auth import (
+        PINNED_DATABRICKS_ORG_ENV_VAR,
         load_databricks_org_id,
         pin_databricks_org_id,
         store_databricks_auth,
@@ -414,7 +415,7 @@ def test_writes_under_a_pin_keep_the_stored_selector(token_dir, monkeypatch, sto
     else:
         store_databricks_auth(server, "https://example.databricks.com")
 
-    monkeypatch.delenv("OMNIGENT_DATABRICKS_ORG_PIN")
+    monkeypatch.delenv(PINNED_DATABRICKS_ORG_ENV_VAR)
     assert load_databricks_org_id(server) == "222"
 
 
@@ -423,6 +424,7 @@ def test_scoped_org_overrides_the_process_pin_only_inside_the_scope(token_dir) -
         load_databricks_org_id,
         pin_databricks_org_id,
         scoped_databricks_org_id,
+        store_databricks_org_id,
     )
 
     server = "https://example.databricks.com/api/2.0/omnigent"
@@ -430,8 +432,10 @@ def test_scoped_org_overrides_the_process_pin_only_inside_the_scope(token_dir) -
     with scoped_databricks_org_id(server, "222"):
         assert load_databricks_org_id(server) == "222"
         assert load_databricks_org_id("https://other.databricks.com") is None
+    store_databricks_org_id(server, "333")
     with scoped_databricks_org_id(server, None):
-        assert load_databricks_org_id(server) == "111"
+        # A record with no workspace uses the stored selector, not the caller's pin.
+        assert load_databricks_org_id(server) == "333"
     assert load_databricks_org_id(server) == "111"
 
 

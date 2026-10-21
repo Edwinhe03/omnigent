@@ -4109,10 +4109,10 @@ def test_resolving_a_workspace_server_pins_the_cli(
     assert pinned_databricks_org_id(_ACCOUNT_SERVER) is not None
 
 
-def test_host_requests_for_a_record_use_that_daemons_workspace(
+def test_record_org_scope_routes_management_requests_to_that_daemons_workspace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``--all`` status and stop send each daemon's requests to its own workspace."""
+    """Requests made inside ``_record_org_scope`` (used by ``--all`` status/stop) use its org."""
     import omnigent.chat as chat
     from omnigent.cli_auth import load_databricks_org_id
 
@@ -4180,3 +4180,33 @@ def test_ensure_host_daemon_adopts_a_bare_daemon_for_the_same_workspace(
     _ensure_host_daemon(_ACCOUNT_SERVER)
 
     assert "args" not in captured  # adopted, no second daemon for the same workspace
+
+
+def test_apps_url_with_a_stored_org_keeps_its_url_only_key_and_no_pin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only the workspace API mount fronts several workspaces; an app keeps its old key."""
+    from omnigent.cli_auth import PINNED_DATABRICKS_ORG_ENV_VAR, store_databricks_auth
+
+    monkeypatch.setattr(
+        "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
+    )
+    app = "https://myapp-1.aws.databricksapps.com"
+    store_databricks_auth(app, "https://dbc-1.cloud.databricks.com", org_id="123")
+
+    assert cli._normalize_daemon_target(app) == app
+    assert PINNED_DATABRICKS_ORG_ENV_VAR not in cli._build_host_daemon_env(server_url=app)
+
+
+def test_record_probed_through_keeps_a_bare_server_url() -> None:
+    record = cli._HostDaemonRecord(
+        pid=4242,
+        target=_ACCOUNT_SERVER,
+        mode="server",
+        server_url=_ACCOUNT_SERVER,
+        log_path=None,
+        started_at=1,
+        host_id="host_abc",
+    )
+    probed = cli._record_probed_through(record, f"{_ACCOUNT_SERVER}?o=111")
+    assert probed.server_url == _ACCOUNT_SERVER

@@ -21,8 +21,8 @@ from omnigent.host.daemon_lifecycle import (
     DaemonLifecycleLock,
     HostDaemonRecord,
     daemon_record_path,
-    find_same_workspace_daemon,
     daemon_target_server_url,
+    find_same_workspace_daemon,
     normalize_daemon_target,
     probe_workspace_id,
     record_flock_is_held,
@@ -1145,7 +1145,9 @@ def test_daemon_entry_keys_by_workspace_but_connects_to_the_bare_url(
 
     server = "https://acct.example.com/api/2.0/omnigent"
     monkeypatch.setattr("sys.argv", ["_daemon_entry", "--server", server])
-    monkeypatch.setenv("OMNIGENT_DATABRICKS_ORG_PIN", "111@https://acct.example.com")
+    from omnigent.cli_auth import PINNED_DATABRICKS_ORG_ENV_VAR
+
+    monkeypatch.setenv(PINNED_DATABRICKS_ORG_ENV_VAR, "111@https://acct.example.com")
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
     # Process plumbing the record logic doesn't depend on.
     monkeypatch.setattr(process_logging, "ensure_stdio_survives_unencodable_output", lambda: None)

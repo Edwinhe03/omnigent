@@ -78,10 +78,12 @@ def main() -> None:
         normalize_daemon_target,
         write_daemon_record,
     )
+    from omnigent.util.server_url import is_workspace_hosted_url
 
+    workspace_hosted = not args.local and is_workspace_hosted_url(args.server)
     daemon_target = normalize_daemon_target(
         None if args.local else args.server,
-        org_id=None if args.local else pinned_databricks_org_id(args.server),
+        org_id=pinned_databricks_org_id(args.server) if workspace_hosted else None,
     )
     # The registry key carries the pinned workspace; the server URL must not,
     # since request paths are appended to it.

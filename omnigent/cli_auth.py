@@ -648,10 +648,11 @@ def scoped_databricks_org_id(server_url: str, org_id: str | None) -> Iterator[No
     """Route this context's requests to *server_url*'s origin to *org_id*.
 
     :param server_url: The server URL, e.g. ``"https://acct.example.com/api/2.0/omnigent"``.
-    :param org_id: The workspace to use, or ``None`` to keep the process pin.
+    :param org_id: The workspace to use, or ``None`` for none (the stored selector).
     :returns: A context manager.
     """
-    token = _SCOPED_ORG_PIN.set(databricks_org_pin(server_url, org_id) if org_id else None)
+    # "" marks the scope as explicitly unpinned, so the process pin doesn't apply.
+    token = _SCOPED_ORG_PIN.set((databricks_org_pin(server_url, org_id) or "") if org_id else "")
     try:
         yield
     finally:
@@ -666,7 +667,8 @@ def pinned_databricks_org_id(server_url: str) -> str | None:
     :param server_url: The server URL being called.
     :returns: The pinned org id, or ``None`` when unpinned or pinned to another origin.
     """
-    pin = _SCOPED_ORG_PIN.get() or os.environ.get(PINNED_DATABRICKS_ORG_ENV_VAR, "")
+    scoped = _SCOPED_ORG_PIN.get()
+    pin = scoped if scoped is not None else os.environ.get(PINNED_DATABRICKS_ORG_ENV_VAR, "")
     org_id, separator, origin = pin.partition("@")
     if not separator or not org_id or origin != _pin_origin(server_url):
         return None
@@ -696,11 +698,9 @@ def _stored_databricks_org_id(server_url: str) -> str | None:
 def load_databricks_org_id(server_url: str) -> str | None:
     """Load the workspace org id to route requests to a server.
 
-    One account host can front many workspaces, but the stored record keeps one
-    ``org_id`` per server URL and every ``?o=`` launch overwrites it. A process
-    pinned for this server's origin (see :func:`pin_databricks_org_id`) therefore
-    uses its pin, so a launch for another workspace can't retarget it. Writes that
-    preserve the stored selector must use :func:`_stored_databricks_org_id`.
+    A process pinned for this origin (:func:`pin_databricks_org_id`) uses its pin,
+    since the stored record is shared by every workspace on the host. Writes that
+    keep the stored selector must use :func:`_stored_databricks_org_id`.
 
     :param server_url: The server URL, e.g.
         ``"https://example.databricks.com/api/2.0/omnigent"``.
