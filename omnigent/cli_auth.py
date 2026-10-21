@@ -22,7 +22,6 @@ See ``designs/OIDC_AUTH.md`` §CLI Login Flow.
 from __future__ import annotations
 
 import contextlib
-import contextvars
 import json
 import logging
 import math
@@ -33,9 +32,10 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode
 
 from omnigent.process_logging import data_dir
-from omnigent.util.server_url import is_workspace_hosted_url
+from omnigent.util.server_url import ServerUrl, is_workspace_hosted_url
 
 if TYPE_CHECKING:
     import httpx
@@ -212,7 +212,7 @@ def store_token(
     }
     if refresh_token is not None:
         entry["refresh_token"] = refresh_token
-    existing_org_id = _stored_databricks_org_id(server_url)
+    existing_org_id = load_databricks_org_id(server_url)
     if existing_org_id is not None:
         entry["org_id"] = existing_org_id
     _store_entry(server_url, entry)
@@ -252,7 +252,7 @@ def store_databricks_auth(
     if org_id:
         entry["org_id"] = org_id
     else:
-        existing_org_id = _stored_databricks_org_id(server_url)
+        existing_org_id = load_databricks_org_id(server_url)
         if existing_org_id is not None:
             entry["org_id"] = existing_org_id
     _store_entry(server_url, entry)
@@ -603,114 +603,62 @@ def load_databricks_workspace_host(server_url: str) -> str | None:
     return host if isinstance(host, str) and host else None
 
 
-# Workspace this process and its children are bound to, as "<org_id>@<origin>".
+# The ``?o=`` server URL this process and its children are bound to, e.g.
+# ``"https://acct.example.com/api/2.0/omnigent?o=123"``. It overrides the stored
+# record, which every workspace behind that server shares.
 PINNED_DATABRICKS_ORG_ENV_VAR = "OMNIGENT_DATABRICKS_ORG_PIN"
 
 
-def _pin_origin(server_url: str) -> str | None:
-    """Return ``scheme://host[:port]`` for *server_url*, eliding default ports."""
-    from urllib.parse import urlsplit
-
-    try:
-        parsed = urlsplit(server_url)
-        hostname = parsed.hostname
-        port = parsed.port
-    except ValueError:
-        return None
-    if not parsed.scheme or not hostname:
-        return None
-    scheme = parsed.scheme.lower()
-    default_port = {"http": 80, "https": 443}.get(scheme)
-    port_suffix = "" if port is None or port == default_port else f":{port}"
-    return f"{scheme}://{hostname.lower()}{port_suffix}"
-
-
-def databricks_org_pin(server_url: str, org_id: str) -> str | None:
+def databricks_org_pin(server_url: str, org_id: str) -> str:
     """Return the :data:`PINNED_DATABRICKS_ORG_ENV_VAR` value binding *org_id* to *server_url*.
 
     :param server_url: The server URL, e.g. ``"https://acct.example.com/api/2.0/omnigent"``.
     :param org_id: The workspace org id, e.g. ``"2850744067564480"``.
-    :returns: ``"<org_id>@<origin>"``, or ``None`` when the URL has no origin.
+    :returns: e.g. ``"https://acct.example.com/api/2.0/omnigent?o=2850744067564480"``.
     """
-    origin = _pin_origin(server_url)
-    return f"{org_id}@{origin}" if origin and org_id else None
-
-
-# Per-call override of the process pin, for commands that act on several
-# daemons (``host status --all``) whose workspaces differ.
-_SCOPED_ORG_PIN: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "omnigent_scoped_databricks_org_pin", default=None
-)
-
-
-@contextlib.contextmanager
-def scoped_databricks_org_id(server_url: str, org_id: str | None) -> Iterator[None]:
-    """Route this context's requests to *server_url*'s origin to *org_id*.
-
-    :param server_url: The server URL, e.g. ``"https://acct.example.com/api/2.0/omnigent"``.
-    :param org_id: The workspace to use, or ``None`` for none (the stored selector).
-    :returns: A context manager.
-    """
-    # "" marks the scope as explicitly unpinned, so the process pin doesn't apply.
-    token = _SCOPED_ORG_PIN.set((databricks_org_pin(server_url, org_id) or "") if org_id else "")
-    try:
-        yield
-    finally:
-        _SCOPED_ORG_PIN.reset(token)
+    return f"{ServerUrl(api_base=server_url).api_base}?{urlencode({'o': org_id})}"
 
 
 def pinned_databricks_org_id(server_url: str) -> str | None:
-    """Return this process's pinned org id when it was pinned for *server_url*'s origin.
-
-    Matching is per origin, so every server mount on that origin shares the pin.
+    """Return this process's pinned org id when it was pinned for *server_url*.
 
     :param server_url: The server URL being called.
-    :returns: The pinned org id, or ``None`` when unpinned or pinned to another origin.
+    :returns: The pinned org id, or ``None`` when unpinned or pinned to another server.
     """
-    scoped = _SCOPED_ORG_PIN.get()
-    pin = scoped if scoped is not None else os.environ.get(PINNED_DATABRICKS_ORG_ENV_VAR, "")
-    org_id, separator, origin = pin.rpartition("@")
-    if not separator or not org_id or origin != _pin_origin(server_url):
+    pin = os.environ.get(PINNED_DATABRICKS_ORG_ENV_VAR)
+    if not pin:
         return None
-    return org_id
+    pinned = ServerUrl(api_base=pin)
+    if pinned.api_base != ServerUrl(api_base=server_url).api_base:
+        return None
+    return pinned.org_id
 
 
 def pin_databricks_org_id(server_url: str, org_id: str) -> None:
-    """Bind this process, and the children it spawns, to *org_id* for *server_url*'s origin.
+    """Bind this process, and the children it spawns, to *org_id* for *server_url*.
 
     :param server_url: The server URL, e.g. ``"https://acct.example.com/api/2.0/omnigent"``.
     :param org_id: The workspace selected for it, e.g. ``"2850744067564480"``.
     """
-    pin = databricks_org_pin(server_url, org_id)
-    if pin is not None:
-        os.environ[PINNED_DATABRICKS_ORG_ENV_VAR] = pin
+    os.environ[PINNED_DATABRICKS_ORG_ENV_VAR] = databricks_org_pin(server_url, org_id)
 
 
-def _stored_databricks_org_id(server_url: str) -> str | None:
-    """Return the org id in the stored record, ignoring any process pin."""
+def load_databricks_org_id(server_url: str) -> str | None:
+    """Load the workspace org id from this process's pin or the stored server record.
+
+    :param server_url: The server URL, e.g.
+        ``"https://example.databricks.com/api/2.0/omnigent"``.
+    :returns: The org id, e.g. ``"2850744067564480"``, or ``None``
+        when neither the pin nor the stored record carries one.
+    """
+    pinned = pinned_databricks_org_id(server_url)
+    if pinned is not None:
+        return pinned
     entry = _load_entry(server_url)
     if entry is None:
         return None
     org_id = entry.get("org_id")
     return org_id if isinstance(org_id, str) and org_id else None
-
-
-def load_databricks_org_id(server_url: str) -> str | None:
-    """Load the workspace org id to route requests to a server.
-
-    A process pinned for this origin (:func:`pin_databricks_org_id`) uses its pin,
-    since the stored record is shared by every workspace on the host. Writes that
-    keep the stored selector must use :func:`_stored_databricks_org_id`.
-
-    :param server_url: The server URL, e.g.
-        ``"https://example.databricks.com/api/2.0/omnigent"``.
-    :returns: The org id, e.g. ``"2850744067564480"``, or ``None``
-        when neither the process nor the stored record carries one.
-    """
-    pinned = pinned_databricks_org_id(server_url)
-    if pinned is not None:
-        return pinned
-    return _stored_databricks_org_id(server_url)
 
 
 # Workspace-routing header. When a Databricks host fronts many workspaces

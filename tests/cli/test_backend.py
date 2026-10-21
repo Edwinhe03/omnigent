@@ -4022,7 +4022,7 @@ def _select_workspace(monkeypatch: pytest.MonkeyPatch, org_id: str) -> None:
     """Pin the CLI to *org_id* the way ``?o=`` resolution does."""
     from omnigent.cli_auth import PINNED_DATABRICKS_ORG_ENV_VAR
 
-    monkeypatch.setenv(PINNED_DATABRICKS_ORG_ENV_VAR, f"{org_id}@https://acct.example.com")
+    monkeypatch.setenv(PINNED_DATABRICKS_ORG_ENV_VAR, f"{_ACCOUNT_SERVER}?o={org_id}")
 
 
 def test_ensure_host_daemon_spawns_one_pinned_daemon_per_workspace(
@@ -4046,17 +4046,15 @@ def test_ensure_host_daemon_spawns_one_pinned_daemon_per_workspace(
     calls = captured["calls"]
     assert isinstance(calls, list)
     assert [proc.env[PINNED_DATABRICKS_ORG_ENV_VAR] for proc in calls] == [
-        "111@https://acct.example.com",
-        "222@https://acct.example.com",
+        f"{_ACCOUNT_SERVER}?o=111",
+        f"{_ACCOUNT_SERVER}?o=222",
     ]
     assert cli._find_daemon_record(f"{_ACCOUNT_SERVER}?o=111") is not None
     assert cli._find_daemon_record(f"{_ACCOUNT_SERVER}?o=222") is not None
     assert killed == []
 
 
-def test_foreground_and_legacy_records_use_the_bare_server_url(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_foreground_records_use_the_bare_server_url() -> None:
     """Records keyed by workspace still send requests to the bare server URL."""
     target = f"{_ACCOUNT_SERVER}?o=111"
     foreground = cli._foreground_daemon_record(
@@ -4065,36 +4063,13 @@ def test_foreground_and_legacy_records_use_the_bare_server_url(
     assert foreground.server_url == _ACCOUNT_SERVER
     assert cli._daemon_base_url(foreground) == _ACCOUNT_SERVER
 
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
-    (tmp_path / "host.pid").write_text(f"4242\n{target}\n")
-    legacy = cli._legacy_daemon_record()
-    assert legacy is not None
-    assert legacy.server_url == _ACCOUNT_SERVER
-    assert cli._daemon_base_url(legacy) == _ACCOUNT_SERVER
-
     assert cli._record_probed_through(foreground, target).server_url == _ACCOUNT_SERVER
 
 
-def test_bare_daemon_record_never_matches_a_workspace_target(
+def test_resolving_a_workspace_server_pins_the_cli(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """An unpinned daemon may serve any workspace, so a ``?o=`` lookup must not find it."""
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
-    _write_daemon_registry_record(
-        tmp_path, pid=4242, target=_ACCOUNT_SERVER, mode="server", server_url=_ACCOUNT_SERVER
-    )
-    _select_workspace(monkeypatch, "111")
-
-    assert cli._find_daemon_record(f"{_ACCOUNT_SERVER}?o=111") is None
-    assert cli._find_daemon_record(f"{_ACCOUNT_SERVER}?o=222") is None
-    assert cli._find_daemon_record(_ACCOUNT_SERVER) is not None
-
-
-@pytest.mark.parametrize("explicit", [True, False])
-def test_resolving_a_workspace_server_pins_the_cli(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, explicit: bool
-) -> None:
-    """Both ``?o=`` and the remembered selector pin the CLI once, at resolution."""
+    """``?o=`` pins the CLI once, at resolution."""
     from omnigent.cli_auth import pinned_databricks_org_id, store_databricks_org_id
 
     monkeypatch.setattr(
@@ -4102,93 +4077,19 @@ def test_resolving_a_workspace_server_pins_the_cli(
     )
     store_databricks_org_id(_ACCOUNT_SERVER, "222")
 
-    cli._resolve_server_url(f"{_ACCOUNT_SERVER}?o=111" if explicit else _ACCOUNT_SERVER)
+    cli._resolve_server_url(f"{_ACCOUNT_SERVER}?o=111")
 
-    assert pinned_databricks_org_id(_ACCOUNT_SERVER) == ("111" if explicit else "222")
+    assert pinned_databricks_org_id(_ACCOUNT_SERVER) == "111"
     # A concurrent launch rewriting the shared record no longer moves this command.
     store_databricks_org_id(_ACCOUNT_SERVER, "333")
-    assert cli._selected_org_id(_ACCOUNT_SERVER) == ("111" if explicit else "222")
-    assert pinned_databricks_org_id(_ACCOUNT_SERVER) is not None
+    assert cli._selected_org_id(_ACCOUNT_SERVER) == "111"
 
 
-def test_record_org_scope_routes_management_requests_to_that_daemons_workspace(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Requests made inside ``_record_org_scope`` (used by ``--all`` status/stop) use its org."""
-    import omnigent.chat as chat
-    from omnigent.cli_auth import load_databricks_org_id
-
-    _select_workspace(monkeypatch, "111")
-    monkeypatch.setattr(cli, "_host_http_headers_cache", {})
-    seen: list[str | None] = []
-
-    def _headers(*, server_url: str, host_id: str | None = None, **_kw: object) -> dict[str, str]:
-        seen.append(load_databricks_org_id(server_url))
-        return {}
-
-    monkeypatch.setattr(chat, "_remote_headers", _headers)
-
-    def _boom(*_a: object, **_kw: object) -> object:
-        raise OSError("no network in tests")
-
-    monkeypatch.setattr("httpx.Client", _boom)
-    for org_id in ("111", "222"):
-        record = cli._HostDaemonRecord(
-            pid=4242,
-            target=f"{_ACCOUNT_SERVER}?o={org_id}",
-            mode="server",
-            server_url=_ACCOUNT_SERVER,
-            log_path=None,
-            started_at=1,
-            host_id="host_abc",
-        )
-        with cli._record_org_scope(record):
-            cli._host_http_json(
-                base_url=_ACCOUNT_SERVER,
-                method="GET",
-                path="/v1/hosts/host_abc",
-                host_id="host_abc",
-            )
-
-    # One header build per workspace (no cache sharing), each with its own org.
-    assert seen == ["111", "222"]
-    assert load_databricks_org_id(_ACCOUNT_SERVER) == "111"  # scope restored
-
-
-def test_ensure_host_daemon_adopts_a_bare_daemon_for_the_same_workspace(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """After an upgrade, a live URL-keyed daemon for this workspace is reused, not doubled."""
-    captured: dict[str, object] = {}
-    _patch_daemon_spawn(monkeypatch, tmp_path, captured)
-    monkeypatch.setattr(cli, "_load_existing_host_id", lambda: "a" * 32)
-    cli._write_daemon_record(
-        cli._HostDaemonRecord(
-            pid=4242,
-            target=_ACCOUNT_SERVER,
-            mode="server",
-            server_url=_ACCOUNT_SERVER,
-            log_path=str(tmp_path / "daemon.log"),
-            started_at=100,
-            host_id="a" * 32,
-            workspace_id="222",
-        )
-    )
-    monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: cli._pid_alive(record.pid))
-    monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
-    monkeypatch.setattr(cli, "_same_workspace_daemon_offline_reason", lambda record, url: None)
-
-    _select_workspace(monkeypatch, "222")
-    _ensure_host_daemon(_ACCOUNT_SERVER)
-
-    assert "args" not in captured  # adopted, no second daemon for the same workspace
-
-
-def test_apps_url_with_a_stored_org_keeps_its_url_only_key_and_no_pin(
+def test_apps_url_with_a_stored_org_keeps_its_url_only_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Only the workspace API mount fronts several workspaces; an app keeps its old key."""
-    from omnigent.cli_auth import PINNED_DATABRICKS_ORG_ENV_VAR, store_databricks_auth
+    from omnigent.cli_auth import store_databricks_auth
 
     monkeypatch.setattr(
         "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
@@ -4197,43 +4098,4 @@ def test_apps_url_with_a_stored_org_keeps_its_url_only_key_and_no_pin(
     store_databricks_auth(app, "https://dbc-1.cloud.databricks.com", org_id="123")
 
     assert cli._normalize_daemon_target(app) == app
-    assert PINNED_DATABRICKS_ORG_ENV_VAR not in cli._build_host_daemon_env(server_url=app)
-
-
-def test_stop_daemon_sessions_sends_each_stop_with_the_records_workspace(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Session stops run on worker threads; they must keep the record's org, not the caller's."""
-    from omnigent.cli_auth import load_databricks_org_id
-
-    _select_workspace(monkeypatch, "222")
-    record = cli._HostDaemonRecord(
-        pid=4242,
-        target=f"{_ACCOUNT_SERVER}?o=111",
-        mode="server",
-        server_url=_ACCOUNT_SERVER,
-        log_path=None,
-        started_at=1,
-        host_id="host_abc",
-    )
-    monkeypatch.setattr(
-        cli,
-        "_sessions_for_daemon",
-        lambda record: cli._DaemonSessionsResult(
-            base_url=_ACCOUNT_SERVER,
-            sessions=[{"id": f"conv_{i}", "status": "running"} for i in range(4)],
-            error=None,
-        ),
-    )
-    orgs: list[str | None] = []
-    monkeypatch.setattr(
-        cli,
-        "_stop_session_on_server",
-        lambda *, base_url, session_id: orgs.append(load_databricks_org_id(base_url)),
-    )
-
-    with cli._record_org_scope(record):
-        stopped = cli._stop_daemon_sessions(record)
-
-    assert stopped == 4
-    assert orgs == ["111"] * 4
+    assert cli._selected_org_id(app) is None

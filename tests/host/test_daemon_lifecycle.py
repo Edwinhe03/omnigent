@@ -562,24 +562,7 @@ def _server_record(
             True,
             False,
         ),
-        # ...but a bare record on that URL, from a version that keyed by URL alone,
-        # is found here when its recorded workspace is the same one...
-        (
-            _VANITY,
-            dataclasses.replace(_server_record(_VANITY), workspace_id="1"),
-            {_VANITY: "1"},
-            True,
-            True,
-        ),
-        (
-            _VANITY,
-            dataclasses.replace(_server_record(_VANITY), workspace_id="2"),
-            {_VANITY: "1"},
-            True,
-            False,
-        ),
-        # ...and never by a workspace inferred from the URL, which on an account
-        # host is just the caller's own selection.
+        # ...as is its bare per-URL record.
         (_VANITY, _server_record(_VANITY), {_VANITY: "1"}, True, False),
         (
             _VANITY,
@@ -1168,7 +1151,7 @@ def test_daemon_entry_keys_by_workspace_but_connects_to_the_bare_url(
     monkeypatch.setattr("sys.argv", ["_daemon_entry", "--server", server])
     from omnigent.cli_auth import PINNED_DATABRICKS_ORG_ENV_VAR
 
-    monkeypatch.setenv(PINNED_DATABRICKS_ORG_ENV_VAR, "111@https://acct.example.com")
+    monkeypatch.setenv(PINNED_DATABRICKS_ORG_ENV_VAR, f"{server}?o=111")
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
     # Process plumbing the record logic doesn't depend on.
     monkeypatch.setattr(process_logging, "ensure_stdio_survives_unencodable_output", lambda: None)
@@ -1206,38 +1189,3 @@ def test_daemon_entry_keys_by_workspace_but_connects_to_the_bare_url(
     assert record.server_url == server
     assert seen["daemon_target"] == record.target
     assert seen["server_url"] == server
-
-
-def test_unrecorded_bare_daemon_is_not_adopted_for_the_callers_pinned_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An old daemon that never recorded its workspace may serve another one on the host."""
-    from omnigent.cli_auth import pin_databricks_org_id, store_databricks_org_id
-
-    monkeypatch.setattr(
-        "omnigent.cli_auth._token_file_path", lambda: tmp_path / "auth_tokens.json"
-    )
-    server = "https://acct.example.com/api/2.0/omnigent"
-    store_databricks_org_id(server, "111")
-    pin_databricks_org_id(server, "222")
-    legacy = HostDaemonRecord(
-        pid=4242,
-        target=server,
-        mode="server",
-        server_url=server,
-        log_path=None,
-        started_at=1,
-        host_id=_HOST_ID,
-    )
-
-    for probe in (None, lambda url, org_id=None, **_kw: org_id):
-        assert (
-            find_same_workspace_daemon(
-                [legacy],
-                server_url=server,
-                host_id=_HOST_ID,
-                is_live=lambda _record: True,
-                probe=probe,
-            )
-            is None
-        )

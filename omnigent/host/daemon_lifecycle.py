@@ -305,6 +305,7 @@ def find_same_workspace_daemon(
     wanted_host = normalize_uuid(host_id)
     if wanted_host is None:
         return None
+    target = normalize_daemon_target(server_url)
     resolved: dict[str, str | None] = {}
 
     def _lookup(url: str, recorded: str | None) -> str | None:
@@ -323,6 +324,8 @@ def find_same_workspace_daemon(
             continue
         if normalize_uuid(record.host_id) != wanted_host:
             continue
+        if normalize_daemon_target(record.target) == target:
+            continue
         if legacy_only and record.workspace_id:
             continue
         # Liveness first: a dead record must not cost a server probe.
@@ -332,13 +335,10 @@ def find_same_workspace_daemon(
             workspace_id = _lookup(server_url, None)
             if workspace_id is None:
                 return None
-        # Skip the caller's own org-keyed record. A bare record on this URL matches
-        # only by its recorded workspace: one inferred from the URL would just be
-        # the caller's own selection on an account host.
-        record_target = normalize_daemon_target(record.target)
-        if record_target == normalize_daemon_target(server_url, org_id=workspace_id):
-            continue
-        if not record.workspace_id and record_target == normalize_daemon_target(server_url):
+        # The caller's own record, keyed by its workspace (see normalize_daemon_target).
+        if normalize_daemon_target(record.target) == normalize_daemon_target(
+            server_url, org_id=workspace_id
+        ):
             continue
         if _lookup(record.server_url, record.workspace_id) == workspace_id:
             return record

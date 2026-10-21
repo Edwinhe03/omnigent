@@ -582,7 +582,7 @@ def test_remote_daemon_and_runners_are_pinned_to_the_selected_workspace(
     canary_target = _normalize_daemon_target(server)
 
     assert prod_target != canary_target
-    assert prod_env[PINNED_DATABRICKS_ORG_ENV_VAR] == "111@https://acct.example.com"
+    assert prod_env[PINNED_DATABRICKS_ORG_ENV_VAR] == f"{server}?o=111"
     runner_env = _build_runner_env(
         prod_env,
         server_url=server,
@@ -591,4 +591,4 @@ def test_remote_daemon_and_runners_are_pinned_to_the_selected_workspace(
         workspace="/tmp/workspace",
         parent_pid=12345,
     )
-    assert runner_env[PINNED_DATABRICKS_ORG_ENV_VAR] == "111@https://acct.example.com"
+    assert runner_env[PINNED_DATABRICKS_ORG_ENV_VAR] == f"{server}?o=111"
