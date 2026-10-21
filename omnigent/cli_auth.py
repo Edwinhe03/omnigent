@@ -22,6 +22,7 @@ See ``designs/OIDC_AUTH.md`` §CLI Login Flow.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import logging
 import math
@@ -211,7 +212,7 @@ def store_token(
     }
     if refresh_token is not None:
         entry["refresh_token"] = refresh_token
-    existing_org_id = load_databricks_org_id(server_url)
+    existing_org_id = _stored_databricks_org_id(server_url)
     if existing_org_id is not None:
         entry["org_id"] = existing_org_id
     _store_entry(server_url, entry)
@@ -251,7 +252,7 @@ def store_databricks_auth(
     if org_id:
         entry["org_id"] = org_id
     else:
-        existing_org_id = load_databricks_org_id(server_url)
+        existing_org_id = _stored_databricks_org_id(server_url)
         if existing_org_id is not None:
             entry["org_id"] = existing_org_id
     _store_entry(server_url, entry)
@@ -602,19 +603,114 @@ def load_databricks_workspace_host(server_url: str) -> str | None:
     return host if isinstance(host, str) and host else None
 
 
-def load_databricks_org_id(server_url: str) -> str | None:
-    """Load the workspace org id from a stored server record.
+# Workspace this process and its children are bound to, as "<org_id>@<origin>".
+PINNED_DATABRICKS_ORG_ENV_VAR = "OMNIGENT_DATABRICKS_ORG_PIN"
 
-    :param server_url: The server URL, e.g.
-        ``"https://example.databricks.com/api/2.0/omnigent"``.
-    :returns: The org id, e.g. ``"2850744067564480"``, or ``None``
-        when the stored record carries no org id.
+
+def _pin_origin(server_url: str) -> str | None:
+    """Return ``scheme://host[:port]`` for *server_url*, eliding default ports."""
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(server_url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if not parsed.scheme or not hostname:
+        return None
+    scheme = parsed.scheme.lower()
+    default_port = {"http": 80, "https": 443}.get(scheme)
+    port_suffix = "" if port is None or port == default_port else f":{port}"
+    return f"{scheme}://{hostname.lower()}{port_suffix}"
+
+
+def databricks_org_pin(server_url: str, org_id: str) -> str | None:
+    """Return the :data:`PINNED_DATABRICKS_ORG_ENV_VAR` value binding *org_id* to *server_url*.
+
+    :param server_url: The server URL, e.g. ``"https://acct.example.com/api/2.0/omnigent"``.
+    :param org_id: The workspace org id, e.g. ``"2850744067564480"``.
+    :returns: ``"<org_id>@<origin>"``, or ``None`` when the URL has no origin.
     """
+    origin = _pin_origin(server_url)
+    return f"{org_id}@{origin}" if origin and org_id else None
+
+
+# Per-call override of the process pin, for commands that act on several
+# daemons (``host status --all``) whose workspaces differ.
+_SCOPED_ORG_PIN: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "omnigent_scoped_databricks_org_pin", default=None
+)
+
+
+@contextlib.contextmanager
+def scoped_databricks_org_id(server_url: str, org_id: str | None) -> Iterator[None]:
+    """Route this context's requests to *server_url*'s origin to *org_id*.
+
+    :param server_url: The server URL, e.g. ``"https://acct.example.com/api/2.0/omnigent"``.
+    :param org_id: The workspace to use, or ``None`` to keep the process pin.
+    :returns: A context manager.
+    """
+    token = _SCOPED_ORG_PIN.set(databricks_org_pin(server_url, org_id) if org_id else None)
+    try:
+        yield
+    finally:
+        _SCOPED_ORG_PIN.reset(token)
+
+
+def pinned_databricks_org_id(server_url: str) -> str | None:
+    """Return this process's pinned org id when it was pinned for *server_url*'s origin.
+
+    Matching is per origin, so every server mount on that origin shares the pin.
+
+    :param server_url: The server URL being called.
+    :returns: The pinned org id, or ``None`` when unpinned or pinned to another origin.
+    """
+    pin = _SCOPED_ORG_PIN.get() or os.environ.get(PINNED_DATABRICKS_ORG_ENV_VAR, "")
+    org_id, separator, origin = pin.partition("@")
+    if not separator or not org_id or origin != _pin_origin(server_url):
+        return None
+    return org_id
+
+
+def pin_databricks_org_id(server_url: str, org_id: str) -> None:
+    """Bind this process, and the children it spawns, to *org_id* for *server_url*'s origin.
+
+    :param server_url: The server URL, e.g. ``"https://acct.example.com/api/2.0/omnigent"``.
+    :param org_id: The workspace selected for it, e.g. ``"2850744067564480"``.
+    """
+    pin = databricks_org_pin(server_url, org_id)
+    if pin is not None:
+        os.environ[PINNED_DATABRICKS_ORG_ENV_VAR] = pin
+
+
+def _stored_databricks_org_id(server_url: str) -> str | None:
+    """Return the org id in the stored record, ignoring any process pin."""
     entry = _load_entry(server_url)
     if entry is None:
         return None
     org_id = entry.get("org_id")
     return org_id if isinstance(org_id, str) and org_id else None
+
+
+def load_databricks_org_id(server_url: str) -> str | None:
+    """Load the workspace org id to route requests to a server.
+
+    One account host can front many workspaces, but the stored record keeps one
+    ``org_id`` per server URL and every ``?o=`` launch overwrites it. A process
+    pinned for this server's origin (see :func:`pin_databricks_org_id`) therefore
+    uses its pin, so a launch for another workspace can't retarget it. Writes that
+    preserve the stored selector must use :func:`_stored_databricks_org_id`.
+
+    :param server_url: The server URL, e.g.
+        ``"https://example.databricks.com/api/2.0/omnigent"``.
+    :returns: The org id, e.g. ``"2850744067564480"``, or ``None``
+        when neither the process nor the stored record carries one.
+    """
+    pinned = pinned_databricks_org_id(server_url)
+    if pinned is not None:
+        return pinned
+    return _stored_databricks_org_id(server_url)
 
 
 # Workspace-routing header. When a Databricks host fronts many workspaces

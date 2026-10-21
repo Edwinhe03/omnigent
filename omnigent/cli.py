@@ -82,6 +82,7 @@ from omnigent.host.daemon_lifecycle import (
 )
 from omnigent.host.daemon_lifecycle import (
     find_same_workspace_daemon as _find_same_workspace_daemon,
+    daemon_target_server_url as _daemon_target_server_url,
 )
 from omnigent.host.daemon_lifecycle import (
     normalize_daemon_target as _normalize_daemon_target_impl,
@@ -2639,6 +2640,32 @@ class _SpawnedDaemonProcess:
     process: subprocess.Popen[bytes] | None = None
 
 
+class _UnsetOrgId:
+    """Marks an ``org_id`` argument the caller did not pass."""
+
+
+_UNSET_ORG_ID = _UnsetOrgId()
+
+
+def _selected_org_id(server_url: str | None) -> str | None:
+    """Return the workspace selected for *server_url* (``None`` for local mode)."""
+    if not server_url:
+        return None
+    from omnigent.cli_auth import load_databricks_org_id
+
+    return load_databricks_org_id(server_url)
+
+
+def _record_org_scope(record: _HostDaemonRecord) -> contextlib.AbstractContextManager[None]:
+    """Route requests made for *record* to the workspace its daemon is bound to."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from omnigent.cli_auth import scoped_databricks_org_id
+
+    org_id = parse_qs(urlsplit(record.target).query).get("o", [None])[0] or record.workspace_id
+    return scoped_databricks_org_id(record.server_url or record.target, org_id)
+
+
 def _normalize_daemon_target(server_url: str | None) -> str:
     """
     Normalize a daemon target key.
@@ -2647,9 +2674,9 @@ def _normalize_daemon_target(server_url: str | None) -> str:
         ``"https://example.databricksapps.com/"``. ``None`` or empty
         string selects local mode.
     :returns: ``"local"`` for local mode, otherwise the URL without a
-        trailing slash.
+        trailing slash, plus ``?o=`` for the workspace selected for it.
     """
-    return _normalize_daemon_target_impl(server_url)
+    return _normalize_daemon_target_impl(server_url, org_id=_selected_org_id(server_url))
 
 
 def _daemon_host_status_probe(
@@ -2827,7 +2854,7 @@ def _legacy_daemon_record() -> _HostDaemonRecord | None:
         pid=pid,
         target=target,
         mode=mode,
-        server_url=None if mode == "local" else target,
+        server_url=None if mode == "local" else _daemon_target_server_url(target),
         log_path=None,
         started_at=0,
         host_id=_load_existing_host_id(),
@@ -2865,7 +2892,9 @@ def _find_daemon_record(target: str) -> _HostDaemonRecord | None:
         if record.target == target:
             return record
     for record in records:
-        if _normalize_daemon_target(record.target) == target:
+        # Legacy spellings only: adding the current org here would let a bare
+        # (unpinned) record match a ``?o=`` target for every workspace.
+        if _normalize_daemon_target_impl(record.target) == target:
             return record
     return None
 
@@ -3134,7 +3163,7 @@ def _record_probed_through(record: _HostDaemonRecord, server_url: str) -> _HostD
     :returns: The copied record, targeting *server_url*.
     """
     target = _normalize_daemon_target(server_url)
-    return replace(record, target=target, server_url=target)
+    return replace(record, target=target, server_url=_daemon_target_server_url(target))
 
 
 def _same_workspace_daemon_offline_reason(
@@ -3383,7 +3412,7 @@ def _foreground_daemon_record(
         pid=os.getpid(),
         target=target,
         mode=mode,
-        server_url=None if mode == "local" else target,
+        server_url=None if mode == "local" else _daemon_target_server_url(target),
         log_path=None,
         started_at=int(time.time()),
         host_id=host_id,
@@ -3681,7 +3710,10 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         reuse, a transparent tunnel-health heal, or a first spawn.
     """
     ensure_started_at = time.monotonic()
-    target = _normalize_daemon_target(server_url)
+    # Read the workspace once so the registry key and the spawned daemon's pin
+    # can't disagree, even if a concurrent launch rewrites the stored selector.
+    org_id = _selected_org_id(server_url)
+    target = _normalize_daemon_target_impl(server_url, org_id=org_id)
     existing_before = _find_daemon_record(target)
     process_was_running = existing_before is not None and _daemon_owner_is_live(existing_before)
 
@@ -3703,7 +3735,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     if not decision.config_changed and _local_daemon_serves_target(target, server_url):
         _record_host_state("reused_local_daemon", running_before=True)
         return False
-    sibling = _same_workspace_daemon(server_url)
+    sibling = _same_workspace_daemon(server_url, workspace_id=org_id)
     if sibling is not None:
         reason = _same_workspace_daemon_offline_reason(sibling, server_url)
         if reason is not None:
@@ -3719,7 +3751,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     # without changing the caller's working directory or agent workspace.
     args = [sys.executable, "-P", "-m", "omnigent.host._daemon_entry", *mode_args]
     config_sig = server_config_signature(include_features=not server_url)
-    daemon_env = _build_host_daemon_env(server_url=server_url)
+    daemon_env = _build_host_daemon_env(server_url=server_url, org_id=org_id)
     daemon_env[DAEMON_CONFIG_SIG_ENV_VAR] = config_sig
     expected_host_id = _load_existing_host_id()
     spawned = _spawn_host_daemon_process(args=args, env=daemon_env)
@@ -3773,6 +3805,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
 def _build_host_daemon_env(
     *,
     server_url: str | None,
+    org_id: str | _UnsetOrgId | None = _UNSET_ORG_ID,
 ) -> dict[str, str]:
     """
     Build the environment for the background host daemon.
@@ -3791,6 +3824,8 @@ def _build_host_daemon_env(
     :param server_url: Omnigent server URL for remote mode, e.g.
         ``"https://example.databricksapps.com"``, or a falsey value
         such as ``None`` / ``""`` for local daemon mode.
+    :param org_id: Workspace to pin the daemon to, as already read by the
+        caller (``None`` for none); omitted, it is read here.
     :returns: Environment dict for ``subprocess.Popen``.
     """
     from omnigent.host.connect import (
@@ -3858,6 +3893,14 @@ def _build_host_daemon_env(
 
     env.pop(DISPATCH_TRACEPARENT_ENV_VAR, None)
     env.pop(DISPATCH_TRACESTATE_ENV_VAR, None)
+    from omnigent.cli_auth import PINNED_DATABRICKS_ORG_ENV_VAR, databricks_org_pin
+
+    env.pop(PINNED_DATABRICKS_ORG_ENV_VAR, None)
+    if isinstance(org_id, _UnsetOrgId):
+        org_id = _selected_org_id(server_url)
+    pin = databricks_org_pin(server_url, org_id) if server_url and org_id else None
+    if pin is not None:
+        env[PINNED_DATABRICKS_ORG_ENV_VAR] = pin
     return env
 
 
@@ -3965,7 +4008,11 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
             )
         refreshed_probe = _verify_databricks_server_token(server, auth_info.token, org_id)
         if refreshed_probe.status_code == 200:
-            store_databricks_auth(server, workspace_host, org_id=org_id)
+            from omnigent.cli_auth import pinned_databricks_org_id
+
+            # A pinned org routes this request but isn't the user's selection to store.
+            stored_org_id = None if org_id == pinned_databricks_org_id(server) else org_id
+            store_databricks_auth(server, workspace_host, org_id=stored_org_id)
             return
     # User-facing: show the display form (the workspace /omnigent URL, with
     # ?o= when known), not the internal API mount; it round-trips through
@@ -9724,7 +9771,7 @@ def _daemon_base_url(record: _HostDaemonRecord) -> str | None:
             return record.resolved_server_url.rstrip("/")
         local_url = local_server_url_if_healthy()
         return local_url.rstrip("/") if local_url else None
-    return (record.server_url or record.target).rstrip("/")
+    return _daemon_target_server_url(record.server_url or record.target).rstrip("/")
 
 
 def _local_daemon_serving_remote(server_url: str) -> _HostDaemonRecord | None:
@@ -9866,7 +9913,9 @@ def _host_http_json(
         # Cache the resolved headers per (base_url, host_id): the auth resolution
         # is the expensive part (token mint / CLI shell-out), and the slice-key
         # varies by the host a call is scoped to, so both belong in the key.
-        cache_key = (base_url, host_id)
+        from omnigent.cli_auth import load_databricks_org_id
+
+        cache_key = (base_url, host_id, load_databricks_org_id(base_url))
         if cache_key not in _host_http_headers_cache:
             with _host_http_headers_lock:
                 if cache_key not in _host_http_headers_cache:
@@ -10783,11 +10832,12 @@ def host_status(
     # but live ones each take a full auth-resolution + round-trip — parallelising
     # them saves wall time proportional to the number of live daemons.
     def _build(record: _HostDaemonRecord) -> _HostPayload:
-        payload = _daemon_status_payload(
-            record,
-            include_sessions=sessions,
-            connected_sessions_only=True,
-        )
+        with _record_org_scope(record):
+            payload = _daemon_status_payload(
+                record,
+                include_sessions=sessions,
+                connected_sessions_only=True,
+            )
         if (
             requested_target is not None
             and record.mode == "server"
@@ -11078,9 +11128,10 @@ def host_stop(
     stopped_local_daemon = False
     for record in records:
         stopped = 0
-        if not daemon_only and not force:
-            stopped = _stop_daemon_sessions(record)
-        outcome = _terminate_daemon(record, force=force)
+        with _record_org_scope(record):
+            if not daemon_only and not force:
+                stopped = _stop_daemon_sessions(record)
+            outcome = _terminate_daemon(record, force=force)
         target = _host_display_url(record.target)
         if outcome == _STOP_DROPPED_FOREIGN:
             click.echo(
@@ -13004,8 +13055,11 @@ def _resolve_server_url(server: str) -> ServerUrl:
         if org_id is not None:
             resolved = ServerUrl(api_base=api_base, org_id=org_id)
             if resolved.is_workspace_hosted:
-                from omnigent.cli_auth import store_databricks_org_id
+                from omnigent.cli_auth import pin_databricks_org_id, store_databricks_org_id
 
+                # Pin this invocation first: the stored record is shared with
+                # concurrent launches for other workspaces on the same host.
+                pin_databricks_org_id(resolved.api_base, org_id)
                 try:
                     store_databricks_org_id(resolved.api_base, org_id)
                 except OSError as exc:
@@ -13015,9 +13069,21 @@ def _resolve_server_url(server: str) -> ServerUrl:
                     ) from exc
         else:
             resolved = ServerUrl.from_api_base(api_base)
+            if resolved.org_id is not None and resolved.is_workspace_hosted:
+                from omnigent.cli_auth import pin_databricks_org_id
+
+                # Read the remembered selector once: later reads in this command
+                # must not see a concurrent launch for another workspace.
+                pin_databricks_org_id(resolved.api_base, resolved.org_id)
         # Every remote CLI command resolves its server here, so this attributes
         # the CLI's own debug-log rows.
-        publish_origin_identity(resolved.api_base)
+        probed_org_id = publish_origin_identity(resolved.api_base)
+        if probed_org_id and resolved.is_workspace_hosted:
+            from omnigent.cli_auth import pin_databricks_org_id, pinned_databricks_org_id
+
+            # First resolution probes and stores the org; pin it the same way.
+            if pinned_databricks_org_id(resolved.api_base) is None:
+                pin_databricks_org_id(resolved.api_base, probed_org_id)
         return resolved
 
     # A URL copied from the browser while a conversation is open carries the
