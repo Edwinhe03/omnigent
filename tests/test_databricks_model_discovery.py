@@ -383,10 +383,20 @@ def test_discover_codex_models_drops_models_without_the_codex_route() -> None:
             },
             # An empty list reports nothing, like a listing that predates the field.
             {"name": "model-services/system.ai.gpt-5-4", "supported_api_types": []},
+            # Values are compared trimmed.
+            {
+                "name": "model-services/system.ai.gpt-5-6-luna",
+                "supported_api_types": [" codex/v1/responses "],
+            },
+            # A malformed (non-list) value is not a name-based fallback.
+            {
+                "name": "model-services/system.ai.gpt-6-1",
+                "supported_api_types": "codex/v1/responses",
+            },
         ]
     )
 
-    assert servable == ("system.ai.gpt-5-5", "system.ai.gpt-5-4")
+    assert servable == ("system.ai.gpt-5-6-luna", "system.ai.gpt-5-5", "system.ai.gpt-5-4")
 
 
 def test_discover_codex_models_empty_listing_is_authoritative() -> None:

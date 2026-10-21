@@ -14,8 +14,7 @@ export interface SandboxModelOptions {
   error?: string;
 }
 
-// Model availability changes rarely, so a preview fetched when the picker opens
-// is reused across opens; the selected agent still polls on its own interval.
+// Picker previews are reused for 5 min; the selected agent polls separately.
 const PREVIEW_STALE_MS = 5 * 60_000;
 const PREVIEW_GC_MS = 10 * 60_000;
 const SELECTED_PREVIEW_POLL_MS = 15_000;

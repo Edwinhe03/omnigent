@@ -322,9 +322,7 @@ async def _drive_unsupported_harness(base_url: str, session_id: str, *, evidence
             )
             await page.goto(base_url)
             await page.get_by_test_id("new-chat-landing-input").fill("Reply with READY.")
-            blocked = (
-                "No models are available for Codex. Ask an administrator to enable model access."
-            )
+            blocked = "No models are available for Codex. Ask an admin to enable model access."
             await expect(page.get_by_role("alert").filter(has_text=blocked)).to_be_visible()
             await expect(page.get_by_test_id("new-chat-landing-submit")).to_be_disabled()
             picker = page.get_by_test_id("new-chat-landing-agent-select")

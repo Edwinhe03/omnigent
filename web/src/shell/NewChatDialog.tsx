@@ -1381,8 +1381,8 @@ function NewChatPickerLoading({
  * directly, while Edit selects the entry before opening its settings.
 
  */
-function noReachableModelsMessage(agentName: string | undefined): string {
-  return `No models are available for ${agentName ?? "this harness"}. Ask an administrator to enable model access.`;
+function noReachableModelsMessage(name: string | undefined): string {
+  return `No models are available for ${name ?? "this harness"}. Ask an admin to enable model access.`;
 }
 
 export function AgentHarnessPicker({
@@ -2057,6 +2057,7 @@ export function AgentHarnessPicker({
                 data-testid="new-chat-landing-custom-agents"
                 onSelect={(e) => {
                   e.preventDefault();
+                  onPrefetchEntries?.(customEntries.map((agent) => agent.id));
                   setMenuPage("custom");
                 }}
                 className="items-center"
@@ -2066,7 +2067,11 @@ export function AgentHarnessPicker({
               </DropdownMenuItem>
             ) : (
               // Desktop: hover flyout submenu.
-              <DropdownMenuSub>
+              <DropdownMenuSub
+                onOpenChange={(next) => {
+                  if (next) onPrefetchEntries?.(customEntries.map((agent) => agent.id));
+                }}
+              >
                 <DropdownMenuSubTrigger
                   data-testid="new-chat-landing-custom-agents"
                   className="cursor-pointer items-center"
@@ -3272,8 +3277,13 @@ export function NewChatLandingScreen() {
   // An advisory default catalog never blocks launch, unless its provider is
   // certain no model can serve the harness.
   const sandboxSelectedUnsupported = sandboxPreviewEnabled && previewIsUnsupported(sandboxModels);
+  // A bundle agent blocked by its picked brain harness names the harness, not the agent.
+  const sandboxBlockedName =
+    selectedNativeHarness === null && pickedHarness !== null
+      ? (brainHarnessLabelsAll[pickedHarness] ?? pickedHarness)
+      : selectedAgent?.display_name;
   const sandboxCatalogError = sandboxSelectedUnsupported
-    ? (sandboxModels.data?.error ?? noReachableModelsMessage(selectedAgent?.display_name))
+    ? (sandboxModels.data?.error ?? noReachableModelsMessage(sandboxBlockedName))
     : sandboxPreviewEnabled && !sandboxDefaultModelsEnabled
       ? (sandboxModels.error?.message ??
         (sandboxModels.data?.configured && sandboxModels.data.status !== "ready"

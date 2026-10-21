@@ -153,14 +153,18 @@ def preferred_served_claude_model(
 
 
 def _advertises_api_type(service: dict[str, object], api_type: str) -> bool:
-    """Whether *service* serves *api_type*; an unreported API list counts as yes."""
+    """Whether *service* serves *api_type*, compared trimmed and case-insensitively.
+
+    A missing or empty ``supported_api_types`` counts as yes, matching listings
+    that predate the field; any other non-list value counts as no.
+    """
     api_types = service.get("supported_api_types")
-    reported = {
-        value.lower()
-        for value in (api_types if isinstance(api_types, list) else [])
-        if isinstance(value, str)
-    }
-    return not reported or api_type.lower() in reported
+    if api_types is None or api_types == []:
+        return True
+    if not isinstance(api_types, list):
+        return False
+    reported = {value.strip().lower() for value in api_types if isinstance(value, str)}
+    return api_type.lower() in reported
 
 
 def _list_model_service_ids(
@@ -172,10 +176,8 @@ def _list_model_service_ids(
 ) -> list[str]:
     """List Databricks-managed ``system.ai`` model-service identifiers.
 
-    :param api_type: When set, drop services whose ``supported_api_types`` omits
-        it (case-insensitively), e.g. ``"codex/v1/responses"``. A service that
-        omits the field or reports an empty list is kept, matching listings that
-        predate it.
+    :param api_type: When set, keep only services that advertise it, e.g.
+        ``"codex/v1/responses"`` (see :func:`_advertises_api_type`).
     """
     model_ids: list[str] = []
     page_token: str | None = None

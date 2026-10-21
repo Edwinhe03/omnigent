@@ -149,9 +149,10 @@ and steers messages while the agent is busy.
   A failed listing shows its error and keeps Default launchable; a
   harness the catalog cannot serve keeps its ordinary list. When the provider
   reports `unsupported` (no model can serve the harness), the composer shows
-  its reason and submit stays disabled; opening the picker prefetches the shown
-  rows' previews, and a row whose preview is `unsupported` renders disabled with
-  that reason. A failed or timed-out preview never disables anything. This is distinct
+  its reason and submit stays disabled; opening the picker or one of its
+  submenus prefetches the shown rows' previews, and a row whose preview is
+  `unsupported` renders disabled with that reason. A blocked brain harness on a
+  bundle agent is named in the message. A failed or timed-out preview never disables anything. This is distinct
   from a connected host's own catalog and from a bound (`inference_models`)
   target. Covered by
   `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py`,

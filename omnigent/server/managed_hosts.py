@@ -719,8 +719,9 @@ class NoReachableModels(Exception):
     Use it only when the provider is certain, e.g. its catalog answered and
     nothing it serves speaks the harness's API. Returning ``[]`` stays advisory.
 
-    :param message: User-facing reason, e.g.
-        ``"No models are available for Codex."``.
+    :param message: User-facing reason shown verbatim, e.g.
+        ``"No models are available for Codex."``. Never include upstream URLs,
+        identifiers or credential details.
     """
 
 

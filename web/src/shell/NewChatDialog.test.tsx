@@ -11307,7 +11307,7 @@ describe("managed sandbox gateway preview", () => {
     [
       "a default reason",
       undefined,
-      "No models are available for Codex. Ask an administrator to enable model access.",
+      "No models are available for Codex. Ask an admin to enable model access.",
     ],
   ])("blocks launch with %s when no model can serve the harness", (_label, error, shown) => {
     preview({ ...catalog, status: "unsupported", models: [], ...(error ? { error } : {}) });
@@ -11370,8 +11370,45 @@ describe("managed sandbox gateway preview", () => {
     expect(row).toHaveAttribute("aria-disabled", "true");
     fireEvent.focus(row);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "No models are available for Codex. Ask an administrator to enable model access.",
+      "No models are available for Codex. Ask an admin to enable model access.",
     );
+  });
+
+  it("names the picked brain harness when it is what has no models", () => {
+    preview({ ...catalog, status: "unsupported", models: [] });
+    mockAgents([
+      ...DEFAULT_LANDING_AGENTS,
+      testAgent("a_polly", "polly", { display_name: "Polly", harness: "claude-sdk" }),
+    ]);
+    renderGatewaySandbox();
+    selectAgent("a_polly");
+    expect(screen.getByRole("alert")).toHaveTextContent("No models are available for Polly.");
+    openAgentConfig("a_polly");
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-codex"));
+    closeMenu();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "No models are available for Codex. Ask an admin to enable model access.",
+    );
+  });
+
+  it("prefetches your own agents when their submenu opens", async () => {
+    preview();
+    const prefetch = vi.fn();
+    vi.mocked(useSandboxUnsupportedAgents).mockReturnValue({ unsupported: new Map(), prefetch });
+    mockAgents([
+      ...DEFAULT_LANDING_AGENTS,
+      testAgent("ag_mine", "my-codex", {
+        display_name: "My Codex",
+        harness: "codex-native",
+        builtin: false,
+        mine: true,
+      }),
+    ]);
+    renderGatewaySandbox();
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-custom-agents"));
+    expect(await screen.findByTestId("new-chat-landing-agent-ag_mine")).toBeVisible();
+    expect(prefetch).toHaveBeenCalledWith(["ag_mine"]);
   });
 
   it("keeps the picker usable while the selected agent's catalog loads", () => {
