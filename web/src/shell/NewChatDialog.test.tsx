@@ -11391,24 +11391,34 @@ describe("managed sandbox gateway preview", () => {
     );
   });
 
-  it("prefetches your own agents when their submenu opens", async () => {
+  it("never grays out an agent row, only harness rows", () => {
     preview();
     const prefetch = vi.fn();
-    vi.mocked(useSandboxUnsupportedAgents).mockReturnValue({ unsupported: new Map(), prefetch });
+    vi.mocked(useSandboxUnsupportedAgents).mockReturnValue({
+      unsupported: new Map([
+        ["a2", null],
+        ["a_polly", null],
+      ]),
+      prefetch,
+    });
     mockAgents([
       ...DEFAULT_LANDING_AGENTS,
-      testAgent("ag_mine", "my-codex", {
-        display_name: "My Codex",
-        harness: "codex-native",
-        builtin: false,
-        mine: true,
-      }),
+      testAgent("a_polly", "polly", { display_name: "Polly", harness: "claude-sdk" }),
     ]);
     renderGatewaySandbox();
+    selectAgent("a1");
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
-    fireEvent.click(screen.getByTestId("new-chat-landing-custom-agents"));
-    expect(await screen.findByTestId("new-chat-landing-agent-ag_mine")).toBeVisible();
-    expect(prefetch).toHaveBeenCalledWith(["ag_mine"]);
+    expect(screen.getByTestId("new-chat-landing-agent-a2")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    // Polly can switch to a working brain, so its row (and Edit) stays usable.
+    expect(screen.getByTestId("new-chat-landing-agent-a_polly")).not.toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.getByTestId("new-chat-landing-agent-config-a_polly")).toBeVisible();
+    expect(prefetch).toHaveBeenLastCalledWith(expect.not.arrayContaining(["a_polly"]));
   });
 
   it("keeps the picker usable while the selected agent's catalog loads", () => {

@@ -268,9 +268,9 @@ Cross-harness journeys:
   a Harness default row; efforts come from the listing's reasoning metadata, and
   an unavailable listing keeps Harness default launchable. An `unsupported`
   listing (the provider is certain no model can serve the harness) grays out
-  the row and blocks launch. The connected-host picker catalog and bound
-  (`inference_models`) targets are unchanged; Databricks codex launch discovery
-  now requires the `codex/v1/responses` API.
+  the harness row and blocks launch; agent rows are never grayed out. The connected-host picker catalog and bound
+  (`inference_models`) targets are unchanged. Databricks codex launch discovery
+  skips models whose `supported_api_types` list omits `codex/v1/responses`.
 - **`model-and-effort`, Codex runtime settings:**
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_clamps_unsupported_effort`,
   `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_preserves_supported_effort`,

@@ -28,8 +28,9 @@ these choices; it does not select a default model or bind an inference profile.
 The catalog is advisory: an empty or failed listing keeps "Default" launchable.
 A provider that is certain no model can serve the harness raises
 `NoReachableModels`; the preview then reports `unsupported` with the provider's
-reason, and the picker blocks launch for that harness and disables its row once
-the preview is known (the picker prefetches the rows it shows). A failed or
+reason, and the picker blocks launch for that harness and disables its harness
+row once the preview is known (the picker prefetches the harness rows it shows).
+Agent rows are never disabled; selecting one that has no models blocks launch. A failed or
 timed-out request never blocks: only a successful `unsupported` answer does.
 
 An unbound gateway configured through `sandbox.model_discovery` and

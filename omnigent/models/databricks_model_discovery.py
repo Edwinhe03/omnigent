@@ -155,8 +155,8 @@ def preferred_served_claude_model(
 def _advertises_api_type(service: dict[str, object], api_type: str) -> bool:
     """Whether *service* serves *api_type*, compared trimmed and case-insensitively.
 
-    A missing or empty ``supported_api_types`` counts as yes, matching listings
-    that predate the field; any other non-list value counts as no.
+    A missing, ``null`` or empty ``supported_api_types`` counts as yes, matching
+    listings that predate the field; any other non-list value counts as no.
     """
     api_types = service.get("supported_api_types")
     if api_types is None or api_types == []:

@@ -381,8 +381,10 @@ def test_discover_codex_models_drops_models_without_the_codex_route() -> None:
                 "name": "model-services/system.ai.gpt-5-5",
                 "supported_api_types": ["mlflow/v1/responses", "Codex/v1/Responses"],
             },
-            # An empty list reports nothing, like a listing that predates the field.
+            # An empty list or explicit null reports nothing, like a listing that
+            # predates the field.
             {"name": "model-services/system.ai.gpt-5-4", "supported_api_types": []},
+            {"name": "model-services/system.ai.gpt-5-4-mini", "supported_api_types": None},
             # Values are compared trimmed.
             {
                 "name": "model-services/system.ai.gpt-5-6-luna",
@@ -396,7 +398,12 @@ def test_discover_codex_models_drops_models_without_the_codex_route() -> None:
         ]
     )
 
-    assert servable == ("system.ai.gpt-5-6-luna", "system.ai.gpt-5-5", "system.ai.gpt-5-4")
+    assert servable == (
+        "system.ai.gpt-5-6-luna",
+        "system.ai.gpt-5-5",
+        "system.ai.gpt-5-4",
+        "system.ai.gpt-5-4-mini",
+    )
 
 
 def test_discover_codex_models_empty_listing_is_authoritative() -> None:

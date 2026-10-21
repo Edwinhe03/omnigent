@@ -1372,6 +1372,10 @@ function NewChatPickerLoading({
   );
 }
 
+function noReachableModelsMessage(name: string | undefined): string {
+  return `No models are available for ${name ?? "this harness"}. Ask an admin to enable model access.`;
+}
+
 /**
  * Unified two-level agent/harness picker for the landing composer.
  *
@@ -1381,10 +1385,6 @@ function NewChatPickerLoading({
  * directly, while Edit selects the entry before opening its settings.
 
  */
-function noReachableModelsMessage(name: string | undefined): string {
-  return `No models are available for ${name ?? "this harness"}. Ask an admin to enable model access.`;
-}
-
 export function AgentHarnessPicker({
   agentEntries,
   harnessEntries,
@@ -1855,7 +1855,7 @@ export function AgentHarnessPicker({
           for (const agent of [...harnessEntries, ...agentEntries]) {
             void prefetchAvailableAgentDetails(agent, queryClient);
           }
-          onPrefetchEntries?.([...readyHarnessEntries, ...bundleEntries].map((agent) => agent.id));
+          onPrefetchEntries?.(readyHarnessEntries.map((agent) => agent.id));
         }
       }}
       trigger={{
@@ -2057,7 +2057,6 @@ export function AgentHarnessPicker({
                 data-testid="new-chat-landing-custom-agents"
                 onSelect={(e) => {
                   e.preventDefault();
-                  onPrefetchEntries?.(customEntries.map((agent) => agent.id));
                   setMenuPage("custom");
                 }}
                 className="items-center"
@@ -2067,11 +2066,7 @@ export function AgentHarnessPicker({
               </DropdownMenuItem>
             ) : (
               // Desktop: hover flyout submenu.
-              <DropdownMenuSub
-                onOpenChange={(next) => {
-                  if (next) onPrefetchEntries?.(customEntries.map((agent) => agent.id));
-                }}
-              >
+              <DropdownMenuSub>
                 <DropdownMenuSubTrigger
                   data-testid="new-chat-landing-custom-agents"
                   className="cursor-pointer items-center"
@@ -3237,13 +3232,16 @@ export function NewChatLandingScreen() {
     cacheUser,
     sandboxPreviewEnabled,
   );
+  // Only harness rows gray out. An agent (bundle or your own) can switch brains
+  // or bring its own provider, so its row stays usable; picking one that has no
+  // models is blocked by the selected-agent check instead.
   const sandboxPreviewEntries = useMemo(
     () =>
-      [...harnessEntries, ...agentEntries].flatMap((agent) => {
+      harnessEntries.flatMap((agent) => {
         const harness = nativeCodingAgentForAvailableAgent(agent)?.harness ?? agent.harness;
         return harness ? [{ agentId: agent.id, harness }] : [];
       }),
-    [harnessEntries, agentEntries],
+    [harnessEntries],
   );
   const { unsupported: sandboxUnsupportedAgents, prefetch: prefetchSandboxPreviews } =
     useSandboxUnsupportedAgents(
@@ -3258,13 +3256,13 @@ export function NewChatLandingScreen() {
   const sandboxBlockedReasons = useMemo(
     () =>
       new Map(
-        [...sandboxUnsupportedAgents].map(([agentId, reason]) => [
-          agentId,
-          reason ??
-            noReachableModelsMessage(agentList.find((agent) => agent.id === agentId)?.display_name),
-        ]),
+        harnessEntries.flatMap((agent) => {
+          if (!sandboxUnsupportedAgents.has(agent.id)) return [];
+          const reason = sandboxUnsupportedAgents.get(agent.id);
+          return [[agent.id, reason ?? noReachableModelsMessage(agent.display_name)] as const];
+        }),
       ),
-    [sandboxUnsupportedAgents, agentList],
+    [sandboxUnsupportedAgents, harnessEntries],
   );
   // A harness the default catalog cannot serve keeps its ordinary picker.
   const sandboxDefaultModelsEnabled =
@@ -3676,8 +3674,7 @@ export function NewChatLandingScreen() {
     (!harnessTriggerDetails.some((row) => row.label === "Model") ||
       pickerModelOptions.length > 0 ||
       routingOn);
-  // Switching to an agent whose sandbox catalog is still loading keeps the menu
-  // open; its models submenu shows "Loading models…" and submit stays disabled.
+  // Keep the menu open while only the sandbox catalog loads; submit stays gated.
   const pickerInteractiveWhileLoading =
     interactiveWhileLoading ||
     (sandboxPreviewEnabled && selectedAgent !== undefined && !pickerDataLoadingBesidesCatalog);
