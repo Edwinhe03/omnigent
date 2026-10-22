@@ -126,10 +126,12 @@ def test_read_ucode_state_trailing_slash_insensitive(tmp_path: Path) -> None:
 
 
 def test_read_ucode_state_refresh_cadence_precedence(tmp_path: Path) -> None:
-    """The top-level cadence wins over Codex's nested one; booleans are not a cadence."""
+    """The top-level cadence wins over Codex's nested one; only a positive int is a cadence."""
     agents = {
         "claude": {"auth_refresh_interval_ms": 300000, "auth": {"refresh_interval_ms": 60000}},
         "codex": {"auth": {"refresh_interval_ms": True}},
+        "zero": {"auth_refresh_interval_ms": 0},
+        "negative": {"auth": {"refresh_interval_ms": -1}},
     }
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({"workspaces": {_WORKSPACE_URL: {"agents": agents}}}))
@@ -139,7 +141,8 @@ def test_read_ucode_state_refresh_cadence_precedence(tmp_path: Path) -> None:
 
     assert state is not None
     assert state.agent("claude").auth_refresh_interval_ms == 300000
-    assert state.agent("codex").auth_refresh_interval_ms is None
+    for name in ("codex", "zero", "negative"):
+        assert state.agent(name).auth_refresh_interval_ms is None
 
 
 def test_read_ucode_state_infers_legacy_fable_opt_in(tmp_path: Path) -> None:

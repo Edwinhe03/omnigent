@@ -133,7 +133,7 @@ def _parse_agent_state(raw: object) -> UcodeAgentState:
             raw.get("auth_command") if isinstance(raw.get("auth_command"), str) else None
         ),
         auth_refresh_interval_ms=(
-            refresh_raw if type(refresh_raw) is int and refresh_raw >= 0 else None
+            refresh_raw if type(refresh_raw) is int and refresh_raw > 0 else None
         ),
         auth=dict(auth_raw) if isinstance(auth_raw, dict) else {},
         env={str(key): str(value) for key, value in env_raw.items()}
