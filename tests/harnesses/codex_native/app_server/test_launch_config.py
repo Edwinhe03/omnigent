@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -228,17 +229,27 @@ def test_build_codex_native_server_defaults_cadence_without_one_in_ucode_state(
 def test_build_codex_native_server_keeps_profile_path_when_ucode_state_is_unreadable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An unreadable ucode state file falls back to the profile path instead of failing."""
+    """An unreadable ucode state file falls back to the profile path without a traceback."""
 
     def _unreadable(_workspace_url: str) -> object:
         raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
     monkeypatch.setattr("omnigent.onboarding.ucode_state.read_ucode_state", _unreadable)
-    overrides = _ucode_codex_overrides(tmp_path, monkeypatch, None)
+    with caplog.at_level(logging.INFO, logger="omnigent.harnesses.codex_native.app_server"):
+        overrides = _ucode_codex_overrides(tmp_path, monkeypatch, None)
 
     assert f"{_UCODE_HOST}/ai-gateway/codex/v1" in overrides
     assert 'databricks auth token --profile \\"oss\\"' in overrides
+    # The gateway lookup's warning names the host; discovery's own fallback names the profile.
+    warnings = [
+        r
+        for r in caplog.records
+        if f"could not read ucode state for {_UCODE_HOST!r}" in r.getMessage()
+    ]
+    assert warnings
+    assert not any(r.exc_info for r in warnings)
 
 
 @pytest.mark.parametrize(

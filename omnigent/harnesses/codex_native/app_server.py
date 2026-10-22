@@ -3317,7 +3317,12 @@ def _databricks_codex_gateway(host: str, profile: str) -> tuple[str, str, int | 
     try:
         workspace_state = read_ucode_state(host)
     except (OSError, ValueError):  # unreadable ucode state keeps the profile path
-        _logger.warning("native-codex: could not read ucode state for %r", host, exc_info=True)
+        # Host logging mirrors WARNINGs to the terminal; frames are debug-only.
+        _logger.warning(
+            "native-codex: could not read ucode state for %r",
+            host,
+            exc_info=_logger.isEnabledFor(logging.DEBUG),
+        )
         workspace_state = None
     agent = workspace_state.agent("codex") if workspace_state is not None else None
     if agent is not None and agent.base_url and agent.auth_command:

@@ -190,7 +190,11 @@ def test_claude_not_gateway_backed_for_managed_non_databricks_url(
     assert claude_gateway_inference_backed() is False
 
 
-def test_codex_gateway_backed_for_databricks_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_codex_gateway_backed_for_databricks_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    # A profile launch's base URL is read from ucode state first; keep it empty here.
+    monkeypatch.setattr("omnigent.onboarding.ucode_state._STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(
         codex_native_app_server,
         "_databricks_gateway_host",
