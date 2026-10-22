@@ -106,6 +106,7 @@ def test_read_ucode_state_returns_state_when_configured(tmp_path: Path) -> None:
     assert state.agent("claude").auth_command == "printf token"
     assert state.agent("codex") is not None
     assert state.agent("codex").model == "databricks-gpt-5-5"
+    assert state.agent("codex").auth_refresh_interval_ms == 900000
     assert state.agent("pi") is not None
     assert state.agent("pi").base_urls == {
         "claude": f"{_WORKSPACE_URL}/ai-gateway/anthropic",

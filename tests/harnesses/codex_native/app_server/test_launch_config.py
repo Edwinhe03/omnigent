@@ -132,7 +132,8 @@ def test_build_codex_native_server_uses_profile_host_without_static_token(
 
 
 _UCODE_HOST = "https://example.cloud.databricks.com"
-_UCODE_BASE_URL = f"{_UCODE_HOST}/ai-gateway/codex/v1"
+# Differs from the profile-derived gateway so the tests tell the two routes apart.
+_UCODE_BASE_URL = "https://ucode-gateway.example.com/codex/v1"
 _UCODE_AUTH = f"ug auth-token --host {_UCODE_HOST} --profile ug-oauth-example"
 
 
@@ -210,6 +211,35 @@ def test_build_codex_native_server_takes_gateway_and_auth_from_ucode_state(
     assert "databricks auth token" not in overrides
 
 
+def test_build_codex_native_server_defaults_cadence_without_one_in_ucode_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ucode entry without a refresh cadence keeps the default cadence."""
+    overrides = _ucode_codex_overrides(
+        tmp_path, monkeypatch, {"base_url": _UCODE_BASE_URL, "auth_command": _UCODE_AUTH}
+    )
+
+    assert json.dumps(_UCODE_AUTH) in overrides
+    assert "refresh_interval_ms=900000" in overrides
+
+
+def test_build_codex_native_server_keeps_profile_path_when_ucode_state_is_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable ucode state file falls back to the profile path instead of failing."""
+
+    def _unreadable(_workspace_url: str) -> object:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr("omnigent.onboarding.ucode_state.read_ucode_state", _unreadable)
+    overrides = _ucode_codex_overrides(tmp_path, monkeypatch, None)
+
+    assert f"{_UCODE_HOST}/ai-gateway/codex/v1" in overrides
+    assert 'databricks auth token --profile \\"oss\\"' in overrides
+
+
 @pytest.mark.parametrize(
     "codex",
     [None, {}, {"base_url": _UCODE_BASE_URL}, {"auth_command": _UCODE_AUTH}],
@@ -228,7 +258,8 @@ def test_build_codex_native_server_keeps_profile_path_without_usable_ucode_entry
     """
     overrides = _ucode_codex_overrides(tmp_path, monkeypatch, codex)
 
-    assert _UCODE_BASE_URL in overrides
+    assert f"{_UCODE_HOST}/ai-gateway/codex/v1" in overrides
+    assert _UCODE_BASE_URL not in overrides
     assert "ug auth-token" not in overrides
     assert 'databricks auth token --profile \\"oss\\"' in overrides
 
