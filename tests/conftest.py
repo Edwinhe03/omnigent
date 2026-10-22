@@ -516,11 +516,7 @@ def _isolate_origin_identity(
 
 @pytest.fixture(autouse=True)
 def _isolate_databricks_org_pin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Register the org pin with monkeypatch so direct os.environ writes are undone.
-
-    :param monkeypatch: Pytest monkeypatch fixture.
-    :returns: None.
-    """
+    """Register the org pin with monkeypatch so direct os.environ writes are undone."""
     from omnigent.cli_auth import PINNED_DATABRICKS_ORG_ENV_VAR
 
     monkeypatch.setenv(PINNED_DATABRICKS_ORG_ENV_VAR, "")

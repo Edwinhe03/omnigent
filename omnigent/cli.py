@@ -2654,7 +2654,12 @@ def _selected_org_id(server_url: str | None) -> str | None:
         return None
     from omnigent.cli_auth import load_databricks_org_id
 
-    return load_databricks_org_id(server_url)
+    # The pin and login match the URL as given; a record target may be an old
+    # spelling, which only its canonical form finds. Both the registry key and the
+    # daemon pin come from here, so they agree.
+    return load_databricks_org_id(server_url) or load_databricks_org_id(
+        _normalize_daemon_target_impl(server_url)
+    )
 
 
 def _normalize_daemon_target(server_url: str | None) -> str:
@@ -2667,9 +2672,7 @@ def _normalize_daemon_target(server_url: str | None) -> str:
     :returns: ``"local"`` for local mode, otherwise the URL without a
         trailing slash, plus ``?o=`` for the workspace selected for it.
     """
-    # Look the workspace up under the canonical spelling a login stores it under.
-    org_id = _selected_org_id(_normalize_daemon_target_impl(server_url)) if server_url else None
-    return _normalize_daemon_target_impl(server_url, org_id=org_id)
+    return _normalize_daemon_target_impl(server_url, org_id=_selected_org_id(server_url))
 
 
 def _daemon_host_status_probe(

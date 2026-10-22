@@ -4099,3 +4099,16 @@ def test_apps_url_with_a_stored_org_keeps_its_url_only_key(
 
     assert cli._normalize_daemon_target(app) == app
     assert cli._selected_org_id(app) is None
+
+
+def test_mixed_case_server_gets_the_same_workspace_key_and_pin() -> None:
+    """The CLI's expected key and the spawned daemon's pin must name one workspace."""
+    from omnigent.cli_auth import PINNED_DATABRICKS_ORG_ENV_VAR, pin_databricks_org_id
+
+    server = "https://ACCT.example.com/api/2.0/omnigent"
+    pin_databricks_org_id(server, "111")
+
+    assert cli._normalize_daemon_target(server).endswith("?o=111")
+    assert cli._build_host_daemon_env(server_url=server)[PINNED_DATABRICKS_ORG_ENV_VAR].endswith(
+        "?o=111"
+    )

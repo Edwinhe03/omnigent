@@ -628,8 +628,12 @@ def pinned_databricks_org_id(server_url: str) -> str | None:
     pin = os.environ.get(PINNED_DATABRICKS_ORG_ENV_VAR)
     if not pin:
         return None
-    pinned = ServerUrl(api_base=pin)
-    if pinned.api_base != ServerUrl(api_base=server_url).api_base:
+    try:
+        pinned = ServerUrl(api_base=pin)
+        if pinned.api_base != ServerUrl(api_base=server_url).api_base:
+            return None
+    except ValueError:
+        # A malformed pin must not break header builds for every server.
         return None
     return pinned.org_id
 

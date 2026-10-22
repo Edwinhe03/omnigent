@@ -389,6 +389,8 @@ def test_pinned_org_id_never_applies_to_another_server(token_dir, monkeypatch) -
     assert load_databricks_org_id(other) == "333"
     assert databricks_request_headers(other)["X-Databricks-Org-Id"] == "333"
     assert load_databricks_org_id("https://example.databricks.com/other") is None
+    monkeypatch.setenv(PINNED_DATABRICKS_ORG_ENV_VAR, "https://[?o=111")
+    assert load_databricks_org_id(other) == "333"
 
 
 def test_store_token_preserves_databricks_org_id(token_dir) -> None:
