@@ -3659,7 +3659,8 @@ def native_codex_launch_base_url(launch: NativeCodexLaunch) -> str | None:
     """Inference base URL a resolved launch pins, or None when it defers to Codex's own login.
 
     Mirrors how the launch is actually applied: the Databricks-profile branch of
-    :func:`build_native_codex_app` derives the base URL from the profile host,
+    :func:`build_native_codex_app` takes the base URL from ucode state for the
+    profile host, else derives it from that host (:func:`_databricks_codex_gateway`),
     while a generic provider carries it inside the generated
     ``model_providers.…`` config override.
 
@@ -3674,7 +3675,7 @@ def native_codex_launch_base_url(launch: NativeCodexLaunch) -> str | None:
         host = _databricks_gateway_host(launch.profile)
         if not host:
             return None
-        return _databricks_codex_base_url(host.rstrip("/"))
+        return _databricks_codex_gateway(host.rstrip("/"), launch.profile)[0]
     for override in launch.config_overrides:
         _, sep, table = override.partition("=")
         if not sep or not override.startswith("model_providers."):
