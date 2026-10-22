@@ -3284,15 +3284,43 @@ def _databricks_launch_materialization(
         raise CodexDatabricksProfileMissingError(profile)
     host = host.rstrip("/")
     resolved_model = _resolve_databricks_codex_model(host, profile, model, codex_path=codex_path)
+    base_url, auth_command, auth_refresh_interval_ms = _databricks_codex_gateway(host, profile)
     return _DatabricksLaunchMaterialization(
         config_overrides=_databricks_codex_config_overrides(
             model=resolved_model,
-            base_url=_databricks_codex_base_url(host),
-            auth_command=_databricks_codex_auth_command(host, profile),
+            base_url=base_url,
+            auth_command=auth_command,
+            auth_refresh_interval_ms=auth_refresh_interval_ms,
         ),
         model=resolved_model,
         host=host,
     )
+
+
+def _databricks_codex_gateway(host: str, profile: str) -> tuple[str, str, int | None]:
+    """
+    Return the Codex gateway base URL, auth command and refresh cadence for *host*.
+
+    ucode state is the source of truth for a Databricks route's gateway and auth,
+    as it is for native Claude (``claude_native._ucode_config_for_profile``); the
+    profile-derived gateway is the fallback.
+
+    :param host: Databricks workspace host, e.g. ``"https://example.databricks.com"``.
+    :param profile: ``~/.databrickscfg`` profile name, e.g. ``"oss"``.
+    :returns: ucode's ``codex`` entry for *host* when it names both a base URL and
+        an auth command, else the profile-derived gateway with the default cadence.
+    """
+    from omnigent.onboarding.ucode_state import read_ucode_state
+
+    try:
+        workspace_state = read_ucode_state(host)
+    except Exception:  # unreadable ucode state keeps the profile path
+        _logger.debug("native-codex: could not read ucode state for %r", host, exc_info=True)
+        workspace_state = None
+    agent = workspace_state.agent("codex") if workspace_state is not None else None
+    if agent is not None and agent.base_url and agent.auth_command:
+        return agent.base_url, agent.auth_command, agent.auth_refresh_interval_ms
+    return _databricks_codex_base_url(host), _databricks_codex_auth_command(host, profile), None
 
 
 # DATABRICKS-PATCH(codex-live-model-discovery)
