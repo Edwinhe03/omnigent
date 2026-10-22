@@ -201,7 +201,8 @@ def test_build_codex_native_server_takes_gateway_and_auth_from_ucode_state(
         {
             "base_url": _UCODE_BASE_URL,
             "auth_command": _UCODE_AUTH,
-            "auth_refresh_interval_ms": 60000,
+            # ucode writes Codex's cadence inside its ``auth`` table.
+            "auth": {"refresh_interval_ms": 60000},
         },
     )
 

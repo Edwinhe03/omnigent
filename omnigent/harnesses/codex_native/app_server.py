@@ -3270,8 +3270,9 @@ def _databricks_launch_materialization(
     Uses the profile's own host, so a ``DATABRICKS_HOST`` override in the
     runner env must not point the launch at another workspace. The gateway
     and auth come from ucode state for that host when present (see
-    :func:`_databricks_codex_gateway`); model discovery still uses the
-    profile's credentials.
+    :func:`_databricks_codex_gateway`). Model discovery still uses the
+    profile's credentials; ucode state is keyed by the same host, so both
+    see that workspace's catalog.
 
     :param model: Optional explicit model pin; ``None`` resolves the
         catalog default.
@@ -3303,9 +3304,7 @@ def _databricks_codex_gateway(host: str, profile: str) -> tuple[str, str, int | 
     """
     Return the Codex gateway base URL, auth command and refresh cadence for *host*.
 
-    ucode state is the source of truth for a Databricks route's gateway and auth,
-    as it is for in-process Codex (``runtime.workflow._inject_ucode_agent_state``)
-    and native Claude (``claude_native._ucode_config_for_profile``); the
+    ucode state is the source of truth for the gateway and auth; the
     profile-derived gateway is the fallback.
 
     :param host: Databricks workspace host, e.g. ``"https://example.databricks.com"``.
@@ -3317,7 +3316,7 @@ def _databricks_codex_gateway(host: str, profile: str) -> tuple[str, str, int | 
 
     try:
         workspace_state = read_ucode_state(host)
-    except Exception:  # unreadable ucode state keeps the profile path
+    except (OSError, ValueError):  # unreadable ucode state keeps the profile path
         _logger.warning("native-codex: could not read ucode state for %r", host, exc_info=True)
         workspace_state = None
     agent = workspace_state.agent("codex") if workspace_state is not None else None
