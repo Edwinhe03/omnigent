@@ -173,6 +173,35 @@ async def test_codex_reprobed_launch_catalog_joins_existing_probe(
     assert model_catalog_store.read_catalog("codex-native", fingerprint) == refreshed
 
 
+async def test_wrapped_launch_catalog_probe_outlasts_the_direct_deadline(
+    _catalog_launch: NativeCodexLaunch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrapper's longer connect wait also extends the whole-probe deadline."""
+    from omnigent.harnesses.codex_native import app_server as codex_native_app_server
+
+    monkeypatch.setattr(codex_native_app_server, "_MODEL_CATALOG_PROBE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(codex_native_app_server, "_CONNECT_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(codex_native_app_server, "_APP_SERVER_READY_TIMEOUT_SECONDS", 2.0)
+    rows = [{"id": "gpt-5.5", "model": "gpt-5.5", "isDefault": True}]
+
+    async def _slow_probe(
+        *, codex_path: str | None = None, launch: NativeCodexLaunch | None = None
+    ) -> list[dict[str, object]]:
+        del codex_path, launch
+        # Past the direct deadline, within the wrapped one.
+        await asyncio.sleep(0.3)
+        return rows
+
+    monkeypatch.setattr(codex_native_app_server, "probe_codex_model_options", _slow_probe)
+    assert await codex_native_app_server.codex_launch_catalog(launch=_catalog_launch) is None
+
+    monkeypatch.setattr(
+        codex_native_app_server, "_configured_app_server_command", lambda: ("ucode", "codex")
+    )
+    assert await codex_native_app_server.codex_launch_catalog(launch=_catalog_launch) == rows
+
+
 async def test_codex_reprobed_launch_catalog_cancels_timed_out_probe_and_preserves_cache(
     _catalog_launch: NativeCodexLaunch,
     monkeypatch: pytest.MonkeyPatch,

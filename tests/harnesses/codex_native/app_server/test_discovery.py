@@ -234,6 +234,9 @@ async def test_probe_codex_model_options_uses_launch_config_and_marks_default(
         ),
     )
     monkeypatch.setattr(codex_native_app_server, "_clean_codex_env", lambda: {"PATH": "/bin"})
+    monkeypatch.setattr(
+        codex_native_app_server, "_configured_app_server_command", lambda: ("ucode", "codex")
+    )
 
     captured: dict[str, object] = {}
 
@@ -264,6 +267,7 @@ async def test_probe_codex_model_options_uses_launch_config_and_marks_default(
         captured["env"] = dict(env)
         captured["cwd"] = cwd
         captured["config_overrides"] = list(config_overrides)
+        captured["app_server_command"] = tuple(app_server_command)
 
         async def _empty_stderr() -> str:
             return ""
@@ -316,6 +320,7 @@ async def test_probe_codex_model_options_uses_launch_config_and_marks_default(
         'model="databricks-gpt-5-4"',
         'model_provider="omnigent_databricks"',
     ]
+    assert captured["app_server_command"] == ("ucode", "codex")
     env = captured["env"]
     assert isinstance(env, dict)
     assert env["DATABRICKS_HOST"] == "https://ws.example"

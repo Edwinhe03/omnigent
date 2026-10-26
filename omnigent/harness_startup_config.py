@@ -248,16 +248,13 @@ def resolve_harness_config(
     return default, overrides
 
 
-def _parse_override_entry(
-    key: str,
-    value: object,
-) -> _HarnessOverride | None:
-    """Validate one per-harness override entry; warn+skip on malformed.
+def _parse_launch_fields(key: str, value: object) -> _HarnessOverride | None:
+    """Validate a ``{command, args}`` mapping; warn+skip on malformed fields.
 
-    :param key: The raw harness id as written in config (for messages).
+    :param key: The config path as written, for messages, e.g. ``"codex-native"``.
     :param value: The entry value — expected ``{command: str, args: list}``.
-    :returns: A validated ``{command?, args?}`` dict, or ``None`` when the
-        entry is structurally invalid (already warned).
+    :returns: A validated ``{command?, args?}`` dict, or ``None`` when *value*
+        is not a mapping (already warned).
     """
     from omnigent.inner import ui
 
@@ -281,9 +278,30 @@ def _parse_override_entry(
             parsed["args"] = [arg for arg in args if isinstance(arg, str)]
         else:
             ui.warn(f"config `harness.{key}.args` must be a list of strings — ignoring it.")
+    return parsed
+
+
+def _parse_override_entry(
+    key: str,
+    value: object,
+) -> _HarnessOverride | None:
+    """Validate one per-harness override entry; warn+skip on malformed.
+
+    :param key: The raw harness id as written in config (for messages).
+    :param value: The entry value — expected ``{command: str, args: list, app_server?}``.
+    :returns: A validated ``{command?, args?, app_server?}`` dict, or ``None``
+        when the entry is structurally invalid (already warned).
+    """
+    from omnigent.inner import ui
+
+    parsed = _parse_launch_fields(key, value)
+    if parsed is None or not isinstance(value, dict):
+        return parsed
+    # Only `command` and `args` are read from the nested entry, so a cyclic YAML
+    # anchor there can't recurse.
     app_server = value.get(_OVERRIDE_KEY_APP_SERVER)
     if app_server is not None:
-        launch = _parse_override_entry(f"{key}.{_OVERRIDE_KEY_APP_SERVER}", app_server)
+        launch = _parse_launch_fields(f"{key}.{_OVERRIDE_KEY_APP_SERVER}", app_server)
         if launch is not None and "command" in launch:
             parsed["app_server"] = [launch["command"], *launch.get("args", [])]
         elif launch is not None and isinstance(app_server, dict) and "command" not in app_server:

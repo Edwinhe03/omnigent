@@ -1909,7 +1909,7 @@ async def _codex_launch_catalog(
         try:
             rows = await asyncio.wait_for(
                 probe_codex_model_options(codex_path=codex_path, launch=launch),
-                timeout=_MODEL_CATALOG_PROBE_TIMEOUT_SECONDS,
+                timeout=_model_catalog_probe_timeout(),
             )
         except Exception:  # noqa: BLE001 — probe failure means "no catalog", never a crash
             # Best-effort probe re-run on every catalog fetch; log once so a
@@ -2002,6 +2002,17 @@ def _configured_app_server_command() -> tuple[str, ...]:
     from omnigent.harness_startup_config import resolve_codex_app_server_command
 
     return resolve_codex_app_server_command(load_effective_config())
+
+
+def _model_catalog_probe_timeout() -> float:
+    """Whole-probe budget; a wrapped probe also gets the wrapper's longer connect wait."""
+    if not _configured_app_server_command():
+        return _MODEL_CATALOG_PROBE_TIMEOUT_SECONDS
+    return (
+        _MODEL_CATALOG_PROBE_TIMEOUT_SECONDS
+        + _APP_SERVER_READY_TIMEOUT_SECONDS
+        - _CONNECT_TIMEOUT_SECONDS
+    )
 
 
 def _app_server_executable(

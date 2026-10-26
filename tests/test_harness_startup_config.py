@@ -384,6 +384,21 @@ def test_codex_app_server_command_without_command_warns_and_skips(
     assert "harness.codex-native.app_server" in capsys.readouterr().err
 
 
+def test_cyclic_app_server_config_warns_instead_of_recursing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A YAML anchor that nests ``app_server`` in itself is ignored, not recursed into."""
+    import yaml
+
+    cfg = yaml.safe_load("harness:\n  codex-native:\n    app_server: &w\n      app_server: *w\n")
+    assert (
+        cfg["harness"]["codex-native"]["app_server"]["app_server"]
+        is (cfg["harness"]["codex-native"]["app_server"])
+    )
+    assert resolve_codex_app_server_command(cfg) == ()
+    assert "harness.codex-native.app_server" in capsys.readouterr().err
+
+
 # ── CLI persists RAW args; the runner is the single merge point ──────
 
 
