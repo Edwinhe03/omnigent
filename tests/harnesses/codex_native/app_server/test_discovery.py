@@ -258,6 +258,7 @@ async def test_probe_codex_model_options_uses_launch_config_and_marks_default(
         env: dict[str, str],
         cwd: Path,
         config_overrides: tuple[str, ...] = (),
+        app_server_command: tuple[str, ...] = (),
     ) -> object:
         captured["codex_path"] = codex_path
         captured["env"] = dict(env)
@@ -386,6 +387,7 @@ async def test_probe_codex_model_options_probes_every_launch_shape(
         env: dict[str, str],
         cwd: Path,
         config_overrides: tuple[str, ...] = (),
+        app_server_command: tuple[str, ...] = (),
     ) -> object:
         captured["env"] = dict(env)
         captured["config_overrides"] = list(config_overrides)
@@ -594,6 +596,57 @@ async def test_discovery_process_captures_stderr_in_memory(
     assert await discovery.stderr_tail == "Error: provider unavailable"
 
 
+async def test_discovery_process_launches_through_the_configured_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured wrapper runs in place of Codex, with a session-sized connect budget."""
+    from omnigent.harnesses.codex_native import app_server as codex_native_app_server
+
+    spawned: dict[str, object] = {}
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> object:
+        spawned["argv"] = args
+        spawned["executable"] = kwargs["executable"]
+        stderr = asyncio.StreamReader()
+        stderr.feed_eof()
+
+        class _FakeProcess:
+            pass
+
+        process = _FakeProcess()
+        process.stderr = stderr
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        codex_native_app_server, "acquire_codex_native_process_owner_lock", lambda: None
+    )
+
+    discovery = await codex_native_app_server._start_codex_model_discovery_process(
+        codex_path="/test/codex",
+        listen_url="ws://127.0.0.1:12345",
+        env={},
+        cwd=Path("/work"),
+        config_overrides=['model="m"'],
+        app_server_command=("env", "MODE=omni", "isaac", "codex", "--"),
+    )
+
+    assert spawned["executable"] == "env"
+    assert spawned["argv"][1:] == (
+        "MODE=omni",
+        "isaac",
+        "codex",
+        "--",
+        "app-server",
+        "--listen",
+        "ws://127.0.0.1:12345",
+        "-c",
+        'model="m"',
+    )
+    assert str(spawned["argv"][0]).startswith("env ")
+    assert discovery.connect_timeout_s == codex_native_app_server._APP_SERVER_READY_TIMEOUT_SECONDS
+
+
 async def test_discovery_spawn_failure_releases_owner_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -764,6 +817,21 @@ def test_codex_catalog_fingerprint_tracks_configured_catalog(
         )
 
     assert app_server.codex_catalog_fingerprint(launch, codex_path=sys.executable) != before
+
+
+def test_codex_catalog_fingerprint_tracks_the_app_server_wrapper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wrapper can serve another catalog, so configuring one re-keys it."""
+    from omnigent.harnesses.codex_native import app_server
+
+    monkeypatch.setattr(app_server, "_codex_home_config_source_from_env", lambda: tmp_path)
+    launch = NativeCodexLaunch([], None, None)
+    direct = app_server.codex_catalog_fingerprint(launch, codex_path=sys.executable)
+
+    monkeypatch.setattr(app_server, "_configured_app_server_command", lambda: ("ucode", "codex"))
+
+    assert app_server.codex_catalog_fingerprint(launch, codex_path=sys.executable) != direct
 
 
 @pytest.mark.parametrize("code", [-32600, -32602])
