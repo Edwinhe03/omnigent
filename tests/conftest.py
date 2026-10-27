@@ -420,6 +420,23 @@ def _isolate_codex_native_state(
     monkeypatch.setenv("OMNIGENT_CODEX_NATIVE_STATE_DIR", str(state_dir))
 
 
+@pytest.fixture(autouse=True)
+def _no_configured_codex_app_server_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Run Codex directly unless a test configures an app-server wrapper.
+
+    The wrapper is read from the user's ``~/.omnigent/config.yaml``, so without
+    this every Codex launch and model probe would depend on the machine.
+
+    :param monkeypatch: Fixture used to stub the config read.
+    :returns: None.
+    """
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server._configured_app_server_command",
+        lambda: (),
+    )
+
+
 @pytest.fixture()
 def claude_managed_settings() -> None:
     """Opt back in to the host's real Claude Code managed-settings chain.
