@@ -538,6 +538,46 @@ async def test_discovery_stderr_tail_is_bounded_and_redacted() -> None:
     assert "[REDACTED]" in detail
 
 
+async def test_discovery_listener_waits_out_the_wrapped_connect_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrapped probe that listens after the direct budget is still awaited."""
+    from omnigent.harnesses.codex_native import app_server as codex_native_app_server
+
+    class _RunningProcess:
+        returncode = None
+
+    class _Writer:
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    loop = asyncio.get_running_loop()
+    ready_at = loop.time() + 0.2
+
+    async def _open_connection(*_args: object) -> tuple[object, _Writer]:
+        if loop.time() < ready_at:
+            raise ConnectionRefusedError
+        return object(), _Writer()
+
+    async def _empty_stderr() -> str:
+        return ""
+
+    monkeypatch.setattr(codex_native_app_server, "_CONNECT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(asyncio, "open_connection", _open_connection)
+    discovery = codex_native_app_server._CodexModelDiscoveryProcess(
+        process=_RunningProcess(),  # type: ignore[arg-type]
+        stderr_tail=asyncio.create_task(_empty_stderr()),
+        connect_timeout_s=2.0,
+    )
+
+    await codex_native_app_server._wait_for_discovery_listener(discovery, port=1)
+
+    assert loop.time() >= ready_at
+
+
 async def test_discovery_early_exit_error_carries_redacted_codex_stderr() -> None:
     """A failed probe exposes Codex's redacted in-memory diagnostic."""
     from omnigent.harnesses.codex_native import app_server as codex_native_app_server
