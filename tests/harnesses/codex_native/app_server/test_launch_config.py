@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -362,14 +363,24 @@ def test_build_codex_native_server_keeps_profile_path_without_usable_ucode_entry
 def test_build_codex_native_server_carries_the_configured_app_server_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _no_configured_codex_app_server_command: Callable[[], tuple[str, ...]],
 ) -> None:
-    """The configured wrapper reaches the session server; Codex stays its binary."""
+    """The user config's wrapper reaches the session server; Codex stays its binary."""
     from omnigent.harnesses.codex_native import app_server as codex_native_app_server
 
     monkeypatch.setattr(codex_native_app_server, "_find_codex_cli", lambda: sys.executable)
     monkeypatch.setattr(
-        codex_native_app_server, "_configured_app_server_command", lambda: ("ucode", "codex")
+        codex_native_app_server,
+        "_configured_app_server_command",
+        _no_configured_codex_app_server_command,
     )
+    config_home = tmp_path / "config-home"
+    config_home.mkdir()
+    (config_home / "config.yaml").write_text(
+        "harness:\n  codex-native:\n    app_server:\n      command: ucode\n      args: [codex]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
 
     app_server = build_codex_native_server(
         socket_path=tmp_path / "codex.sock",

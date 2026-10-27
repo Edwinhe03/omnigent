@@ -7,7 +7,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 import pytest
@@ -421,7 +421,9 @@ def _isolate_codex_native_state(
 
 
 @pytest.fixture(autouse=True)
-def _no_configured_codex_app_server_command(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_configured_codex_app_server_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[], tuple[str, ...]]:
     """
     Run Codex directly unless a test configures an app-server wrapper.
 
@@ -429,12 +431,13 @@ def _no_configured_codex_app_server_command(monkeypatch: pytest.MonkeyPatch) -> 
     this every Codex launch and model probe would depend on the machine.
 
     :param monkeypatch: Fixture used to stub the config read.
-    :returns: None.
+    :returns: The real config reader, for a test that exercises it.
     """
-    monkeypatch.setattr(
-        "omnigent.harnesses.codex_native.app_server._configured_app_server_command",
-        lambda: (),
-    )
+    from omnigent.harnesses.codex_native import app_server
+
+    real = app_server._configured_app_server_command
+    monkeypatch.setattr(app_server, "_configured_app_server_command", lambda: ())
+    return real
 
 
 @pytest.fixture()
