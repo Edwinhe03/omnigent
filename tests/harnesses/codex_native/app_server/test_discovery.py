@@ -642,11 +642,11 @@ async def test_discovery_process_launches_through_the_configured_wrapper(
         "isaac",
         "codex",
         "--",
+        "-c",
+        'model="m"',
         "app-server",
         "--listen",
         "ws://127.0.0.1:12345",
-        "-c",
-        'model="m"',
     )
     assert str(spawned["argv"][0]).startswith("env ")
     assert discovery.connect_timeout_s == codex_native_app_server._APP_SERVER_READY_TIMEOUT_SECONDS

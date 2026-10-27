@@ -2043,13 +2043,15 @@ def _build_native_codex_app_server_argv(
 ) -> list[str]:
     """Build argv for the native Codex app-server subprocess.
 
+    The ``-c`` overrides go before ``app-server``: Codex ignores top-level ``-c``
+    once the subcommand has its own, so a wrapper that passes its own top-level
+    ``-c`` (e.g. ucode) keeps it only if these join that group.
+
     :param launch_args: Args of a configured app-server wrapper, placed before
-        ``app-server`` (see :func:`_configured_app_server_command`).
+        everything else (see :func:`_configured_app_server_command`).
     """
-    argv = [tagged_argv0, *launch_args, "app-server", "--listen", listen_url]
-    for override in config_overrides:
-        argv.extend(["-c", override])
-    return argv
+    overrides = [arg for override in config_overrides for arg in ("-c", override)]
+    return [tagged_argv0, *launch_args, *overrides, "app-server", "--listen", listen_url]
 
 
 @dataclass
