@@ -1008,13 +1008,26 @@ async def test_session_app_server_launches_through_the_configured_wrapper(
     workspace.mkdir()
     server = _test_app_server(tmp_path, tmp_path / "codex-home", tmp_path / "bridge", workspace)
     server.app_server_command = ("env", "MODE=omni", "isaac", "codex", "--")
+    server.config_overrides = ['model_provider="p"', 'model="m"']
 
     await server._spawn_app_server_process("unix:///tmp/codex.sock")
     if server.stderr_task is not None:
         await server.stderr_task
 
     assert spawned["executable"] == "env"
-    assert spawned["argv"][1:5] == ("MODE=omni", "isaac", "codex", "--")
-    assert spawned["argv"][5:8] == ("app-server", "--listen", "unix:///tmp/codex.sock")
+    # Wrapper args, then Omnigent's -c (joining the wrapper's top-level group), then app-server.
+    assert spawned["argv"][1:] == (
+        "MODE=omni",
+        "isaac",
+        "codex",
+        "--",
+        "-c",
+        'model_provider="p"',
+        "-c",
+        'model="m"',
+        "app-server",
+        "--listen",
+        "unix:///tmp/codex.sock",
+    )
     # The terminal keeps attaching through Codex itself, not the wrapper.
     assert server.codex_path == sys.executable
