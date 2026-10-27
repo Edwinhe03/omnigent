@@ -66,7 +66,7 @@ implements them separately, so a fix for one harness does not reach the others.
   Sessions can add to or override these host defaults. Project config can
   choose the default harness, but commands and arguments come only from user config.
   Codex's `harness.codex-native.app_server` (`command` plus `args`) is a separate,
-  config-file-only wrapper for its app-server; unset runs Codex directly.
+  config-file-only wrapper for its session app-servers; unset runs Codex directly.
   Other harnesses keep their credential card only.
 - `skill-contents`: open plain or plugin skills to read their SKILL.md markdown,
   with loading, truncation, unavailable-host, and older-server states.

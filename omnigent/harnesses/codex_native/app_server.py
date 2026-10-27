@@ -211,7 +211,6 @@ class _CodexModelDiscoveryProcess:
     stderr_tail: asyncio.Task[str]
     registry_tag: str | None = None
     owner_lock: CodexNativeProcessOwnerLock | None = None
-    connect_timeout_s: float = _CONNECT_TIMEOUT_SECONDS
 
 
 def _string_object_dict(value: object) -> _JsonObject | None:
@@ -1465,20 +1464,13 @@ async def _start_codex_model_discovery_process(
     env: dict[str, str],
     cwd: Path,
     config_overrides: Sequence[str] = (),
-    app_server_command: Sequence[str] = (),
 ) -> _CodexModelDiscoveryProcess:
-    """Start the isolated Codex process used only for model discovery.
-
-    :param app_server_command: A configured wrapper to launch through, or ``()``
-        to run *codex_path* directly.
-    """
+    """Start the isolated Codex process used only for model discovery."""
     registry_tag = f"codex-model-probe-{uuid.uuid4().hex}"
-    executable, launch_args = _app_server_executable(codex_path, app_server_command)
     argv = _build_native_codex_app_server_argv(
-        tagged_argv0=_tagged_codex_argv0(executable, registry_tag),
+        tagged_argv0=_tagged_codex_argv0(codex_path, registry_tag),
         listen_url=listen_url,
         config_overrides=config_overrides,
-        launch_args=launch_args,
     )
     # Registered like a session app-server so a Host that dies mid-probe leaves
     # an entry the next reconcile can reap.
@@ -1491,7 +1483,7 @@ async def _start_codex_model_discovery_process(
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=str(cwd),
-            executable=executable,
+            executable=codex_path,
             **_proc.spawn_kwargs(),
         )
     except BaseException:
@@ -1515,10 +1507,6 @@ async def _start_codex_model_discovery_process(
         stderr_tail=stderr_tail,
         registry_tag=registry_tag,
         owner_lock=owner_lock,
-        # A wrapper does its own setup before Codex listens; give it the session budget.
-        connect_timeout_s=(
-            _APP_SERVER_READY_TIMEOUT_SECONDS if app_server_command else _CONNECT_TIMEOUT_SECONDS
-        ),
     )
 
 
@@ -1579,7 +1567,7 @@ async def _wait_for_discovery_listener(
 ) -> None:
     """Wait until a discovery app-server accepts loopback connections."""
     process = discovery.process
-    deadline = asyncio.get_running_loop().time() + discovery.connect_timeout_s
+    deadline = asyncio.get_running_loop().time() + _CONNECT_TIMEOUT_SECONDS
     while asyncio.get_running_loop().time() < deadline:
         if process.returncode is not None:
             message = f"Codex model discovery exited early ({process.returncode})"
@@ -1796,7 +1784,6 @@ async def probe_codex_model_options(
         env=env,
         cwd=codex_home,
         config_overrides=config_overrides,
-        app_server_command=_configured_app_server_command(),
     )
     client: CodexAppServerClient | None = None
     try:
@@ -1869,12 +1856,6 @@ def codex_catalog_fingerprint(launch: NativeCodexLaunch, *, codex_path: str | No
         launch.model,
         tuple(launch.config_overrides),
         binary_identity(codex_path or _find_codex_cli()),
-        # A wrapper can change the catalog (e.g. its own provider), so it keys it too.
-        *(
-            (app_server_command,)
-            if (app_server_command := _configured_app_server_command())
-            else ()
-        ),
     )
 
 
@@ -1909,7 +1890,7 @@ async def _codex_launch_catalog(
         try:
             rows = await asyncio.wait_for(
                 probe_codex_model_options(codex_path=codex_path, launch=launch),
-                timeout=_model_catalog_probe_timeout(),
+                timeout=_MODEL_CATALOG_PROBE_TIMEOUT_SECONDS,
             )
         except Exception:  # noqa: BLE001 — probe failure means "no catalog", never a crash
             # Best-effort probe re-run on every catalog fetch; log once so a
@@ -2002,31 +1983,6 @@ def _configured_app_server_command() -> tuple[str, ...]:
     from omnigent.harness_startup_config import resolve_codex_app_server_command
 
     return resolve_codex_app_server_command(load_effective_config())
-
-
-def _model_catalog_probe_timeout() -> float:
-    """Whole-probe budget; a wrapped probe also gets the wrapper's longer connect wait."""
-    if not _configured_app_server_command():
-        return _MODEL_CATALOG_PROBE_TIMEOUT_SECONDS
-    return (
-        _MODEL_CATALOG_PROBE_TIMEOUT_SECONDS
-        + _APP_SERVER_READY_TIMEOUT_SECONDS
-        - _CONNECT_TIMEOUT_SECONDS
-    )
-
-
-def _app_server_executable(
-    codex_path: str, app_server_command: Sequence[str]
-) -> tuple[str, tuple[str, ...]]:
-    """Return the executable and wrapper args one app-server spawn runs.
-
-    :param codex_path: The Codex CLI, run directly when no wrapper is configured.
-    :param app_server_command: A configured wrapper, ``(command, *args)``, or ``()``.
-    :returns: ``(executable, launch_args)``.
-    """
-    if not app_server_command:
-        return codex_path, ()
-    return app_server_command[0], tuple(app_server_command[1:])
 
 
 def _tagged_codex_argv0(codex_path: str, registry_tag: str) -> str:
@@ -2172,7 +2128,7 @@ class CodexNativeAppServer:
         :returns: None.
         """
         self.process_registry_tag = f"codex-native-{uuid.uuid4().hex}"
-        executable, launch_args = _app_server_executable(self.codex_path, self.app_server_command)
+        executable, *launch_args = self.app_server_command or (self.codex_path,)
         argv = _build_native_codex_app_server_argv(
             tagged_argv0=_tagged_codex_argv0(executable, self.process_registry_tag),
             listen_url=resolved_listen,

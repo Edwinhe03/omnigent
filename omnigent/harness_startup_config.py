@@ -30,7 +30,8 @@ Precedence (first non-empty wins):
 ``harness.codex-native.app_server`` (``command`` plus optional ``args``)
 wraps the Codex app-server rather than the terminal: Omnigent runs it with
 its ``-c`` overrides and ``app-server --listen …`` appended, for each
-session's app-server and launch-shape model probe. No env var outranks it.
+session's app-server. Model probes keep running Codex directly. No env var
+outranks it.
 The wrapper chooses which Codex it runs; ``OMNIGENT_CODEX_PATH`` still names the
 binary Omnigent version-checks and keys the model catalog on, so keep them the same.
 

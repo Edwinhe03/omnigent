@@ -428,7 +428,7 @@ def _no_configured_codex_app_server_command(
     Run Codex directly unless a test configures an app-server wrapper.
 
     The wrapper is read from the user's ``~/.omnigent/config.yaml``, so without
-    this every Codex launch and model probe would depend on the machine.
+    this every native Codex session launch would depend on the machine.
 
     :param monkeypatch: Fixture used to stub the config read.
     :returns: The real config reader, for a test that exercises it.
